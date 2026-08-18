@@ -5,6 +5,34 @@ import modal
 import time
 
 
+# Global cached model references to avoid redundant gRPC metadata lookups
+_wan_model_instance = None
+_flux_model_instance = None
+
+
+def reset_cached_models():
+    """Resets cached model instances (useful for testing and fresh reconnects)."""
+    global _wan_model_instance, _flux_model_instance
+    _wan_model_instance = None
+    _flux_model_instance = None
+
+
+def get_wan_model(force_refresh: bool = False):
+    global _wan_model_instance
+    if _wan_model_instance is None or force_refresh:
+        model_cls = modal.Cls.from_name("wan-backend", "WanModel")
+        _wan_model_instance = model_cls()
+    return _wan_model_instance
+
+
+def get_flux_model(force_refresh: bool = False):
+    global _flux_model_instance
+    if _flux_model_instance is None or force_refresh:
+        model_cls = modal.Cls.from_name("flux-klein-backend", "FluxKleinModel")
+        _flux_model_instance = model_cls()
+    return _flux_model_instance
+
+
 def run_remote_inference(
     resized_image,
     processed_last_image,
@@ -38,15 +66,21 @@ def run_remote_inference(
         processed_last_image.save(last_bytes_io, format="PNG")
         last_image_bytes = last_bytes_io.getvalue()
 
-    # 2. Connect to the Modal App
-    try:
-        model_cls = modal.Cls.from_name("wan-backend", "WanModel")
-        model_instance = model_cls()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not connect to Modal backend 'wan-backend'. Did you deploy it? "
-            f"Run option 2 in start.py first. Error: {e}"
-        )
+    # 2. Connect to the Modal App with automatic retry for transient network/DNS glitches
+    max_retries = 2
+    model_instance = None
+    for attempt in range(max_retries + 1):
+        try:
+            model_instance = get_wan_model(force_refresh=(attempt > 0))
+            break
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError(
+                f"Could not connect to Modal backend 'wan-backend'. Did you deploy it? "
+                f"Run option 2 in start.py first. Error: {e}"
+            )
 
     print(f"[local-backend] Initiating remote execution for seed {current_seed} on Modal...")
     
@@ -54,52 +88,64 @@ def run_remote_inference(
         progress(0, desc="Initializing remote GPU container...")
 
     video_path = None
-    try:
-        # Call the remote generator method
-        generator = model_instance.generate.remote_gen(
-            image_bytes=image_bytes,
-            last_image_bytes=last_image_bytes,
-            prompt=prompt,
-            steps=int(steps),
-            negative_prompt=negative_prompt,
-            num_frames=int(num_frames),
-            guidance_scale=float(guidance_scale),
-            guidance_scale_2=float(guidance_scale_2),
-            seed=int(current_seed),
-            scheduler_name=scheduler_name,
-            flow_shift=float(flow_shift),
-            frame_multiplier=int(frame_multiplier),
-            quality=int(quality)
-        )
+    for attempt in range(max_retries + 1):
+        try:
+            # Refresh model handle on retry
+            if attempt > 0:
+                model_instance = get_wan_model(force_refresh=True)
 
-        for event in generator:
-            etype = event.get("type")
-            if etype == "progress":
-                step = event["step"]
-                total = event["total_steps"]
-                pct = float(step) / float(total)
-                if progress:
-                    progress(pct, desc=f"Generating frames (Step {step}/{total})...")
-            elif etype == "status":
-                if progress:
-                    progress(0.95, desc=event["message"])
-            elif etype == "error":
-                raise RuntimeError(f"Remote execution failed: {event['message']}\n{event['traceback']}")
-            elif etype == "output":
-                # Create local output folder in current workspace directory and write result
-                local_dir = pathlib.Path(__file__).parent / "outputs"
-                local_dir.mkdir(parents=True, exist_ok=True)
-                local_path = local_dir / event["filename"]
-                
-                print(f"[local-backend] Writing output video: {local_path} ({len(event['video_bytes'])} bytes)")
-                with open(local_path, "wb") as f_out:
-                    f_out.write(event["video_bytes"])
-                
-                video_path = str(local_path)
+            # Call the remote generator method
+            generator = model_instance.generate.remote_gen(
+                image_bytes=image_bytes,
+                last_image_bytes=last_image_bytes,
+                prompt=prompt,
+                steps=int(steps),
+                negative_prompt=negative_prompt,
+                num_frames=int(num_frames),
+                guidance_scale=float(guidance_scale),
+                guidance_scale_2=float(guidance_scale_2),
+                seed=int(current_seed),
+                scheduler_name=scheduler_name,
+                flow_shift=float(flow_shift),
+                frame_multiplier=int(frame_multiplier),
+                quality=int(quality)
+            )
 
-    except Exception as e:
-        print(f"[local-backend] Connection/Execution error: {e}")
-        raise e
+            for event in generator:
+                etype = event.get("type")
+                if etype == "progress":
+                    step = event["step"]
+                    total = event["total_steps"]
+                    pct = float(step) / float(total)
+                    if progress:
+                        progress(pct, desc=f"Generating frames (Step {step}/{total})...")
+                elif etype == "status":
+                    if progress:
+                        progress(0.95, desc=event["message"])
+                elif etype == "error":
+                    raise RuntimeError(f"Remote execution failed: {event['message']}\n{event['traceback']}")
+                elif etype == "output":
+                    # Create local output folder in current workspace directory and write result
+                    local_dir = pathlib.Path(__file__).parent / "outputs"
+                    local_dir.mkdir(parents=True, exist_ok=True)
+                    local_path = local_dir / event["filename"]
+                    
+                    print(f"[local-backend] Writing output video: {local_path} ({len(event['video_bytes'])} bytes)")
+                    with open(local_path, "wb") as f_out:
+                        f_out.write(event["video_bytes"])
+                    
+                    video_path = str(local_path)
+            break
+
+        except Exception as e:
+            # If transient connection / DNS error on first attempt, retry once
+            is_conn_error = "getaddrinfo failed" in str(e) or "ConnectionError" in type(e).__name__ or "timeout" in str(e).lower()
+            if is_conn_error and attempt < max_retries:
+                print(f"[local-backend] Transient connection glitch ({e}), retrying in 1.5s...")
+                time.sleep(1.5)
+                continue
+            print(f"[local-backend] Connection/Execution error: {e}")
+            raise e
 
     if not video_path:
         raise RuntimeError("Modal backend finished execution but did not return any output video bytes.")
@@ -143,30 +189,50 @@ def flux_klein_remote(
         ref_img.save(ref_bytes_io, format="PNG")
         ref_images_bytes.append(ref_bytes_io.getvalue())
 
-    try:
-        model_cls = modal.Cls.from_name("flux-klein-backend", "FluxKleinModel")
-        model_instance = model_cls()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not connect to Modal backend 'flux-klein-backend'. "
-            f"Did you deploy it? Run option 3 in start.py first. Error: {e}"
-        )
+    max_retries = 2
+    model_instance = None
+    for attempt in range(max_retries + 1):
+        try:
+            model_instance = get_flux_model(force_refresh=(attempt > 0))
+            break
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError(
+                f"Could not connect to Modal backend 'flux-klein-backend'. "
+                f"Did you deploy it? Run option 3 in start.py first. Error: {e}"
+            )
 
     print(f"[local-backend] Sending request to FLUX.2 Klein model on Modal...")
-    result_bytes = model_instance.generate.remote(
-        base_image_bytes=base_image_bytes,
-        ref_images_bytes=ref_images_bytes,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        seed=int(seed),
-        steps=int(steps),
-        guidance_scale=float(guidance_scale),
-        canvas_mode=canvas_mode,
-        canvas_fit_mode=canvas_fit_mode,
-        pad_color=pad_color,
-        custom_width=int(custom_width),
-        custom_height=int(custom_height),
-    )
+    result_bytes = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                model_instance = get_flux_model(force_refresh=True)
+
+            result_bytes = model_instance.generate.remote(
+                base_image_bytes=base_image_bytes,
+                ref_images_bytes=ref_images_bytes,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                seed=int(seed),
+                steps=int(steps),
+                guidance_scale=float(guidance_scale),
+                canvas_mode=canvas_mode,
+                canvas_fit_mode=canvas_fit_mode,
+                pad_color=pad_color,
+                custom_width=int(custom_width),
+                custom_height=int(custom_height),
+            )
+            break
+        except Exception as e:
+            is_conn_error = "getaddrinfo failed" in str(e) or "ConnectionError" in type(e).__name__ or "timeout" in str(e).lower()
+            if is_conn_error and attempt < max_retries:
+                print(f"[local-backend] Transient connection glitch on FLUX ({e}), retrying in 1.5s...")
+                time.sleep(1.5)
+                continue
+            raise e
 
     # Save output image locally in outputs/ folder
     local_dir = pathlib.Path(__file__).parent / "outputs"
@@ -251,9 +317,8 @@ def start_keepalive_thread():
                 if wan_heartbeat_enabled and last_wan_activity_time > 0:
                     if (now - last_wan_activity_time) < KEEPALIVE_IDLE_WINDOW:
                         try:
-                            model_cls = modal.Cls.from_name("wan-backend", "WanModel")
-                            model_instance = model_cls()
-                            model_instance.heartbeat.remote()
+                            m = get_wan_model()
+                            m.heartbeat.remote()
                         except Exception:
                             pass
 
@@ -261,9 +326,8 @@ def start_keepalive_thread():
                 if flux_heartbeat_enabled and last_flux_activity_time > 0:
                     if (now - last_flux_activity_time) < KEEPALIVE_IDLE_WINDOW:
                         try:
-                            model_cls = modal.Cls.from_name("flux-klein-backend", "FluxKleinModel")
-                            model_instance = model_cls()
-                            model_instance.heartbeat.remote()
+                            m = get_flux_model()
+                            m.heartbeat.remote()
                         except Exception:
                             pass
             

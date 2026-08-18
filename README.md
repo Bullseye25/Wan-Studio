@@ -30,7 +30,7 @@ A generative AI creative studio combining **FLUX.2 Klein 9B** image editing with
 ## 🚀 Key Features
 
 - **2-Step Seamless Studio**: Generate or edit images in Step 1, then immediately route the output to Step 2 for video animation.
-- **Serverless Cloud GPUs**: Backends deploy to Modal on cost-effective NVIDIA A10G GPUs (24GB VRAM) with layer offloading.
+- **Serverless Cloud GPUs**: Backends deploy to Modal on NVIDIA GPUs (A100-80GB for Wan 2.2, A10G 24GB VRAM for FLUX.2 Klein).
 - **Cost-Optimized Keepalive**: Targeted model keepalive prevents unneeded GPU containers from running when idle, protecting cloud credits.
 - **RIFE Fluidity Interpolation**: Real-time optical flow frame interpolation supporting up to 64 FPS video exports.
 - **Gradio 6 Interactive Interface**: Real-time progress tracking, video timestamp scrubbing, and direct frame extraction.
@@ -43,7 +43,7 @@ A generative AI creative studio combining **FLUX.2 Klein 9B** image editing with
 .
 ├── app.py                  # Gradio 6 Web Application
 ├── backend.py              # Local Modal RPC client & keepalive manager
-├── deploy_wan.py           # Modal backend for Wan 2.2 I2V + RIFE (A10G GPU)
+├── deploy_wan.py           # Modal backend for Wan 2.2 I2V + RIFE (A100-80GB GPU)
 ├── deploy_flux_klein.py    # Modal backend for FLUX.2 Klein 9B (A10G GPU)
 ├── start.py                # Local runner & management CLI
 ├── tests/                  # Comprehensive unit & E2E test suite

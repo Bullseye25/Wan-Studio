@@ -516,7 +516,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
     )
 
     # ── Heartbeat Toggles ────────────────────────────────────────────────────
-    def toggle_wan_heartbeat():
+    async def toggle_wan_heartbeat():
         import backend
         new_state = not backend.wan_heartbeat_enabled
         set_wan_heartbeat_state(new_state)
@@ -525,7 +525,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         else:
             return gr.update(value="💤 Wan 2.2 Keep-Warm: Paused", variant="secondary")
 
-    def toggle_flux_heartbeat():
+    async def toggle_flux_heartbeat():
         import backend
         new_state = not backend.flux_heartbeat_enabled
         set_flux_heartbeat_state(new_state)
@@ -547,7 +547,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
     )
 
     # ── Periodic Client Heartbeat Timer ──────────────────────────────────────
-    def handle_client_heartbeat():
+    async def handle_client_heartbeat():
         record_frontend_heartbeat()
         return None
 

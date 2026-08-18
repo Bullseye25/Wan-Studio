@@ -11,6 +11,7 @@ outputs_vol = modal.Volume.from_name("wan-outputs", create_if_missing=True)
 # Build Modal Image with all required system packages, CUDA-enabled PyTorch, and RIFE + dependencies
 wan_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .apt_install(
         "git", "libgl1-mesa-glx", "libglib2.0-0", "build-essential", "ninja-build", 
         "libjpeg-dev", "wget", "tar", "xz-utils", "ffmpeg", "unzip"
@@ -88,10 +89,10 @@ def download_all_weights():
 
     print("\nPre-download task complete!")
 
-# Main generation execution class running on A10G GPU
+# Main generation execution class running on A100-80GB GPU (80GB VRAM)
 @app.cls(
     image=wan_image,
-    gpu="A10G",  # A10G (24GB VRAM) is cost-effective with Wan 2.2 model CPU offload
+    gpu="A100-80GB",  # A100-80GB provides 80GB VRAM to comfortably fit dual 14B transformers
     volumes={"/root/.cache/huggingface": weights_vol, "/app/outputs": outputs_vol},
     secrets=secrets,
     timeout=1800,
@@ -112,7 +113,6 @@ class WanModel:
         sys.path.append("/app")
         import torch
         from diffusers.pipelines.wan.pipeline_wan_i2v import WanImageToVideoPipeline
-        from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig, Int8WeightOnlyConfig
         import torch._dynamo
 
         # Log in if token is available
@@ -131,18 +131,14 @@ class WanModel:
         self.rife_model.load_model("/app/train_log", -1)
         self.rife_model.eval()
 
-        # 2. Load Wan 2.2 Pipeline on CPU
-        print("Loading Wan 2.2 Image-To-Video pipeline on CPU...")
+        # 2. Load Wan 2.2 Pipeline directly on GPU
+        print("Loading Wan 2.2 Image-To-Video pipeline onto A100-80GB GPU...")
         self.pipe = WanImageToVideoPipeline.from_pretrained(
             "TestOrganizationPleaseIgnore/WAMU_v2_WAN2.2_I2V_LIGHTNING",
             torch_dtype=torch.bfloat16,
             cache_dir="/root/.cache/huggingface"
-        )
+        ).to("cuda")
 
-        # 3. Enable Model CPU Offload
-        print("Enabling Model CPU Offload...")
-        self.pipe.enable_model_cpu_offload()
-            
         self.original_scheduler = self.pipe.scheduler
 
 
@@ -208,6 +204,10 @@ class WanModel:
             self.pipe.scheduler = scheduler_class.from_config(config)
 
         # 3. Setup Async pipeline run with queue
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         q = queue.Queue()
 
         def step_callback(pipe_obj, step_idx, timestep, callback_kwargs):
@@ -257,6 +257,9 @@ class WanModel:
             except queue.Empty:
                 continue
 
+        # Ensure inference thread has finished
+        thread.join(timeout=5.0)
+
         # Restore original scheduler
         self.pipe.scheduler = self.original_scheduler
 
@@ -298,6 +301,11 @@ class WanModel:
         # 6. Read and yield output bytes
         with open(video_path, "rb") as f:
             video_bytes = f.read()
+
+        # Cleanup memory
+        del raw_frames_np, final_frames
+        gc.collect()
+        torch.cuda.empty_cache()
 
         yield {"type": "output", "video_bytes": video_bytes, "filename": f"output_{seed}.mp4"}
 

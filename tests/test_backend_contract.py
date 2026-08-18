@@ -9,6 +9,12 @@ import app
 
 
 class TestLoRAFreeContracts(unittest.TestCase):
+    def setUp(self):
+        backend.reset_cached_models()
+
+    def tearDown(self):
+        backend.reset_cached_models()
+
     def test_flux_klein_remote_signature(self):
         """Verify flux_klein_remote signature does not contain any LoRA parameters."""
         sig = inspect.signature(backend.flux_klein_remote)

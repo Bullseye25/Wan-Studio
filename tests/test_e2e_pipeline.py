@@ -20,6 +20,7 @@ class TestEndToEndPipeline(unittest.TestCase):
     """
 
     def setUp(self):
+        backend.reset_cached_models()
         self.workspace_root = pathlib.Path(__file__).parent.parent
         self.test_image_path = self.workspace_root / "test_bus.png"
 
@@ -29,6 +30,9 @@ class TestEndToEndPipeline(unittest.TestCase):
             draw = ImageDraw.Draw(img)
             draw.rectangle([100, 150, 540, 350], fill=(220, 20, 60))
             img.save(self.test_image_path)
+
+    def tearDown(self):
+        backend.reset_cached_models()
 
     @patch("modal.Cls.from_name")
     def test_full_take_picture_modify_animate_workflow(self, mock_modal_cls):
