@@ -24,9 +24,9 @@ def main():
     print("[Options]")
     print("1. Start Wan 2.2 Studio frontend locally")
     print("2. Deploy/Redeploy Wan 2.2 backend to Modal")
-    print("3. Deploy/Redeploy FLUX.2 Klein backend to Modal")
+    print("3. Deploy/Redeploy Qwen Image Edit backend to Modal")
     print("4. Pre-cache Wan 2.2 model weights on Modal")
-    print("5. Pre-cache FLUX.2 Klein weights on Modal")
+    print("5. Pre-cache Qwen Image Edit model weights on Modal")
     print("6. Start frontend on Local Network (mobile access)")
     print("7. Reconnect/Setup Modal account (runs 'modal setup')")
 
@@ -68,16 +68,16 @@ def main():
         sys.exit(0)
 
     elif choice == "3":
-        print("\n---> Deploying FLUX.2 Klein backend to Modal...")
+        print("\n---> Deploying Qwen Image Edit backend to Modal...")
         try:
             import modal
         except ImportError:
             install_package("modal")
 
-        cmd = [sys.executable, "-m", "modal", "deploy", "deploy_flux_klein.py"]
+        cmd = [sys.executable, "-m", "modal", "deploy", "deploy_qwen.py"]
         try:
             subprocess.run(cmd, check=True)
-            print("\n✓ FLUX.2 Klein backend deployed to Modal!")
+            print("\n✓ Qwen Image Edit backend deployed to Modal!")
         except subprocess.CalledProcessError as e:
             print(f"\n❌ Deployment failed: {e}")
             sys.exit(1)
@@ -100,16 +100,16 @@ def main():
         sys.exit(0)
 
     elif choice == "5":
-        print("\n---> Caching FLUX.2 Klein weights in Modal volume...")
+        print("\n---> Caching Qwen Image Edit model weights in Modal volume...")
         try:
             import modal
         except ImportError:
             install_package("modal")
 
-        cmd = [sys.executable, "-m", "modal", "run", "deploy_flux_klein.py::download_flux_weights"]
+        cmd = [sys.executable, "-m", "modal", "run", "deploy_qwen.py::download_qwen_weights"]
         try:
             subprocess.run(cmd, check=True)
-            print("\n✓ FLUX.2 Klein weights cached successfully!")
+            print("\n✓ Qwen Image Edit model weights cached successfully!")
         except subprocess.CalledProcessError as e:
             print(f"\n❌ Cache preloading failed: {e}")
             sys.exit(1)

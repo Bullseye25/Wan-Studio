@@ -129,18 +129,18 @@ class TestHeartbeatState(unittest.TestCase):
         backend.set_wan_heartbeat_state(False)
         self.assertFalse(backend.wan_heartbeat_enabled)
 
-        backend.set_flux_heartbeat_state(True)
-        self.assertTrue(backend.flux_heartbeat_enabled)
-        backend.set_flux_heartbeat_state(False)
-        self.assertFalse(backend.flux_heartbeat_enabled)
+        backend.set_qwen_heartbeat_state(True)
+        self.assertTrue(backend.qwen_heartbeat_enabled)
+        backend.set_qwen_heartbeat_state(False)
+        self.assertFalse(backend.qwen_heartbeat_enabled)
 
     def test_activity_tracking(self):
         """Activity recording functions should update timestamps."""
         backend.record_wan_activity()
         self.assertGreater(backend.last_wan_activity_time, 0)
 
-        backend.record_flux_activity()
-        self.assertGreater(backend.last_flux_activity_time, 0)
+        backend.record_qwen_activity()
+        self.assertGreater(backend.last_qwen_activity_time, 0)
 
         backend.record_frontend_heartbeat()
         self.assertGreater(backend.last_frontend_heartbeat_time, 0)

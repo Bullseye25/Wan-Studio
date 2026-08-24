@@ -2,18 +2,18 @@ import os
 import modal
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Modal App: flux-klein-backend
-# Provides GPU-accelerated image editing and generation via FLUX.2 Klein 9B
+# Modal App: qwen-image-backend
+# Provides GPU-accelerated image editing and generation via Qwen Image Edit Rapid AIO
+# Cloned from: https://huggingface.co/spaces/davidharryv/qwen-image-edit-rapid-aio-nsfw-static
 # ─────────────────────────────────────────────────────────────────────────────
 
-app = modal.App("flux-klein-backend")
+app = modal.App("qwen-image-backend")
 
 weights_vol = modal.Volume.from_name("wan-cache", create_if_missing=True)
 outputs_vol = modal.Volume.from_name("wan-outputs", create_if_missing=True)
 
 # Build image with Python 3.12, CUDA 12.4
-# We clone the Hugging Face space inside the container so all local LoRAs are available
-flux_image = (
+qwen_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .apt_install(
@@ -22,7 +22,7 @@ flux_image = (
     )
     .run_commands(
         "git lfs install",
-        "git clone https://huggingface.co/spaces/M3st3rJ4k3l/FLUX.2-Klein-Multi-LoRA /flux"
+        "git clone https://huggingface.co/spaces/davidharryv/qwen-image-edit-rapid-aio-nsfw-static /qwen"
     )
     .pip_install(
         "torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0",
@@ -58,68 +58,55 @@ def get_credentials():
 
 hf_token_local = get_credentials()
 
-# Build the secrets list from credentials.txt token.
-# If no token found, deploy continues but gated model access will fail at runtime.
+# Build the secrets list from credentials.txt token if present.
 secrets = []
 if hf_token_local:
     secrets.append(modal.Secret.from_dict({"HF_TOKEN": hf_token_local}))
-else:
-    print(
-        "[deploy_flux_klein] WARNING: No HF_TOKEN found in credentials.txt.\n"
-        "  The FLUX.2 Klein 9B model is gated and requires authentication.\n"
-        "  Fix: create a file at /Users/raza/Documents/Wan/credentials.txt containing:\n"
-        "       HF_TOKEN=hf_your_token_here\n"
-        "  Then redeploy (option 3) and re-cache weights (option 5).\n"
-        "  Get your token from: https://huggingface.co/settings/tokens"
-    )
+
 
 # ─── Weight Caching ───────────────────────────────────────────────────────────
 @app.function(
-    image=flux_image,
+    image=qwen_image,
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=7200,
 )
-def download_flux_weights():
+def download_qwen_weights():
     import os
     import huggingface_hub
     from huggingface_hub import snapshot_download
 
     hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise RuntimeError(
-            "HF_TOKEN is not set. Cannot download gated model.\n"
-            "Fix: create credentials.txt with HF_TOKEN=hf_... next to deploy_flux_klein.py, OR run:\n"
-            "     modal secret create huggingface-secret HF_TOKEN=hf_your_token_here"
-        )
+    if hf_token:
+        try:
+            huggingface_hub.login(token=hf_token)
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            os.environ["HF_HUB_TOKEN"] = hf_token
+        except Exception as e:
+            print(f"[deploy_qwen] Note: Hugging Face login skipped: {e}")
 
-    # Login AND set the env var so every huggingface_hub call picks it up
-    try:
-        huggingface_hub.login(token=hf_token)
-    except Exception as e:
-        raise RuntimeError(
-            f"Hugging Face authentication failed with the token in credentials.txt ({e}).\n"
-            f"Please update credentials.txt with a valid HF Token from https://huggingface.co/settings/tokens\n"
-            f"and make sure you accepted the model agreement at https://huggingface.co/black-forest-labs/FLUX.2-klein-9B"
-        ) from e
+    print("Pre-downloading Qwen Image Edit model weights...")
+    for model_id in ["Qwen/Qwen-Image-Edit-2511", "Qwen/Qwen-Image-Edit"]:
+        try:
+            print(f"Downloading {model_id}...")
+            snapshot_download(
+                repo_id=model_id,
+                token=hf_token,
+                cache_dir="/root/.cache/huggingface"
+            )
+            print(f"Cached {model_id} successfully!")
+            break
+        except Exception as e:
+            print(f"Attempt for {model_id} failed: {e}. Trying fallback...")
 
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-    os.environ["HF_HUB_TOKEN"] = hf_token
-
-    print("Pre-downloading FLUX.2-klein-9B base model...")
-    snapshot_download(
-        repo_id="black-forest-labs/FLUX.2-klein-9B",
-        token=hf_token,
-        cache_dir="/root/.cache/huggingface"
-    )
-    print("\nFLUX.2 Klein weights cached successfully!")
+    print("\nQwen Image Edit weights cached successfully!")
 
 
 # ─── Class Definition ─────────────────────────────────────────────────────────
 
 @app.cls(
-    image=flux_image,
-    gpu="A10G",  # 9B parameters (~18GB) fits in 24GB VRAM at ~1/4 the cost of A100
+    image=qwen_image,
+    gpu="A100-80GB",  # 20B parameters (~40GB in bf16) runs comfortably and rapidly on 80GB VRAM
     volumes={
         "/root/.cache/huggingface": weights_vol,
         "/outputs": outputs_vol,
@@ -129,10 +116,10 @@ def download_flux_weights():
     min_containers=0,
     scaledown_window=60,
 )
-class FluxKleinModel:
+class QwenImageEditModel:
     @modal.method()
     def heartbeat(self):
-        print("[FluxKleinModel] Heartbeat received.")
+        print("[QwenImageEditModel] Heartbeat received.")
         return "alive"
 
     @modal.enter()
@@ -143,45 +130,54 @@ class FluxKleinModel:
         import huggingface_hub
 
         # Add cloned Space to Python path
-        sys.path.insert(0, "/flux")
+        sys.path.insert(0, "/qwen")
 
         hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            raise RuntimeError(
-                "HF_TOKEN is not set in the Modal container. "
-                "Cannot load gated model black-forest-labs/FLUX.2-klein-9B.\n"
-                "Fix: create credentials.txt with HF_TOKEN=hf_... next to deploy_flux_klein.py, OR run:\n"
-                "     modal secret create huggingface-secret HF_TOKEN=hf_your_token_here"
-            )
+        if hf_token:
+            try:
+                huggingface_hub.login(token=hf_token)
+                os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+                os.environ["HF_HUB_TOKEN"] = hf_token
+            except Exception as e:
+                print(f"[QwenImageEditModel] Note: Hugging Face login skipped: {e}")
 
-        # Login AND expose token via all env vars HF libraries check
-        try:
-            huggingface_hub.login(token=hf_token)
-        except Exception as e:
-            raise RuntimeError(
-                f"Hugging Face authentication failed in FluxKleinModel: {e}.\n"
-                f"Please update credentials.txt with a valid HF Token from https://huggingface.co/settings/tokens\n"
-                f"and make sure you accepted the model agreement at https://huggingface.co/black-forest-labs/FLUX.2-klein-9B"
-            ) from e
-
-        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-        os.environ["HF_HUB_TOKEN"] = hf_token
-
-        from diffusers import Flux2KleinPipeline
+        from diffusers import QwenImageEditPlusPipeline, DiffusionPipeline
 
         dtype = torch.bfloat16
 
-        print("[FluxKleinModel] Loading FLUX.2 Klein 9B pipeline...")
-        self.pipe = Flux2KleinPipeline.from_pretrained(
-            "black-forest-labs/FLUX.2-klein-9B",
-            torch_dtype=dtype,
-            token=hf_token,
-            cache_dir="/root/.cache/huggingface",
-        )
-        # Offload model components to CPU RAM to stay within A10G 24GB VRAM
+        print("[QwenImageEditModel] Loading Qwen Image Edit pipeline...")
+        pipe = None
+        for model_id in ["Qwen/Qwen-Image-Edit-2511", "Qwen/Qwen-Image-Edit"]:
+            try:
+                print(f"Trying to load {model_id}...")
+                pipe = QwenImageEditPlusPipeline.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    token=hf_token,
+                    cache_dir="/root/.cache/huggingface",
+                )
+                print(f"Loaded {model_id} successfully!")
+                break
+            except Exception as e:
+                print(f"Failed to load {model_id} with QwenImageEditPlusPipeline: {e}")
+                try:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        model_id,
+                        torch_dtype=dtype,
+                        token=hf_token,
+                        cache_dir="/root/.cache/huggingface",
+                    )
+                    break
+                except Exception as e2:
+                    print(f"Failed fallback load {model_id}: {e2}")
+
+        if pipe is None:
+            raise RuntimeError("Could not load any Qwen Image Edit pipeline model.")
+
+        self.pipe = pipe
         self.pipe.enable_model_cpu_offload()
 
-        print("[FluxKleinModel] Pipeline loaded successfully with CPU offloading.")
+        print("[QwenImageEditModel] Pipeline loaded successfully with CPU offloading.")
 
     @modal.method()
     def generate(
@@ -191,25 +187,17 @@ class FluxKleinModel:
         prompt: str,
         negative_prompt: str = "",
         seed: int = -1,
-        steps: int = 25,
-        guidance_scale: float = 3.5,
-        canvas_mode: str = "Scale base image",
-        canvas_fit_mode: str = "Cover",
-        pad_color: str = "#000000",
+        steps: int = 20,
+        true_cfg_scale: float = 4.0,
+        guidance_scale: float = 1.0,
         custom_width: int = 1024,
         custom_height: int = 1024,
     ) -> bytes:
-        import sys
-        import os
         import io
         import gc
         import random
         import torch
         from PIL import Image
-
-        # Import helper utilities from the cloned space
-        sys.path.insert(0, "/flux")
-        from image_utils import fit_to_canvas, compute_canvas_dimensions
 
         # Warm-up clean
         gc.collect()
@@ -218,27 +206,36 @@ class FluxKleinModel:
         # Load input images
         base_pil = Image.open(io.BytesIO(base_image_bytes)).convert("RGB")
         ref_pils = [Image.open(io.BytesIO(b)).convert("RGB") for b in ref_images_bytes]
-        pil_images = [base_pil] + ref_pils
-
-        # Compute canvas size
-        width, height = compute_canvas_dimensions(pil_images[0], canvas_mode, custom_width, custom_height)
-        processed = [fit_to_canvas(img, width, height, canvas_fit_mode, pad_color) for img in pil_images]
-        image_input = processed if len(processed) > 1 else processed[0]
+        images_input = [base_pil] + ref_pils if ref_pils else base_pil
 
         actual_seed = random.randint(0, 2**31 - 1) if seed < 0 else seed
         generator = torch.Generator(device="cuda").manual_seed(actual_seed)
 
-        print(f"[FluxKleinModel] Running inference (seed={actual_seed}, steps={steps}, size={width}x{height})...")
+        print(f"[QwenImageEditModel] Running inference (seed={actual_seed}, steps={steps}, prompt='{prompt[:50]}...')...")
+
         pipe_kwargs = {
-            "image": image_input,
+            "image": images_input,
             "prompt": prompt,
-            "width": width,
-            "height": height,
             "num_inference_steps": int(steps),
-            "guidance_scale": float(guidance_scale),
             "generator": generator,
         }
-        result = self.pipe(**pipe_kwargs).images[0]
+
+        # Check supported parameters on the loaded pipeline
+        import inspect
+        sig = inspect.signature(self.pipe.__call__)
+        if "negative_prompt" in sig.parameters:
+            pipe_kwargs["negative_prompt"] = negative_prompt if negative_prompt else ""
+        if "true_cfg_scale" in sig.parameters:
+            pipe_kwargs["true_cfg_scale"] = float(true_cfg_scale)
+        if "guidance_scale" in sig.parameters:
+            pipe_kwargs["guidance_scale"] = float(guidance_scale)
+        if "width" in sig.parameters and custom_width > 0:
+            pipe_kwargs["width"] = int(custom_width)
+        if "height" in sig.parameters and custom_height > 0:
+            pipe_kwargs["height"] = int(custom_height)
+
+        with torch.inference_mode():
+            result = self.pipe(**pipe_kwargs).images[0]
 
         # Cleanup
         gc.collect()
@@ -252,16 +249,15 @@ class FluxKleinModel:
             modal_output_dir.mkdir(parents=True, exist_ok=True)
             
             file_seed = seed if seed >= 0 else actual_seed
-            filename = f"flux_{int(time.time())}_{file_seed}.jpg"
+            filename = f"qwen_{int(time.time())}_{file_seed}.jpg"
             modal_path = modal_output_dir / filename
             
             result.save(modal_path, format="JPEG", quality=95)
-            print(f"[FluxKleinModel] Saved copy to Modal Volume: {modal_path}")
+            print(f"[QwenImageEditModel] Saved copy to Modal Volume: {modal_path}")
             
-            # Commit the written file to persistent storage
             outputs_vol.commit()
         except Exception as e:
-            print(f"[FluxKleinModel] Warning: Could not save copy to Modal Volume: {e}")
+            print(f"[QwenImageEditModel] Warning: Could not save copy to Modal Volume: {e}")
 
         out_buf = io.BytesIO()
         result.save(out_buf, format="JPEG", quality=95)

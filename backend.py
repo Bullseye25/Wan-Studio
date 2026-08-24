@@ -7,14 +7,14 @@ import time
 
 # Global cached model references to avoid redundant gRPC metadata lookups
 _wan_model_instance = None
-_flux_model_instance = None
+_qwen_model_instance = None
 
 
 def reset_cached_models():
     """Resets cached model instances (useful for testing and fresh reconnects)."""
-    global _wan_model_instance, _flux_model_instance
+    global _wan_model_instance, _qwen_model_instance
     _wan_model_instance = None
-    _flux_model_instance = None
+    _qwen_model_instance = None
 
 
 def get_wan_model(force_refresh: bool = False):
@@ -25,12 +25,12 @@ def get_wan_model(force_refresh: bool = False):
     return _wan_model_instance
 
 
-def get_flux_model(force_refresh: bool = False):
-    global _flux_model_instance
-    if _flux_model_instance is None or force_refresh:
-        model_cls = modal.Cls.from_name("flux-klein-backend", "FluxKleinModel")
-        _flux_model_instance = model_cls()
-    return _flux_model_instance
+def get_qwen_model(force_refresh: bool = False):
+    global _qwen_model_instance
+    if _qwen_model_instance is None or force_refresh:
+        model_cls = modal.Cls.from_name("qwen-image-backend", "QwenImageEditModel")
+        _qwen_model_instance = model_cls()
+    return _qwen_model_instance
 
 
 def run_remote_inference(
@@ -155,27 +155,28 @@ def run_remote_inference(
     return video_path, f"task_{current_seed}"
 
 
-def flux_klein_remote(
+def qwen_image_edit_remote(
     base_image: "PIL.Image.Image",  # type: ignore
-    ref_images: list["PIL.Image.Image"],  # type: ignore
-    prompt: str,
+    ref_images: list["PIL.Image.Image"] = None,  # type: ignore
+    prompt: str = "",
     negative_prompt: str = "",
     seed: int = -1,
-    steps: int = 25,
-    guidance_scale: float = 3.5,
-    canvas_mode: str = "Scale base image",
-    canvas_fit_mode: str = "Cover",
-    pad_color: str = "#000000",
+    steps: int = 20,
+    true_cfg_scale: float = 4.0,
+    guidance_scale: float = 1.0,
     custom_width: int = 1024,
     custom_height: int = 1024,
 ) -> bytes:
     """
-    Forwards an image-generation request to the Modal FluxKleinModel.generate remote method.
+    Forwards an image-generation/editing request to the Modal QwenImageEditModel.generate remote method.
     Saves the output image to the local outputs/ folder and returns the JPEG bytes.
     """
     import io
     import time
     import random
+
+    if ref_images is None:
+        ref_images = []
 
     # Convert base image to bytes
     base_bytes_io = io.BytesIO()
@@ -193,23 +194,23 @@ def flux_klein_remote(
     model_instance = None
     for attempt in range(max_retries + 1):
         try:
-            model_instance = get_flux_model(force_refresh=(attempt > 0))
+            model_instance = get_qwen_model(force_refresh=(attempt > 0))
             break
         except Exception as e:
             if attempt < max_retries:
                 time.sleep(1.0)
                 continue
             raise RuntimeError(
-                f"Could not connect to Modal backend 'flux-klein-backend'. "
+                f"Could not connect to Modal backend 'qwen-image-backend'. "
                 f"Did you deploy it? Run option 3 in start.py first. Error: {e}"
             )
 
-    print(f"[local-backend] Sending request to FLUX.2 Klein model on Modal...")
+    print(f"[local-backend] Sending request to Qwen Image Edit model on Modal...")
     result_bytes = None
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
-                model_instance = get_flux_model(force_refresh=True)
+                model_instance = get_qwen_model(force_refresh=True)
 
             result_bytes = model_instance.generate.remote(
                 base_image_bytes=base_image_bytes,
@@ -218,10 +219,8 @@ def flux_klein_remote(
                 negative_prompt=negative_prompt,
                 seed=int(seed),
                 steps=int(steps),
+                true_cfg_scale=float(true_cfg_scale),
                 guidance_scale=float(guidance_scale),
-                canvas_mode=canvas_mode,
-                canvas_fit_mode=canvas_fit_mode,
-                pad_color=pad_color,
                 custom_width=int(custom_width),
                 custom_height=int(custom_height),
             )
@@ -229,7 +228,7 @@ def flux_klein_remote(
         except Exception as e:
             is_conn_error = "getaddrinfo failed" in str(e) or "ConnectionError" in type(e).__name__ or "timeout" in str(e).lower()
             if is_conn_error and attempt < max_retries:
-                print(f"[local-backend] Transient connection glitch on FLUX ({e}), retrying in 1.5s...")
+                print(f"[local-backend] Transient connection glitch on Qwen ({e}), retrying in 1.5s...")
                 time.sleep(1.5)
                 continue
             raise e
@@ -239,15 +238,15 @@ def flux_klein_remote(
     local_dir.mkdir(parents=True, exist_ok=True)
     
     file_seed = seed if seed >= 0 else random.randint(100000, 999999)
-    filename = f"flux_{int(time.time())}_{file_seed}.jpg"
+    filename = f"qwen_{int(time.time())}_{file_seed}.jpg"
     local_path = local_dir / filename
 
     print(f"[local-backend] Writing output image: {local_path} ({len(result_bytes)} bytes)")
     with open(local_path, "wb") as f_out:
         f_out.write(result_bytes)
 
-    # Record FLUX activity
-    record_flux_activity()
+    # Record Qwen activity
+    record_qwen_activity()
 
     return result_bytes
 
@@ -256,12 +255,12 @@ def flux_klein_remote(
 
 last_frontend_heartbeat_time = time.time()
 last_wan_activity_time = 0.0
-last_flux_activity_time = 0.0
+last_qwen_activity_time = 0.0
 
 # Heartbeats default to False (Paused) to prevent unintended Modal GPU credit burn.
 # Users can toggle keepalive on for active multi-generation sessions.
 wan_heartbeat_enabled = False
-flux_heartbeat_enabled = False
+qwen_heartbeat_enabled = False
 
 # Maximum idle duration (3 minutes) to keep a warm container alive after generation
 KEEPALIVE_IDLE_WINDOW = 180.0
@@ -277,9 +276,9 @@ def record_wan_activity():
     last_wan_activity_time = time.time()
 
 
-def record_flux_activity():
-    global last_flux_activity_time
-    last_flux_activity_time = time.time()
+def record_qwen_activity():
+    global last_qwen_activity_time
+    last_qwen_activity_time = time.time()
 
 
 def set_wan_heartbeat_state(enabled: bool):
@@ -288,10 +287,10 @@ def set_wan_heartbeat_state(enabled: bool):
     print(f"[backend] Wan heartbeat state toggled: {enabled}")
 
 
-def set_flux_heartbeat_state(enabled: bool):
-    global flux_heartbeat_enabled
-    flux_heartbeat_enabled = enabled
-    print(f"[backend] FLUX.2 Klein heartbeat state toggled: {enabled}")
+def set_qwen_heartbeat_state(enabled: bool):
+    global qwen_heartbeat_enabled
+    qwen_heartbeat_enabled = enabled
+    print(f"[backend] Qwen Image Edit heartbeat state toggled: {enabled}")
 
 
 def start_keepalive_thread():
@@ -322,11 +321,11 @@ def start_keepalive_thread():
                         except Exception:
                             pass
 
-                # 2. Ping FLUX.2 Klein backend ONLY if enabled and recently used
-                if flux_heartbeat_enabled and last_flux_activity_time > 0:
-                    if (now - last_flux_activity_time) < KEEPALIVE_IDLE_WINDOW:
+                # 2. Ping Qwen backend ONLY if enabled and recently used
+                if qwen_heartbeat_enabled and last_qwen_activity_time > 0:
+                    if (now - last_qwen_activity_time) < KEEPALIVE_IDLE_WINDOW:
                         try:
-                            m = get_flux_model()
+                            m = get_qwen_model()
                             m.heartbeat.remote()
                         except Exception:
                             pass

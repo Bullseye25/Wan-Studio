@@ -14,7 +14,7 @@ class TestEndToEndPipeline(unittest.TestCase):
     """
     End-to-End Workflow Test:
     1. Take a picture (from workspace 'test_bus.png' or freshly generated image).
-    2. Modify it via Step 1 (FLUX.2 Klein generation/editing flow).
+    2. Modify it via Step 1 (Qwen Image Edit Rapid AIO generation/editing flow).
     3. Feed modified image into Step 2 (Wan 2.2 Video Generator).
     4. Animate with Wan 2.2 I2V and verify output video generation and frame extraction.
     """
@@ -45,43 +45,45 @@ class TestEndToEndPipeline(unittest.TestCase):
         # -------------------------------------------------------------
         print("\n[Step A] Taking / Loading initial picture...")
         self.assertTrue(self.test_image_path.exists(), "Test picture must exist")
-        initial_pic = Image.open(self.test_image_path).convert("RGB")
+        with Image.open(self.test_image_path) as img:
+            initial_pic = img.convert("RGB")
         orig_w, orig_h = initial_pic.size
         print(f"  [OK] Initial picture loaded successfully: {orig_w}x{orig_h} (RGB)")
         self.assertGreater(orig_w, 0)
         self.assertGreater(orig_h, 0)
 
         # -------------------------------------------------------------
-        # STEP 2: Modify Picture via Step 1 (FLUX.2 Klein)
+        # STEP 2: Modify Picture via Step 1 (Qwen Image Edit)
         # -------------------------------------------------------------
-        print("\n[Step B] Modifying picture via Step 1 (FLUX.2 Klein Image Studio)...")
+        print("\n[Step B] Modifying picture via Step 1 (Qwen Image Edit Studio)...")
         
         # Prepare a modified image that the mock Modal backend will return
         modified_synthetic = initial_pic.copy().resize((1024, 768))
         draw = ImageDraw.Draw(modified_synthetic)
-        draw.text((50, 50), "FLUX MODIFIED", fill=(255, 255, 0))
+        draw.text((50, 50), "QWEN MODIFIED", fill=(255, 255, 0))
         
         mod_bytes_io = io.BytesIO()
         modified_synthetic.save(mod_bytes_io, format="JPEG", quality=95)
-        mock_flux_bytes = mod_bytes_io.getvalue()
+        mock_qwen_bytes = mod_bytes_io.getvalue()
 
-        mock_flux_instance = MagicMock()
-        mock_flux_instance.generate.remote.return_value = mock_flux_bytes
+        mock_qwen_instance = MagicMock()
+        mock_qwen_instance.generate.remote.return_value = mock_qwen_bytes
 
-        # Configure Modal Cls dispatcher for flux-klein-backend
+        mock_wan_instance = MagicMock()
+
+        # Configure Modal Cls dispatcher
         def modal_cls_router(app_name, cls_name):
-            if app_name == "flux-klein-backend":
-                return MagicMock(return_value=mock_flux_instance)
+            if app_name == "qwen-image-backend":
+                return MagicMock(return_value=mock_qwen_instance)
             elif app_name == "wan-backend":
                 return MagicMock(return_value=mock_wan_instance)
             raise ValueError(f"Unknown app: {app_name}")
 
-        mock_wan_instance = MagicMock()
         mock_modal_cls.side_effect = modal_cls_router
 
         # Run Step 1 generate/modify
         edit_prompt = "transform the bus into a sleek cyber-bus at sunset, neon reflections"
-        modified_pil, used_seed = app.run_flux_generate(
+        modified_pil, used_seed = app.run_qwen_generate(
             base_image=initial_pic,
             ref_image_1=None,
             ref_image_2=None,
@@ -89,13 +91,11 @@ class TestEndToEndPipeline(unittest.TestCase):
             negative_prompt="blurry, distorted",
             seed=999,
             randomize_seed=False,
-            steps=25,
-            guidance_scale=3.5,
-            canvas_mode="Landscape (1024x768)",
-            canvas_fit_mode="Cover",
+            steps=20,
+            true_cfg_scale=4.0,
+            guidance_scale=1.0,
             custom_width=1024,
             custom_height=768,
-            pad_color="#000000",
         )
 
         self.assertIsInstance(modified_pil, Image.Image)
@@ -150,20 +150,22 @@ class TestEndToEndPipeline(unittest.TestCase):
         print(f"  [OK] File size: {os.path.getsize(video_path)} bytes")
 
         # -------------------------------------------------------------
-        # STEP 5: Verification of Sizing & Constraints
+        # STEP 5: Verify Video Dimensional & Frame Constraints
         # -------------------------------------------------------------
         print("\n[Step E] Verifying internal dimensions and constraints...")
-        resized_for_wan = app.resize_image(video_input_img)
-        w, h = resized_for_wan.size
+        resized_for_model = app.resize_image(modified_pil)
+        w, h = resized_for_model.size
         print(f"  [OK] Wan input resolution: {w}x{h}")
-        self.assertEqual(w % 16, 0, "Wan width must be a multiple of 16")
-        self.assertEqual(h % 16, 0, "Wan height must be a multiple of 16")
-        self.assertLessEqual(w, 832)
-        self.assertGreaterEqual(h, 480)
+        self.assertEqual(w % app.MULTIPLE_OF, 0)
+        self.assertEqual(h % app.MULTIPLE_OF, 0)
+        self.assertLessEqual(w, app.MAX_DIM)
+        self.assertGreaterEqual(w, app.MIN_DIM)
+        self.assertLessEqual(h, app.MAX_DIM)
+        self.assertGreaterEqual(h, app.MIN_DIM)
 
-        num_frames = app.get_num_frames(3.5)
-        print(f"  [OK] Wan frame calculation for 3.5s: {num_frames} frames")
-        self.assertEqual(num_frames, 57)
+        expected_frames = app.get_num_frames(3.5)
+        print(f"  [OK] Wan frame calculation for 3.5s: {expected_frames} frames")
+        self.assertEqual(expected_frames, 57)
 
         print("\n" + "=" * 70)
         print(" [E2E Test] ALL WORKFLOW STEPS PASSED SUCCESSFULLY!")

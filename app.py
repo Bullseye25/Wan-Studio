@@ -8,8 +8,8 @@ from PIL import Image
 
 # Import remote inference helpers
 from backend import (
-    run_remote_inference, flux_klein_remote, start_keepalive_thread,
-    record_frontend_heartbeat, set_wan_heartbeat_state, set_flux_heartbeat_state
+    run_remote_inference, qwen_image_edit_remote, start_keepalive_thread,
+    record_frontend_heartbeat, set_wan_heartbeat_state, set_qwen_heartbeat_state
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -135,9 +135,8 @@ def get_num_frames(duration_seconds: float):
     ))
 
 
-# ── FLUX.2 Klein ──────────────────────────────────────────────────────────────
-
-def run_flux_generate(
+# ── Qwen Image Edit Rapid AIO ────────────────────────────────────────────────
+def run_qwen_generate(
     base_image,
     ref_image_1,
     ref_image_2,
@@ -146,43 +145,39 @@ def run_flux_generate(
     seed,
     randomize_seed,
     steps,
+    true_cfg_scale,
     guidance_scale,
-    canvas_mode,
-    canvas_fit_mode,
     custom_width,
     custom_height,
-    pad_color,
     progress=gr.Progress(track_tqdm=True),
 ):
     if base_image is None and (not prompt or not prompt.strip()):
-        raise gr.Error("Please upload a base image or enter a prompt.")
+        raise gr.Error("Please upload an image or enter an editing prompt.")
 
-    progress(0.05, desc="Preparing request for FLUX.2 Klein on Modal...")
+    progress(0.05, desc="Preparing request for Qwen Image Edit on Modal...")
 
     ref_images = [r for r in [ref_image_1, ref_image_2] if r is not None]
     actual_seed = random.randint(0, MAX_SEED) if randomize_seed else int(seed)
 
-    # If no base image, use a blank white image (text-to-image mode)
+    # If no base image, use a blank canvas (pure text-to-image mode)
     if base_image is None:
         base_image = Image.new("RGB", (1024, 1024), (255, 255, 255))
 
     try:
-        result_bytes = flux_klein_remote(
+        result_bytes = qwen_image_edit_remote(
             base_image=base_image,
             ref_images=ref_images,
             prompt=prompt.strip() if prompt else "",
             negative_prompt=negative_prompt.strip() if negative_prompt else "",
             seed=actual_seed,
             steps=int(steps),
+            true_cfg_scale=float(true_cfg_scale),
             guidance_scale=float(guidance_scale),
-            canvas_mode=canvas_mode,
-            canvas_fit_mode=canvas_fit_mode,
-            pad_color=pad_color,
             custom_width=int(custom_width),
             custom_height=int(custom_height),
         )
     except Exception as e:
-        raise gr.Error(f"FLUX.2 Klein generation failed: {e}")
+        raise gr.Error(f"Qwen Image Edit generation failed: {e}")
 
     progress(0.95, desc="Receiving result image...")
     result_pil = Image.open(io.BytesIO(result_bytes)).convert("RGB")
@@ -278,7 +273,7 @@ body, .gradio-container {
     margin-bottom: 16px !important;
 }
 
-.flux-panel {
+.qwen-panel {
     background: linear-gradient(145deg, rgba(99,102,241,0.12), rgba(139,92,246,0.08));
     border: 1px solid rgba(139,92,246,0.35);
     border-radius: 14px;
@@ -321,21 +316,21 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
 
     gr.Markdown("## 🎨 Wan 2.2 Studio", elem_classes="main-title")
     gr.Markdown(
-        "**Step 1 🖼️** — Edit or generate images with **FLUX.2 Klein 9B**   |   "
+        "**Step 1 🖼️** — Edit or generate images with **Qwen Image Edit Rapid AIO**   |   "
         "**Step 2 🎬** — Animate with **Wan 2.2** on Modal GPU",
         elem_classes="subtitle"
     )
 
     with gr.Row():
         wan_hb_btn = gr.Button("💤 Wan 2.2 Keep-Warm: Paused", variant="secondary", scale=1)
-        flux_hb_btn = gr.Button("💤 FLUX.2 Keep-Warm: Paused", variant="secondary", scale=1)
+        qwen_hb_btn = gr.Button("💤 Qwen Keep-Warm: Paused", variant="secondary", scale=1)
 
-    # ── Step 1: FLUX.2 Klein Image Generator / Editor ─────────────────────────
-    with gr.Group(elem_classes="flux-panel"):
-        gr.Markdown("### 🖼️ Step 1 — FLUX.2 Klein 9B · Image Generator & Editor", elem_classes="section-header")
+    # ── Step 1: Qwen Image Edit Rapid AIO Generator / Editor ───────────────────
+    with gr.Group(elem_classes="qwen-panel"):
+        gr.Markdown("### 🖼️ Step 1 — Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
         gr.Markdown(
-            "Upload a **base image** to edit, or leave it empty for pure text-to-image. "
-            "Add optional **reference images** for face swap / pose transfer. "
+            "Upload an **image to edit** (or leave empty for text-to-image). "
+            "Optionally add **reference images** for character / style transfer. "
             "Outputs save automatically to `./outputs/`.",
             elem_classes="step-hint"
         )
@@ -343,64 +338,56 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         with gr.Row():
             # ── Left column: inputs ───────────────────────────────────────────
             with gr.Column(scale=1):
-                flux_base_image = gr.Image(
+                qwen_base_image = gr.Image(
                     type="pil", label="📷 Base Image (optional — for image editing)",
                     sources=["upload", "clipboard"]
                 )
                 with gr.Row():
-                    flux_ref_image_1 = gr.Image(
-                        type="pil", label="🔗 Reference 1 (face swap / pose)",
+                    qwen_ref_image_1 = gr.Image(
+                        type="pil", label="🔗 Reference 1 (optional)",
                         sources=["upload", "clipboard"], scale=1
                     )
-                    flux_ref_image_2 = gr.Image(
+                    qwen_ref_image_2 = gr.Image(
                         type="pil", label="🔗 Reference 2 (optional)",
                         sources=["upload", "clipboard"], scale=1
                     )
 
-                flux_prompt = gr.Textbox(
-                    label="Prompt",
-                    placeholder="Describe what you want to generate or how to edit the image...",
+                qwen_prompt = gr.Textbox(
+                    label="Prompt / Instruction",
+                    placeholder="Describe how to edit the image or what to generate...",
                     lines=3,
                 )
 
-                flux_negative_prompt = gr.Textbox(
+                qwen_negative_prompt = gr.Textbox(
                     label="Negative Prompt (optional)",
-                    placeholder="Describe what to avoid in the generated image...",
+                    placeholder="Describe what to avoid in the edited image...",
                     lines=2,
                 )
 
                 with gr.Accordion("Advanced Settings", open=False):
                     with gr.Row():
-                        flux_seed = gr.Slider(
+                        qwen_seed = gr.Slider(
                             minimum=-1, maximum=MAX_SEED, step=1, value=-1,
                             label="Seed (-1 = random)"
                         )
-                        flux_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
-                    flux_steps = gr.Slider(minimum=1, maximum=50, step=1, value=25, label="Inference Steps")
-                    flux_guidance = gr.Slider(minimum=1.0, maximum=10.0, step=0.5, value=3.5, label="Guidance Scale")
-                    flux_canvas_mode = gr.Dropdown(
-                        choices=CANVAS_MODES, value="Scale base image",
-                        label="Canvas Mode",
-                    )
-                    flux_canvas_fit = gr.Dropdown(
-                        choices=CANVAS_FIT_MODES, value="Cover",
-                        label="Canvas Fit Mode"
-                    )
+                        qwen_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+                    qwen_steps = gr.Slider(minimum=1, maximum=50, step=1, value=20, label="Inference Steps")
+                    qwen_true_cfg = gr.Slider(minimum=1.0, maximum=10.0, step=0.5, value=4.0, label="True CFG Scale")
+                    qwen_guidance = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Guidance Scale")
                     with gr.Row():
-                        flux_custom_width = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Custom Width (px)")
-                        flux_custom_height = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Custom Height (px)")
-                    flux_pad_color = gr.ColorPicker(value="#000000", label="Pad Color (for Pad fit mode)")
+                        qwen_custom_width = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Width (px)")
+                        qwen_custom_height = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Height (px)")
 
-                flux_generate_btn = gr.Button("✨ Generate with FLUX.2 Klein", variant="primary")
+                qwen_generate_btn = gr.Button("✨ Generate with Qwen Image Edit", variant="primary")
 
             # ── Right column: output ─────────────────────────────────────────
             with gr.Column(scale=1):
-                flux_output_image = gr.Image(
+                qwen_output_image = gr.Image(
                     type="pil", label="🖼️ Generated / Edited Result",
                     interactive=False,
                 )
-                flux_output_seed = gr.Number(label="Used Seed", interactive=False)
-                use_flux_as_video_btn = gr.Button(
+                qwen_output_seed = gr.Number(label="Used Seed", interactive=False)
+                use_qwen_as_video_btn = gr.Button(
                     "➡️ Use This Image for Video Generation (Step 2)",
                     variant="secondary"
                 )
@@ -468,24 +455,23 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                     timestamp_box = gr.Number(value=0, label="Timestamp", visible=True, elem_id="hidden-timestamp")
                 file_output = gr.File(label="Download Video")
 
-    # ── Events: FLUX.2 Klein ──────────────────────────────────────────────────
+    # ── Events: Qwen Image Edit ───────────────────────────────────────────────
 
-    flux_generate_btn.click(
-        fn=run_flux_generate,
+    qwen_generate_btn.click(
+        fn=run_qwen_generate,
         inputs=[
-            flux_base_image, flux_ref_image_1, flux_ref_image_2,
-            flux_prompt, flux_negative_prompt,
-            flux_seed, flux_randomize_seed,
-            flux_steps, flux_guidance,
-            flux_canvas_mode, flux_canvas_fit,
-            flux_custom_width, flux_custom_height, flux_pad_color,
+            qwen_base_image, qwen_ref_image_1, qwen_ref_image_2,
+            qwen_prompt, qwen_negative_prompt,
+            qwen_seed, qwen_randomize_seed,
+            qwen_steps, qwen_true_cfg, qwen_guidance,
+            qwen_custom_width, qwen_custom_height,
         ],
-        outputs=[flux_output_image, flux_output_seed],
+        outputs=[qwen_output_image, qwen_output_seed],
     )
 
-    use_flux_as_video_btn.click(
+    use_qwen_as_video_btn.click(
         fn=use_generated_as_video_input,
-        inputs=[flux_output_image],
+        inputs=[qwen_output_image],
         outputs=[input_image_component],
     )
 
@@ -525,14 +511,14 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         else:
             return gr.update(value="💤 Wan 2.2 Keep-Warm: Paused", variant="secondary")
 
-    async def toggle_flux_heartbeat():
+    async def toggle_qwen_heartbeat():
         import backend
-        new_state = not backend.flux_heartbeat_enabled
-        set_flux_heartbeat_state(new_state)
+        new_state = not backend.qwen_heartbeat_enabled
+        set_qwen_heartbeat_state(new_state)
         if new_state:
-            return gr.update(value="💓 FLUX.2 Keep-Warm: Active", variant="primary")
+            return gr.update(value="💓 Qwen Keep-Warm: Active", variant="primary")
         else:
-            return gr.update(value="💤 FLUX.2 Keep-Warm: Paused", variant="secondary")
+            return gr.update(value="💤 Qwen Keep-Warm: Paused", variant="secondary")
 
     wan_hb_btn.click(
         fn=toggle_wan_heartbeat,
@@ -540,10 +526,10 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         outputs=[wan_hb_btn],
     )
 
-    flux_hb_btn.click(
-        fn=toggle_flux_heartbeat,
+    qwen_hb_btn.click(
+        fn=toggle_qwen_heartbeat,
         inputs=[],
-        outputs=[flux_hb_btn],
+        outputs=[qwen_hb_btn],
     )
 
     # ── Periodic Client Heartbeat Timer ──────────────────────────────────────
