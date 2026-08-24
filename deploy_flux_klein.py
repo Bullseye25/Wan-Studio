@@ -15,6 +15,7 @@ outputs_vol = modal.Volume.from_name("wan-outputs", create_if_missing=True)
 # We clone the Hugging Face space inside the container so all local LoRAs are available
 flux_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .apt_install(
         "git", "git-lfs", "libgl1", "libglib2.0-0",
         "build-essential", "ninja-build", "ffmpeg"
@@ -169,7 +170,6 @@ class FluxKleinModel:
         from diffusers import Flux2KleinPipeline
 
         dtype = torch.bfloat16
-        device = torch.device("cuda")
 
         print("[FluxKleinModel] Loading FLUX.2 Klein 9B pipeline...")
         self.pipe = Flux2KleinPipeline.from_pretrained(
@@ -177,9 +177,11 @@ class FluxKleinModel:
             torch_dtype=dtype,
             token=hf_token,
             cache_dir="/root/.cache/huggingface",
-        ).to(device)
+        )
+        # Offload model components to CPU RAM to stay within A10G 24GB VRAM
+        self.pipe.enable_model_cpu_offload()
 
-        print("[FluxKleinModel] Pipeline loaded successfully.")
+        print("[FluxKleinModel] Pipeline loaded successfully with CPU offloading.")
 
     @modal.method()
     def generate(
@@ -227,16 +229,16 @@ class FluxKleinModel:
         generator = torch.Generator(device="cuda").manual_seed(actual_seed)
 
         print(f"[FluxKleinModel] Running inference (seed={actual_seed}, steps={steps}, size={width}x{height})...")
-        result = self.pipe(
-            image=image_input,
-            prompt=prompt,
-            negative_prompt_embeds=negative_prompt if negative_prompt else None,
-            width=width,
-            height=height,
-            num_inference_steps=int(steps),
-            guidance_scale=float(guidance_scale),
-            generator=generator,
-        ).images[0]
+        pipe_kwargs = {
+            "image": image_input,
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "num_inference_steps": int(steps),
+            "guidance_scale": float(guidance_scale),
+            "generator": generator,
+        }
+        result = self.pipe(**pipe_kwargs).images[0]
 
         # Cleanup
         gc.collect()
