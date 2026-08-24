@@ -42,7 +42,7 @@ class TestQwenAndWanContracts(unittest.TestCase):
         """Verify qwen_image_edit_remote serializes images and dispatches call to Modal cleanly."""
         mock_instance = MagicMock()
         fake_jpeg = b"\xff\xd8\xff\xe0fake_jpeg_bytes"
-        mock_instance.generate.remote.return_value = fake_jpeg
+        mock_instance.generate.remote.return_value = [fake_jpeg]
         mock_from_name.return_value = MagicMock(return_value=mock_instance)
 
         base_img = Image.new("RGB", (256, 256), color="red")
@@ -52,24 +52,55 @@ class TestQwenAndWanContracts(unittest.TestCase):
             base_image=base_img,
             ref_images=[ref_img],
             prompt="a futuristic red bus",
+            negative_prompt="blurry",
             seed=12345,
             steps=20,
             true_cfg_scale=4.0,
             guidance_scale=1.0,
+            num_images=1,
             custom_width=1024,
             custom_height=1024,
         )
 
-        self.assertEqual(result, fake_jpeg)
+        self.assertIsInstance(result, list)
+        self.assertEqual(result[0], fake_jpeg)
         mock_from_name.assert_called_once_with("qwen-image-backend", "QwenImageEditModel")
         mock_instance.generate.remote.assert_called_once()
         call_kwargs = mock_instance.generate.remote.call_args[1]
 
         # Verify arguments passed
         self.assertEqual(call_kwargs["prompt"], "a futuristic red bus")
+        self.assertEqual(call_kwargs["negative_prompt"], "blurry")
         self.assertEqual(call_kwargs["seed"], 12345)
         self.assertEqual(call_kwargs["steps"], 20)
         self.assertEqual(call_kwargs["true_cfg_scale"], 4.0)
+        self.assertEqual(call_kwargs["num_images"], 1)
+
+    @patch("modal.Cls.from_name")
+    def test_qwen_image_edit_multi_image_batch(self, mock_from_name):
+        """Verify qwen_image_edit_remote dispatches num_images=4 and returns 4 images."""
+        mock_instance = MagicMock()
+        fake_jpegs = [f"fake_jpeg_{i}".encode("utf-8") for i in range(4)]
+        mock_instance.generate.remote.return_value = fake_jpegs
+        mock_from_name.return_value = MagicMock(return_value=mock_instance)
+
+        base_img = Image.new("RGB", (256, 256), color="green")
+
+        result = backend.qwen_image_edit_remote(
+            base_image=base_img,
+            prompt="cyberpunk cityscape",
+            negative_prompt="dark, murky",
+            seed=5000,
+            steps=15,
+            num_images=4,
+        )
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 4)
+        mock_from_name.assert_called_once_with("qwen-image-backend", "QwenImageEditModel")
+        call_kwargs = mock_instance.generate.remote.call_args[1]
+        self.assertEqual(call_kwargs["num_images"], 4)
+        self.assertEqual(call_kwargs["seed"], 5000)
 
     @patch("modal.Cls.from_name")
     def test_wan_remote_inference_mock_call(self, mock_from_name):

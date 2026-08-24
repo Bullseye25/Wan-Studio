@@ -164,12 +164,13 @@ def qwen_image_edit_remote(
     steps: int = 20,
     true_cfg_scale: float = 4.0,
     guidance_scale: float = 1.0,
+    num_images: int = 1,
     custom_width: int = 1024,
     custom_height: int = 1024,
-) -> bytes:
+) -> list[bytes]:
     """
     Forwards an image-generation/editing request to the Modal QwenImageEditModel.generate remote method.
-    Saves the output image to the local outputs/ folder and returns the JPEG bytes.
+    Saves the output images to the local outputs/ folder and returns a list of JPEG bytes.
     """
     import io
     import time
@@ -205,14 +206,14 @@ def qwen_image_edit_remote(
                 f"Did you deploy it? Run option 3 in start.py first. Error: {e}"
             )
 
-    print(f"[local-backend] Sending request to Qwen Image Edit model on Modal...")
-    result_bytes = None
+    print(f"[local-backend] Sending request to Qwen Image Edit model on Modal ({num_images} image(s))...")
+    result_bytes_list = None
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
                 model_instance = get_qwen_model(force_refresh=True)
 
-            result_bytes = model_instance.generate.remote(
+            raw_result = model_instance.generate.remote(
                 base_image_bytes=base_image_bytes,
                 ref_images_bytes=ref_images_bytes,
                 prompt=prompt,
@@ -221,9 +222,11 @@ def qwen_image_edit_remote(
                 steps=int(steps),
                 true_cfg_scale=float(true_cfg_scale),
                 guidance_scale=float(guidance_scale),
+                num_images=int(num_images),
                 custom_width=int(custom_width),
                 custom_height=int(custom_height),
             )
+            result_bytes_list = raw_result if isinstance(raw_result, list) else [raw_result]
             break
         except Exception as e:
             is_conn_error = "getaddrinfo failed" in str(e) or "ConnectionError" in type(e).__name__ or "timeout" in str(e).lower()
@@ -233,22 +236,25 @@ def qwen_image_edit_remote(
                 continue
             raise e
 
-    # Save output image locally in outputs/ folder
+    # Save output images locally in outputs/ folder
     local_dir = pathlib.Path(__file__).parent / "outputs"
     local_dir.mkdir(parents=True, exist_ok=True)
     
-    file_seed = seed if seed >= 0 else random.randint(100000, 999999)
-    filename = f"qwen_{int(time.time())}_{file_seed}.jpg"
-    local_path = local_dir / filename
+    timestamp = int(time.time())
+    base_file_seed = seed if seed >= 0 else random.randint(100000, 999999)
+    for idx, img_bytes in enumerate(result_bytes_list):
+        current_file_seed = base_file_seed + idx
+        filename = f"qwen_{timestamp}_{current_file_seed}_{idx+1}.jpg" if len(result_bytes_list) > 1 else f"qwen_{timestamp}_{current_file_seed}.jpg"
+        local_path = local_dir / filename
 
-    print(f"[local-backend] Writing output image: {local_path} ({len(result_bytes)} bytes)")
-    with open(local_path, "wb") as f_out:
-        f_out.write(result_bytes)
+        print(f"[local-backend] Writing output image {idx+1}/{len(result_bytes_list)}: {local_path} ({len(img_bytes)} bytes)")
+        with open(local_path, "wb") as f_out:
+            f_out.write(img_bytes)
 
     # Record Qwen activity
     record_qwen_activity()
 
-    return result_bytes
+    return result_bytes_list
 
 
 # ─── Heartbeat & Cost-Effective Keep-Alive State ─────────────────────────────

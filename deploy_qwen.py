@@ -190,12 +190,16 @@ class QwenImageEditModel:
         steps: int = 20,
         true_cfg_scale: float = 4.0,
         guidance_scale: float = 1.0,
+        num_images: int = 1,
         custom_width: int = 1024,
         custom_height: int = 1024,
-    ) -> bytes:
+    ) -> list[bytes]:
         import io
         import gc
         import random
+        import pathlib
+        import time
+        import inspect
         import torch
         from PIL import Image
 
@@ -208,57 +212,63 @@ class QwenImageEditModel:
         ref_pils = [Image.open(io.BytesIO(b)).convert("RGB") for b in ref_images_bytes]
         images_input = [base_pil] + ref_pils if ref_pils else base_pil
 
-        actual_seed = random.randint(0, 2**31 - 1) if seed < 0 else seed
-        generator = torch.Generator(device="cuda").manual_seed(actual_seed)
-
-        print(f"[QwenImageEditModel] Running inference (seed={actual_seed}, steps={steps}, prompt='{prompt[:50]}...')...")
-
-        pipe_kwargs = {
-            "image": images_input,
-            "prompt": prompt,
-            "num_inference_steps": int(steps),
-            "generator": generator,
-        }
-
-        # Check supported parameters on the loaded pipeline
-        import inspect
+        count = max(1, min(6, int(num_images)))
+        base_seed = random.randint(0, 2**31 - 1 - count) if seed < 0 else seed
+        
+        output_bytes_list = []
         sig = inspect.signature(self.pipe.__call__)
-        if "negative_prompt" in sig.parameters:
-            pipe_kwargs["negative_prompt"] = negative_prompt if negative_prompt else ""
-        if "true_cfg_scale" in sig.parameters:
-            pipe_kwargs["true_cfg_scale"] = float(true_cfg_scale)
-        if "guidance_scale" in sig.parameters:
-            pipe_kwargs["guidance_scale"] = float(guidance_scale)
-        if "width" in sig.parameters and custom_width > 0:
-            pipe_kwargs["width"] = int(custom_width)
-        if "height" in sig.parameters and custom_height > 0:
-            pipe_kwargs["height"] = int(custom_height)
 
-        with torch.inference_mode():
-            result = self.pipe(**pipe_kwargs).images[0]
+        print(f"[QwenImageEditModel] Generating {count} image(s) (base_seed={base_seed}, steps={steps}, prompt='{prompt[:50]}...')...")
+
+        for i in range(count):
+            current_seed = base_seed + i
+            generator = torch.Generator(device="cuda").manual_seed(current_seed)
+
+            pipe_kwargs = {
+                "image": images_input,
+                "prompt": prompt,
+                "num_inference_steps": int(steps),
+                "generator": generator,
+            }
+
+            if "negative_prompt" in sig.parameters:
+                pipe_kwargs["negative_prompt"] = negative_prompt if negative_prompt else ""
+            if "true_cfg_scale" in sig.parameters:
+                pipe_kwargs["true_cfg_scale"] = float(true_cfg_scale)
+            if "guidance_scale" in sig.parameters:
+                pipe_kwargs["guidance_scale"] = float(guidance_scale)
+            if "width" in sig.parameters and custom_width > 0:
+                pipe_kwargs["width"] = int(custom_width)
+            if "height" in sig.parameters and custom_height > 0:
+                pipe_kwargs["height"] = int(custom_height)
+
+            with torch.inference_mode():
+                result = self.pipe(**pipe_kwargs).images[0]
+
+            # Save copy to Modal volume output folder
+            try:
+                modal_output_dir = pathlib.Path("/outputs/output")
+                modal_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                filename = f"qwen_{int(time.time())}_{current_seed}_{i+1}.jpg" if count > 1 else f"qwen_{int(time.time())}_{current_seed}.jpg"
+                modal_path = modal_output_dir / filename
+                
+                result.save(modal_path, format="JPEG", quality=95)
+                print(f"[QwenImageEditModel] Saved copy {i+1}/{count} to Modal Volume: {modal_path}")
+            except Exception as e:
+                print(f"[QwenImageEditModel] Warning: Could not save copy to Modal Volume: {e}")
+
+            out_buf = io.BytesIO()
+            result.save(out_buf, format="JPEG", quality=95)
+            output_bytes_list.append(out_buf.getvalue())
+
+        try:
+            outputs_vol.commit()
+        except Exception:
+            pass
 
         # Cleanup
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Save copy to Modal volume output folder
-        import pathlib
-        import time
-        try:
-            modal_output_dir = pathlib.Path("/outputs/output")
-            modal_output_dir.mkdir(parents=True, exist_ok=True)
-            
-            file_seed = seed if seed >= 0 else actual_seed
-            filename = f"qwen_{int(time.time())}_{file_seed}.jpg"
-            modal_path = modal_output_dir / filename
-            
-            result.save(modal_path, format="JPEG", quality=95)
-            print(f"[QwenImageEditModel] Saved copy to Modal Volume: {modal_path}")
-            
-            outputs_vol.commit()
-        except Exception as e:
-            print(f"[QwenImageEditModel] Warning: Could not save copy to Modal Volume: {e}")
-
-        out_buf = io.BytesIO()
-        result.save(out_buf, format="JPEG", quality=95)
-        return out_buf.getvalue()
+        return output_bytes_list

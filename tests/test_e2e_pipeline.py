@@ -67,7 +67,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         mock_qwen_bytes = mod_bytes_io.getvalue()
 
         mock_qwen_instance = MagicMock()
-        mock_qwen_instance.generate.remote.return_value = mock_qwen_bytes
+        mock_qwen_instance.generate.remote.return_value = [mock_qwen_bytes]
 
         mock_wan_instance = MagicMock()
 
@@ -83,7 +83,7 @@ class TestEndToEndPipeline(unittest.TestCase):
 
         # Run Step 1 generate/modify
         edit_prompt = "transform the bus into a sleek cyber-bus at sunset, neon reflections"
-        modified_pil, used_seed = app.run_qwen_generate(
+        gallery_pils, used_seeds_str, modified_pil = app.run_qwen_generate(
             base_image=initial_pic,
             ref_image_1=None,
             ref_image_2=None,
@@ -94,13 +94,15 @@ class TestEndToEndPipeline(unittest.TestCase):
             steps=20,
             true_cfg_scale=4.0,
             guidance_scale=1.0,
+            num_images=1,
             custom_width=1024,
             custom_height=768,
         )
 
+        self.assertIsInstance(gallery_pils, list)
         self.assertIsInstance(modified_pil, Image.Image)
-        self.assertEqual(used_seed, 999)
-        print(f"  [OK] Picture modified successfully: {modified_pil.size} (Seed: {used_seed})")
+        self.assertEqual(used_seeds_str, "999")
+        print(f"  [OK] Picture modified successfully: {modified_pil.size} (Seed: {used_seeds_str})")
 
         # -------------------------------------------------------------
         # STEP 3: Route Modified Image to Video Generator (Step 2)

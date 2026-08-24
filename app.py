@@ -147,6 +147,7 @@ def run_qwen_generate(
     steps,
     true_cfg_scale,
     guidance_scale,
+    num_images,
     custom_width,
     custom_height,
     progress=gr.Progress(track_tqdm=True),
@@ -154,17 +155,18 @@ def run_qwen_generate(
     if base_image is None and (not prompt or not prompt.strip()):
         raise gr.Error("Please upload an image or enter an editing prompt.")
 
-    progress(0.05, desc="Preparing request for Qwen Image Edit on Modal...")
+    count = max(1, min(6, int(num_images)))
+    progress(0.05, desc=f"Preparing request for Qwen Image Edit ({count} image(s)) on Modal...")
 
     ref_images = [r for r in [ref_image_1, ref_image_2] if r is not None]
-    actual_seed = random.randint(0, MAX_SEED) if randomize_seed else int(seed)
+    actual_seed = random.randint(0, MAX_SEED - count) if randomize_seed else int(seed)
 
     # If no base image, use a blank canvas (pure text-to-image mode)
     if base_image is None:
         base_image = Image.new("RGB", (1024, 1024), (255, 255, 255))
 
     try:
-        result_bytes = qwen_image_edit_remote(
+        result_bytes_list = qwen_image_edit_remote(
             base_image=base_image,
             ref_images=ref_images,
             prompt=prompt.strip() if prompt else "",
@@ -173,16 +175,21 @@ def run_qwen_generate(
             steps=int(steps),
             true_cfg_scale=float(true_cfg_scale),
             guidance_scale=float(guidance_scale),
+            num_images=count,
             custom_width=int(custom_width),
             custom_height=int(custom_height),
         )
     except Exception as e:
         raise gr.Error(f"Qwen Image Edit generation failed: {e}")
 
-    progress(0.95, desc="Receiving result image...")
-    result_pil = Image.open(io.BytesIO(result_bytes)).convert("RGB")
+    progress(0.95, desc="Receiving result images...")
+    pil_images = [Image.open(io.BytesIO(b)).convert("RGB") for b in result_bytes_list]
+    
+    seeds_str = str(actual_seed) if count == 1 else f"{actual_seed} .. {actual_seed + count - 1}"
+    first_img = pil_images[0] if pil_images else None
+
     progress(1.0, desc="Done!")
-    return result_pil, actual_seed
+    return pil_images, seeds_str, first_img
 
 
 # ── Video Generation ──────────────────────────────────────────────────────────
@@ -371,6 +378,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                             label="Seed (-1 = random)"
                         )
                         qwen_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+                    qwen_num_images = gr.Slider(minimum=1, maximum=6, step=1, value=1, label="Number of Images (1–6)")
                     qwen_steps = gr.Slider(minimum=1, maximum=50, step=1, value=20, label="Inference Steps")
                     qwen_true_cfg = gr.Slider(minimum=1.0, maximum=10.0, step=0.5, value=4.0, label="True CFG Scale")
                     qwen_guidance = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Guidance Scale")
@@ -382,13 +390,19 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
 
             # ── Right column: output ─────────────────────────────────────────
             with gr.Column(scale=1):
-                qwen_output_image = gr.Image(
-                    type="pil", label="🖼️ Generated / Edited Result",
+                qwen_output_gallery = gr.Gallery(
+                    label="🖼️ Generated / Edited Result(s)",
+                    columns=[2, 3],
+                    rows=[1, 2],
+                    height=440,
+                    object_fit="contain",
+                    preview=True,
                     interactive=False,
                 )
-                qwen_output_seed = gr.Number(label="Used Seed", interactive=False)
+                qwen_output_seed = gr.Textbox(label="Used Seed(s)", interactive=False)
+                qwen_selected_image = gr.State(value=None)
                 use_qwen_as_video_btn = gr.Button(
-                    "➡️ Use This Image for Video Generation (Step 2)",
+                    "➡️ Use Selected Image for Video Generation (Step 2)",
                     variant="secondary"
                 )
 
@@ -457,6 +471,34 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
 
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
 
+    def on_qwen_gallery_select(evt: gr.SelectData, gallery):
+        if gallery and len(gallery) > evt.index:
+            item = gallery[evt.index]
+            if isinstance(item, tuple):
+                return item[0]
+            elif isinstance(item, dict) and "image" in item:
+                return item["image"]
+            return item
+        return None
+
+    def route_qwen_to_video(selected_img, gallery):
+        if selected_img is not None:
+            return selected_img
+        if gallery and len(gallery) > 0:
+            item = gallery[0]
+            if isinstance(item, tuple):
+                return item[0]
+            elif isinstance(item, dict) and "image" in item:
+                return item["image"]
+            return item
+        return None
+
+    qwen_output_gallery.select(
+        fn=on_qwen_gallery_select,
+        inputs=[qwen_output_gallery],
+        outputs=[qwen_selected_image],
+    )
+
     qwen_generate_btn.click(
         fn=run_qwen_generate,
         inputs=[
@@ -464,14 +506,15 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
             qwen_prompt, qwen_negative_prompt,
             qwen_seed, qwen_randomize_seed,
             qwen_steps, qwen_true_cfg, qwen_guidance,
+            qwen_num_images,
             qwen_custom_width, qwen_custom_height,
         ],
-        outputs=[qwen_output_image, qwen_output_seed],
+        outputs=[qwen_output_gallery, qwen_output_seed, qwen_selected_image],
     )
 
     use_qwen_as_video_btn.click(
-        fn=use_generated_as_video_input,
-        inputs=[qwen_output_image],
+        fn=route_qwen_to_video,
+        inputs=[qwen_selected_image, qwen_output_gallery],
         outputs=[input_image_component],
     )
 
