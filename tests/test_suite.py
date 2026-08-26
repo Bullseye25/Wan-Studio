@@ -10,6 +10,11 @@ from app import (
     get_num_frames,
     extract_frame,
     clear_all_outputs,
+    extract_selected_image,
+    route_qwen_to_base,
+    route_qwen_to_ref1,
+    route_qwen_to_ref2,
+    route_qwen_to_video,
     MAX_DIM,
     MIN_DIM,
     SQUARE_DIM,
@@ -163,6 +168,29 @@ class TestClearOutputs(unittest.TestCase):
         self.assertIn("Cleared", msg)
         self.assertFalse(dummy_file.exists())
         self.assertTrue(outputs_dir.exists())
+
+
+class TestImageTransferRoutes(unittest.TestCase):
+    def test_extract_from_selected(self):
+        """Directly selected image takes precedence."""
+        img1 = Image.new("RGB", (100, 100), color="red")
+        img2 = Image.new("RGB", (100, 100), color="blue")
+        extracted = extract_selected_image(img1, [img2])
+        self.assertEqual(extracted, img1)
+
+    def test_extract_from_gallery_fallback(self):
+        """If selected image is None, fallback to first item in gallery."""
+        img1 = Image.new("RGB", (100, 100), color="red")
+        extracted = extract_selected_image(None, [img1])
+        self.assertEqual(extracted, img1)
+
+    def test_route_to_base_and_refs(self):
+        """Routing helpers should successfully extract and return image."""
+        test_img = Image.new("RGB", (64, 64), color="green")
+        self.assertEqual(route_qwen_to_base(test_img), test_img)
+        self.assertEqual(route_qwen_to_ref1(test_img), test_img)
+        self.assertEqual(route_qwen_to_ref2(test_img), test_img)
+        self.assertEqual(route_qwen_to_video(test_img), test_img)
 
 
 if __name__ == "__main__":

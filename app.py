@@ -286,8 +286,48 @@ def generate_video(
     return (video_path if video_component else None), video_path, current_seed
 
 
+def extract_selected_image(selected_img, gallery=None):
+    img = selected_img
+    if img is None and gallery:
+        if isinstance(gallery, list) and len(gallery) > 0:
+            img = gallery[0]
+        else:
+            img = gallery
+
+    if img is None:
+        return None
+
+    if isinstance(img, tuple):
+        img = img[0]
+    elif isinstance(img, dict) and "image" in img:
+        img = img["image"]
+
+    if isinstance(img, str):
+        try:
+            return Image.open(img).convert("RGB")
+        except Exception:
+            return img
+    return img
+
+
+def route_qwen_to_base(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_qwen_to_ref1(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_qwen_to_ref2(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_qwen_to_video(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
 def use_generated_as_video_input(generated_image):
-    return generated_image
+    return extract_selected_image(generated_image, None)
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -354,6 +394,123 @@ body, .gradio-container {
     margin: 0; padding: 0;
     overflow: hidden; position: absolute; pointer-events: none;
 }
+
+/* Drag and Drop Styling & Visual Feedback */
+.drag-active-highlight {
+    outline: 3px dashed #38bdf8 !important;
+    outline-offset: -3px !important;
+    background-color: rgba(56, 189, 248, 0.22) !important;
+    box-shadow: 0 0 25px rgba(56, 189, 248, 0.6) !important;
+    border-radius: 10px !important;
+    transition: all 0.15s ease-in-out !important;
+}
+
+.gallery img, .thumbnail-item img, [data-testid="gallery"] img {
+    cursor: grab !important;
+    -webkit-user-drag: element !important;
+}
+
+.gallery img:active {
+    cursor: grabbing !important;
+}
+"""
+
+DRAG_DROP_JS = """
+<script>
+(function() {
+    console.log("[WanStudio] Initializing Drag & Drop handler for Image Editor...");
+    let draggedImageSrc = null;
+
+    // 1. Capture dragstart on any gallery image or preview
+    document.addEventListener('dragstart', function(e) {
+        let img = null;
+        if (e.target && e.target.tagName === 'IMG') {
+            img = e.target;
+        } else if (e.target && e.target.querySelector) {
+            img = e.target.querySelector('img');
+        }
+
+        if (img && img.src) {
+            draggedImageSrc = img.src;
+            if (e.dataTransfer) {
+                e.dataTransfer.setData('text/plain', img.src);
+                e.dataTransfer.setData('text/uri-list', img.src);
+                e.dataTransfer.effectAllowed = 'copyMove';
+            }
+        }
+    }, true);
+
+    // 2. Highlight dropzones on dragover
+    document.addEventListener('dragover', function(e) {
+        const dropzone = e.target.closest('.image-container, .dropzone, [data-testid="image"], .upload-container, .gradio-image, .image-frame');
+        if (dropzone) {
+            e.preventDefault();
+            if (e.dataTransfer) {
+                e.dataTransfer.dropEffect = 'copy';
+            }
+            dropzone.classList.add('drag-active-highlight');
+        }
+    }, true);
+
+    // 3. Remove highlight on dragleave
+    document.addEventListener('dragleave', function(e) {
+        const dropzone = e.target.closest('.image-container, .dropzone, [data-testid="image"], .upload-container, .gradio-image, .image-frame');
+        if (dropzone && (!e.relatedTarget || !dropzone.contains(e.relatedTarget))) {
+            dropzone.classList.remove('drag-active-highlight');
+        }
+    }, true);
+
+    // 4. Handle drop event
+    document.addEventListener('drop', async function(e) {
+        const dropzone = e.target.closest('.image-container, .dropzone, [data-testid="image"], .upload-container, .gradio-image, .image-frame');
+        if (dropzone) {
+            dropzone.classList.remove('drag-active-highlight');
+            
+            // If dragging native files from desktop file explorer, let browser handle
+            if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                return;
+            }
+
+            let src = draggedImageSrc;
+            if (!src && e.dataTransfer) {
+                src = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+            }
+
+            if (src) {
+                e.preventDefault();
+                e.stopPropagation();
+                try {
+                    const response = await fetch(src);
+                    const blob = await response.blob();
+                    const file = new File([blob], "input_dropped.png", { type: blob.type || "image/png" });
+                    
+                    const fileInput = dropzone.querySelector('input[type="file"]') || 
+                                     dropzone.closest('.gradio-image, .block, [data-testid="image"]')?.querySelector('input[type="file"]');
+                    
+                    if (fileInput) {
+                        const dataTransfer = new DataTransfer();
+                        dataTransfer.items.add(file);
+                        fileInput.files = dataTransfer.files;
+                        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+                        fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                } catch (err) {
+                    console.error("[WanStudio] Error loading dropped image:", err);
+                }
+            }
+        }
+    }, true);
+
+    // Ensure all gallery output images have draggable="true" and grab cursor
+    setInterval(function() {
+        document.querySelectorAll('.gallery img, [data-testid="gallery"] img, .thumbnail-item img, .preview img').forEach(function(img) {
+            if (!img.getAttribute('draggable') || img.getAttribute('draggable') !== 'true') {
+                img.setAttribute('draggable', 'true');
+            }
+        });
+    }, 1000);
+})();
+</script>
 """
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
@@ -443,8 +600,19 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                 )
                 qwen_output_seed = gr.Textbox(label="Used Seed(s)", interactive=False)
                 qwen_selected_image = gr.State(value=None)
+                
+                gr.Markdown(
+                    "💡 **Drag & Drop:** You can drag any generated image directly into an input box on the left, "
+                    "or click an image and use the transfer buttons below:",
+                    elem_classes="step-hint"
+                )
+                with gr.Row():
+                    use_as_base_btn = gr.Button("⬅️ Use as Base Image", variant="primary", scale=1)
+                    use_as_ref1_btn = gr.Button("🔗 Set as Ref 1", variant="secondary", scale=1)
+                    use_as_ref2_btn = gr.Button("🔗 Set as Ref 2", variant="secondary", scale=1)
+
                 use_qwen_as_video_btn = gr.Button(
-                    "➡️ Use Selected Image for Video Generation (Step 2)",
+                    "🎬 Use for Video Generation (Step 2)",
                     variant="secondary"
                 )
 
@@ -514,25 +682,22 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
 
     def on_qwen_gallery_select(evt: gr.SelectData, gallery):
+        if evt.value:
+            val = evt.value
+            if isinstance(val, dict) and "image" in val:
+                val = val["image"]
+            elif isinstance(val, dict) and "path" in val:
+                val = val["path"]
+            if isinstance(val, tuple):
+                val = val[0]
+            if isinstance(val, str):
+                try:
+                    return Image.open(val).convert("RGB")
+                except Exception:
+                    pass
+            return val
         if gallery and len(gallery) > evt.index:
-            item = gallery[evt.index]
-            if isinstance(item, tuple):
-                return item[0]
-            elif isinstance(item, dict) and "image" in item:
-                return item["image"]
-            return item
-        return None
-
-    def route_qwen_to_video(selected_img, gallery):
-        if selected_img is not None:
-            return selected_img
-        if gallery and len(gallery) > 0:
-            item = gallery[0]
-            if isinstance(item, tuple):
-                return item[0]
-            elif isinstance(item, dict) and "image" in item:
-                return item["image"]
-            return item
+            return extract_selected_image(gallery[evt.index], None)
         return None
 
     qwen_output_gallery.select(
@@ -552,6 +717,24 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
             qwen_custom_width, qwen_custom_height,
         ],
         outputs=[qwen_output_gallery, qwen_output_seed, qwen_selected_image],
+    )
+
+    use_as_base_btn.click(
+        fn=route_qwen_to_base,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[qwen_base_image],
+    )
+
+    use_as_ref1_btn.click(
+        fn=route_qwen_to_ref1,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[qwen_ref_image_1],
+    )
+
+    use_as_ref2_btn.click(
+        fn=route_qwen_to_ref2,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[qwen_ref_image_2],
     )
 
     use_qwen_as_video_btn.click(
@@ -647,4 +830,5 @@ if __name__ == "__main__":
         server_name=server_name,
         show_error=True,
         css=CSS,
+        head=DRAG_DROP_JS,
     )
