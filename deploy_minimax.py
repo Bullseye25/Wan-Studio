@@ -6,19 +6,19 @@ import modal
 # Setup Modal app
 app = modal.App("minimax-backend")
 
-# Define Modal Volumes for caching HF models
+# Define Modal Volumes for caching HF models (all weights live in user's persistent volume)
 weights_vol = modal.Volume.from_name("wan-cache", create_if_missing=True)
 
-# Build Modal Image with CUDA-enabled PyTorch, diffusers (MiniMax-H3 commit), av, and dependencies
+# Build self-contained Modal Image with CUDA-enabled PyTorch, diffusers (MiniMax-H3 commit), av, and dependencies
 minimax_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10")
     .env({
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "H3_MODEL_REPO": "multimodalart/MiniMax-H3-Pruned",
+        "H3_CONDITIONER_REPO": "MiniMaxAI/MiniMax-H3",
         "H3_WIDTH": "bf16-pruned",
         "H3_PLACEMENT": "pack",
         "H3_ATTENTION": "_native_cudnn",
-        "H3_CONDITIONER": "multimodalart/qwen3vl-conditioner",
     })
     .apt_install(
         "git", "libgl1-mesa-glx", "libglib2.0-0", "build-essential", "ninja-build",
@@ -37,6 +37,7 @@ minimax_image = (
         "git+https://github.com/huggingface/diffusers.git@665f578278365ea4a3318cb8c9b66ce6c01204b9",
     )
     .add_local_file("h3_split_blocks.py", remote_path="/root/h3_split_blocks.py")
+    .add_local_file("prompt_rewrite.py", remote_path="/root/prompt_rewrite.py")
 )
 
 secrets = []
@@ -80,44 +81,53 @@ def snap_frames(seconds: float) -> int:
     return frames
 
 
-# ─── Pre-cache Function ───────────────────────────────────────────────────────
+# ─── Self-Contained Pre-cache Function ───────────────────────────────────────
 
 @app.function(
     image=minimax_image,
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
-    timeout=3600,
+    timeout=7200,
 )
 def download_minimax_weights():
-    """Downloads and caches MiniMax-H3-Pruned components into the persistent Modal volume."""
+    """Downloads and caches ALL MiniMax-H3 components (conditioner + generator) into the persistent Modal volume."""
     import sys
     sys.path.insert(0, "/root")
     import torch
     import huggingface_hub
     from diffusers import ComponentsManager
-    from h3_split_blocks import MiniMaxH3GeneratorBlocks
+    from h3_split_blocks import MiniMaxH3GeneratorBlocks, MiniMaxH3ConditionerBlocks
 
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
-        huggingface_hub.login(token=hf_token)
+        try:
+            huggingface_hub.login(token=hf_token)
+        except Exception as e:
+            print(f"HF login skipped: {e}")
 
-    model_repo = os.environ.get("H3_MODEL_REPO", "multimodalart/MiniMax-H3-Pruned")
-    print(f"Pre-caching MiniMax-H3 model weights from {model_repo}...")
+    cond_repo = os.environ.get("H3_CONDITIONER_REPO", "MiniMaxAI/MiniMax-H3")
+    gen_repo = os.environ.get("H3_MODEL_REPO", "multimodalart/MiniMax-H3-Pruned")
 
+    print(f"1. Pre-caching MiniMax-H3 Conditioner (Text Encoder) from {cond_repo}...")
+    cond_blocks = MiniMaxH3ConditionerBlocks()
+    cond_pipe = cond_blocks.init_pipeline(cond_repo)
+    cond_pipe.load_components(dtype=torch.bfloat16)
+
+    print(f"2. Pre-caching MiniMax-H3 Generator (DiT Transformer + VAEs) from {gen_repo}...")
     manager = ComponentsManager()
-    blocks = MiniMaxH3GeneratorBlocks()
-    pipe = blocks.init_pipeline(model_repo, components_manager=manager, collection="h3")
-    pipe.load_components(dtype=torch.bfloat16, trust_remote_code=True)
+    gen_blocks = MiniMaxH3GeneratorBlocks()
+    gen_pipe = gen_blocks.init_pipeline(gen_repo, components_manager=manager, collection="h3")
+    gen_pipe.load_components(dtype=torch.bfloat16, trust_remote_code=True)
 
     weights_vol.commit()
-    print("\nMiniMax-H3 model weights cached successfully!")
+    print("\n✓ Full MiniMax-H3 model suite (Conditioner + Generator) cached successfully in Modal storage volume!")
 
 
-# ─── Class Definition ─────────────────────────────────────────────────────────
+# ─── Class Definition (100% Self-Contained on A100 GPU) ──────────────────────
 
 @app.cls(
     image=minimax_image,
-    gpu="A100-80GB",  # 33B parameters (unquantized bfloat16 + float32 VAEs) runs on 80GB VRAM
+    gpu="A100-80GB",
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=1800,
@@ -138,7 +148,7 @@ class MiniMaxH3Model:
         import huggingface_hub
         from diffusers import ComponentsManager
         from diffusers.modular_pipelines.minimax_h3.modular_pipeline import MiniMaxH3ModularPipeline
-        from h3_split_blocks import MiniMaxH3GeneratorBlocks
+        from h3_split_blocks import MiniMaxH3GeneratorBlocks, MiniMaxH3ConditionerBlocks
 
         hf_token = os.environ.get("HF_TOKEN")
         if hf_token:
@@ -150,29 +160,31 @@ class MiniMaxH3Model:
         # Lower duration floor to 2s
         MiniMaxH3ModularPipeline.min_duration = property(lambda self: 2.0)
 
-        model_repo = os.environ.get("H3_MODEL_REPO", "multimodalart/MiniMax-H3-Pruned")
-        print(f"[MiniMaxH3Model] Loading MiniMax-H3 components from {model_repo}...")
+        cond_repo = os.environ.get("H3_CONDITIONER_REPO", "MiniMaxAI/MiniMax-H3")
+        gen_repo = os.environ.get("H3_MODEL_REPO", "multimodalart/MiniMax-H3-Pruned")
 
+        print(f"[MiniMaxH3Model] Loading local Conditioner (Text Encoder) from {cond_repo}...")
+        cond_blocks = MiniMaxH3ConditionerBlocks()
+        cond_pipe = cond_blocks.init_pipeline(cond_repo)
+        cond_pipe.load_components(dtype=torch.bfloat16)
+
+        print(f"[MiniMaxH3Model] Loading local Generator (Transformer + VAEs) from {gen_repo}...")
         manager = ComponentsManager()
-        blocks = MiniMaxH3GeneratorBlocks()
-        pipe = blocks.init_pipeline(model_repo, components_manager=manager, collection="h3")
-        pipe.load_components(dtype=torch.bfloat16, trust_remote_code=True)
+        gen_blocks = MiniMaxH3GeneratorBlocks()
+        gen_pipe = gen_blocks.init_pipeline(gen_repo, components_manager=manager, collection="h3")
+        gen_pipe.load_components(dtype=torch.bfloat16, trust_remote_code=True)
 
-        # Attention backend
+        # Set attention backend
         attention_backend = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
         try:
-            pipe.transformer.set_attention_backend(attention_backend)
+            gen_pipe.transformer.set_attention_backend(attention_backend)
         except Exception as e:
             print(f"[MiniMaxH3Model] Attention backend set exception (falling back to native): {e}")
 
-        # Place transformer and VAEs on GPU
-        pipe.transformer.to("cuda")
-        pipe.vae.to("cuda")
-        pipe.audio_vae.to("cuda")
-
-        self.pipe = pipe
+        self.cond_pipe = cond_pipe
+        self.gen_pipe = gen_pipe
         self.manager = manager
-        print("[MiniMaxH3Model] Pipeline loaded successfully on A100 GPU!")
+        print("[MiniMaxH3Model] Full self-contained MiniMax-H3 pipeline loaded on Modal!")
 
     @modal.method()
     def generate(
@@ -193,76 +205,76 @@ class MiniMaxH3Model:
         import time
         import torch
         from PIL import Image, ImageOps
-        from gradio_client import Client, handle_file
-        from safetensors import safe_open
         from diffusers.utils import encode_video
 
         # Clean VRAM before generation
         gc.collect()
         torch.cuda.empty_cache()
 
-        conditioner_space = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
+        height, width = CANVASES.get(canvas, (544, 960))
         num_frames = snap_frames(duration)
 
         print(f"[MiniMaxH3Model] Starting generation: prompt='{prompt[:50]}...', canvas={canvas}, duration={duration}s ({num_frames} frames), steps={steps}, seed={seed}")
 
-        # Write input images to temp files if provided for the conditioner
-        temp_first_path = None
-        temp_last_path = None
-        first_pil = None
-        last_pil = None
+        first_pil = Image.open(io.BytesIO(first_image_bytes)).convert("RGB") if first_image_bytes else None
+        last_pil = Image.open(io.BytesIO(last_image_bytes)).convert("RGB") if last_image_bytes else None
 
-        if first_image_bytes:
-            first_pil = Image.open(io.BytesIO(first_image_bytes)).convert("RGB")
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                temp_first_path = f.name
-                first_pil.save(temp_first_path, format="PNG")
-
-        if last_image_bytes:
-            last_pil = Image.open(io.BytesIO(last_image_bytes)).convert("RGB")
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                temp_last_path = f.name
-                last_pil.save(temp_last_path, format="PNG")
-
-        # 1. Conditioning over Gradio Client
-        print(f"[MiniMaxH3Model] Requesting conditioning from {conditioner_space}...")
-        client = Client(conditioner_space)
-        encoded_path, plan = client.predict(
-            prompt=prompt,
-            image_path=handle_file(temp_first_path) if temp_first_path else None,
-            last_image_path=handle_file(temp_last_path) if temp_last_path else None,
-            canvas=canvas,
-            num_frames=num_frames,
-            rewrite_prompt=bool(upsample),
-            api_name="/encode",
-        )
-
-        with safe_open(encoded_path, framework="pt") as handle:
-            metadata = handle.metadata()
-            prompt_embeds = handle.get_tensor("prompt_embeds")
-            text_token_tags = handle.get_tensor("text_token_tags")
-
-        height = int(metadata.get("height", CANVASES.get(canvas, (544, 960))[0]))
-        width = int(metadata.get("width", CANVASES.get(canvas, (544, 960))[1]))
-        resolved_num_frames = int(metadata.get("num_frames", num_frames))
-        refined_prompt = plan.get("refined_prompt") or ""
-
-        # Prepare keyframes
         keyframe_first = ImageOps.exif_transpose(first_pil).convert("RGB") if first_pil else None
         keyframe_last = ImageOps.exif_transpose(last_pil).convert("RGB") if last_pil else None
 
-        # 2. Denoise loop on A100 GPU
-        print(f"[MiniMaxH3Model] Denoising {steps} steps at {width}x{height}, {resolved_num_frames} frames...")
+        # 1. Local prompt upsampling & conditioning on Modal A100 GPU
+        refined_prompt = ""
+        final_prompt = prompt
+
+        print("[MiniMaxH3Model] Moving text encoder to A100 GPU for conditioning...")
+        self.cond_pipe.to("cuda")
+
+        if upsample:
+            try:
+                import prompt_rewrite
+                print("[MiniMaxH3Model] Rewriting/enhancing prompt locally with Qwen3-VL...")
+                refined_prompt = prompt_rewrite.refine_keyframe_prompt(
+                    self.cond_pipe, prompt, keyframe_first, keyframe_last, num_frames, 1000
+                )
+                if refined_prompt:
+                    final_prompt = refined_prompt
+                    print(f"[MiniMaxH3Model] Enhanced prompt generated locally:\n{final_prompt}")
+            except Exception as e:
+                print(f"[MiniMaxH3Model] Prompt enhancement warning: {e}, continuing with raw prompt")
+
+        print("[MiniMaxH3Model] Encoding prompt & keyframes on A100...")
+        cond_state = self.cond_pipe(
+            prompt=final_prompt,
+            image=keyframe_first,
+            last_image=keyframe_last,
+            height=int(height),
+            width=int(width),
+        )
+        prompt_embeds = cond_state.get("prompt_embeds")
+        text_token_tags = cond_state.get("text_token_tags")
+
+        # Offload text encoder from GPU to CPU to give 100% of 80GB VRAM to the 33B DiT transformer
+        self.cond_pipe.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # 2. Local Denoising on A100 GPU
+        print(f"[MiniMaxH3Model] Loading DiT transformer & VAEs to A100 GPU...")
+        self.gen_pipe.transformer.to("cuda")
+        self.gen_pipe.vae.to("cuda")
+        self.gen_pipe.audio_vae.to("cuda")
+
+        print(f"[MiniMaxH3Model] Denoising {steps} steps at {width}x{height}, {num_frames} frames...")
         start_gen = time.time()
-        
-        state = self.pipe(
+
+        state = self.gen_pipe(
             prompt_embeds=prompt_embeds.to("cuda"),
             text_token_tags=text_token_tags,
             image=keyframe_first,
             last_image=keyframe_last,
-            height=height,
-            width=width,
-            num_frames=resolved_num_frames,
+            height=int(height),
+            width=int(width),
+            num_frames=int(num_frames),
             num_inference_steps=int(steps),
             generator=torch.Generator("cpu").manual_seed(int(seed)),
         )
@@ -272,6 +284,13 @@ class MiniMaxH3Model:
         sampling_rate = state.get("sampling_rate")
         gen_time = time.time() - start_gen
 
+        # Offload transformer and VAEs back to CPU to conserve GPU VRAM
+        self.gen_pipe.transformer.to("cpu")
+        self.gen_pipe.vae.to("cpu")
+        self.gen_pipe.audio_vae.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # 3. Mux video and synchronized soundtrack into MP4
         output_temp_path = os.path.join(tempfile.gettempdir(), f"minimax_{int(time.time() * 1000)}_{seed}.mp4")
         encode_video(frames, fps=FPS, output_path=output_temp_path, audio=audio, audio_sample_rate=sampling_rate)
@@ -279,21 +298,19 @@ class MiniMaxH3Model:
         with open(output_temp_path, "rb") as f:
             video_bytes = f.read()
 
-        # Clean up temp files
-        for p in [temp_first_path, temp_last_path, output_temp_path, encoded_path]:
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+        if os.path.exists(output_temp_path):
+            try:
+                os.remove(output_temp_path)
+            except Exception:
+                pass
 
-        # Cleanup GPU memory
+        # Cleanup variables
         del state, frames, audio
         gc.collect()
         torch.cuda.empty_cache()
 
         report = (
-            f"`{width}x{height}`, {resolved_num_frames} frames ({resolved_num_frames / FPS:.2f}s), {int(steps)} steps · "
+            f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.2f}s), {int(steps)} steps · "
             f"Denoise + Audio Decode: {gen_time:.1f}s ({gen_time / max(1, int(steps)):.1f}s/step) · Seed: {int(seed)}"
         )
         print(f"[MiniMaxH3Model] Complete! {report}")
