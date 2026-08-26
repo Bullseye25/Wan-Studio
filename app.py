@@ -39,6 +39,7 @@ SCHEDULERS = [
     "DPMSolverSinglestep",
 ]
 
+default_prompt_qwen = "camera capturing overall people in a complete full frame, 4k resolution, preserve face details"
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
 default_negative_prompt = (
     "blurry, low quality, low resolution, worst quality, jpeg artifacts, compression artifacts, "
@@ -189,7 +190,8 @@ def run_qwen_generate(
     custom_height,
     progress=gr.Progress(track_tqdm=True),
 ):
-    if base_image is None and (not prompt or not prompt.strip()):
+    active_prompt = prompt.strip() if (prompt and prompt.strip()) else default_prompt_qwen
+    if base_image is None and not active_prompt:
         raise gr.Error("Please upload an image or enter an editing prompt.")
 
     count = max(1, min(6, int(num_images)))
@@ -206,7 +208,7 @@ def run_qwen_generate(
         result_bytes_list = qwen_image_edit_remote(
             base_image=base_image,
             ref_images=ref_images,
-            prompt=prompt.strip() if prompt else "",
+            prompt=active_prompt,
             negative_prompt=negative_prompt.strip() if negative_prompt else "",
             seed=actual_seed,
             steps=int(steps),
@@ -399,6 +401,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
 
                 qwen_prompt = gr.Textbox(
                     label="Prompt / Instruction",
+                    value=default_prompt_qwen,
                     placeholder="Describe how to edit the image or what to generate...",
                     lines=3,
                 )
