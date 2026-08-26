@@ -29,9 +29,12 @@ minimax_image = (
         extra_index_url="https://download.pytorch.org/whl/cu124",
     )
     .pip_install(
+        "huggingface-hub==1.24.0",
+        "transformers==5.8.0",
+        "accelerate==1.14.0",
+        "safetensors>=0.8.0",
+        "av", "pillow", "numpy", "requests", "gradio_client",
         "git+https://github.com/huggingface/diffusers.git@665f578278365ea4a3318cb8c9b66ce6c01204b9",
-        "transformers==4.49.0", "accelerate>=1.1.0", "safetensors>=0.4.0",
-        "av", "pillow", "numpy", "requests", "gradio_client", "huggingface_hub"
     )
     .add_local_file("h3_split_blocks.py", remote_path="/root/h3_split_blocks.py")
 )
