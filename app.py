@@ -41,9 +41,12 @@ SCHEDULERS = [
 
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
 default_negative_prompt = (
-    "色调艳丽, 过曝, 静态, 细节模糊不清, 字幕, 风格, 作品, 画作, 画面, 静止, 整体发灰, 最差质量, "
-    "低质量, JPEG压缩残留, 丑陋的, 残缺的, 多余的手指, 画得不好的手部, 画得不好的脸部, 畸形的, "
-    "毁容的, 形态畸形的肢体, 手指融合, 静止不动的画面, 杂乱的背景, 三条腿, 背景人很多, 倒着走"
+    "blurry, low quality, low resolution, worst quality, jpeg artifacts, compression artifacts, "
+    "pixelated, out of focus, grainy, noisy, oversaturated, undersaturated, bad anatomy, deformed, "
+    "disfigured, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, mutated hands, "
+    "poorly drawn hands, poorly drawn face, malformed limbs, long neck, distorted proportions, "
+    "asymmetrical eyes, cross-eyed, watermark, signature, text, logo, cropped, cut off, frame, "
+    "border, duplicate, cloned face, mutation, ugly, tiling"
 )
 
 CANVAS_MODES = [
@@ -401,9 +404,10 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                 )
 
                 qwen_negative_prompt = gr.Textbox(
-                    label="Negative Prompt (optional)",
+                    label="Negative Prompt",
+                    value=default_negative_prompt,
                     placeholder="Describe what to avoid in the edited image...",
-                    lines=2,
+                    lines=3,
                 )
 
                 with gr.Accordion("Advanced Settings", open=False):

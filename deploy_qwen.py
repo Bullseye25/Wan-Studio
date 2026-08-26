@@ -101,6 +101,15 @@ def download_qwen_weights():
     print("\nQwen Image Edit weights cached successfully!")
 
 
+DEFAULT_NEGATIVE_PROMPT = (
+    "blurry, low quality, low resolution, worst quality, jpeg artifacts, compression artifacts, "
+    "pixelated, out of focus, grainy, noisy, oversaturated, undersaturated, bad anatomy, deformed, "
+    "disfigured, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, mutated hands, "
+    "poorly drawn hands, poorly drawn face, malformed limbs, long neck, distorted proportions, "
+    "asymmetrical eyes, cross-eyed, watermark, signature, text, logo, cropped, cut off, frame, "
+    "border, duplicate, cloned face, mutation, ugly, tiling"
+)
+
 # ─── Class Definition ─────────────────────────────────────────────────────────
 
 @app.cls(
@@ -216,6 +225,8 @@ class QwenImageEditModel:
 
         print(f"[QwenImageEditModel] Generating {count} image(s) (base_seed={base_seed}, steps={steps}, prompt='{prompt[:50]}...')...")
 
+        neg_prompt = negative_prompt.strip() if (negative_prompt and negative_prompt.strip()) else DEFAULT_NEGATIVE_PROMPT
+
         for i in range(count):
             current_seed = base_seed + i
             generator = torch.Generator(device="cuda").manual_seed(current_seed)
@@ -228,7 +239,7 @@ class QwenImageEditModel:
             }
 
             if "negative_prompt" in sig.parameters:
-                pipe_kwargs["negative_prompt"] = negative_prompt if negative_prompt else ""
+                pipe_kwargs["negative_prompt"] = neg_prompt
             if "true_cfg_scale" in sig.parameters:
                 pipe_kwargs["true_cfg_scale"] = float(true_cfg_scale)
             if "guidance_scale" in sig.parameters:

@@ -155,6 +155,16 @@ def run_remote_inference(
     return video_path, f"task_{current_seed}"
 
 
+DEFAULT_NEGATIVE_PROMPT = (
+    "blurry, low quality, low resolution, worst quality, jpeg artifacts, compression artifacts, "
+    "pixelated, out of focus, grainy, noisy, oversaturated, undersaturated, bad anatomy, deformed, "
+    "disfigured, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, mutated hands, "
+    "poorly drawn hands, poorly drawn face, malformed limbs, long neck, distorted proportions, "
+    "asymmetrical eyes, cross-eyed, watermark, signature, text, logo, cropped, cut off, frame, "
+    "border, duplicate, cloned face, mutation, ugly, tiling"
+)
+
+
 def qwen_image_edit_remote(
     base_image: "PIL.Image.Image",  # type: ignore
     ref_images: list["PIL.Image.Image"] = None,  # type: ignore
@@ -175,6 +185,9 @@ def qwen_image_edit_remote(
     import io
     import time
     import random
+
+    if not negative_prompt:
+        negative_prompt = DEFAULT_NEGATIVE_PROMPT
 
     if ref_images is None:
         ref_images = []
