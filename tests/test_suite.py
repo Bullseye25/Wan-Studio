@@ -9,6 +9,7 @@ from app import (
     resize_and_crop_to_match,
     get_num_frames,
     extract_frame,
+    clear_all_outputs,
     MAX_DIM,
     MIN_DIM,
     SQUARE_DIM,
@@ -144,6 +145,24 @@ class TestHeartbeatState(unittest.TestCase):
 
         backend.record_frontend_heartbeat()
         self.assertGreater(backend.last_frontend_heartbeat_time, 0)
+
+
+class TestClearOutputs(unittest.TestCase):
+    def test_clear_all_outputs(self):
+        """clear_all_outputs should remove all files and keep the directory intact."""
+        import pathlib
+        outputs_dir = pathlib.Path(__file__).parent.parent / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create dummy files
+        dummy_file = outputs_dir / "dummy_test_file.jpg"
+        dummy_file.write_text("test")
+        self.assertTrue(dummy_file.exists())
+
+        msg = clear_all_outputs()
+        self.assertIn("Cleared", msg)
+        self.assertFalse(dummy_file.exists())
+        self.assertTrue(outputs_dir.exists())
 
 
 if __name__ == "__main__":

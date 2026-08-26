@@ -29,8 +29,9 @@ def main():
     print("5. Pre-cache Qwen Image Edit model weights on Modal")
     print("6. Start frontend on Local Network (mobile access)")
     print("7. Reconnect/Setup Modal account (runs 'modal setup')")
+    print("8. Clear local outputs folder (outputs/)")
 
-    choice = input("\nEnter choice [1/2/3/4/5/6/7] (default 1): ").strip()
+    choice = input("\nEnter choice [1/2/3/4/5/6/7/8] (default 1): ").strip()
 
     if choice == "6":
         os.environ["WAN_SHARE_LAN"] = "1"
@@ -113,6 +114,30 @@ def main():
         except subprocess.CalledProcessError as e:
             print(f"\n❌ Cache preloading failed: {e}")
             sys.exit(1)
+        sys.exit(0)
+
+    elif choice == "8":
+        print("\n---> Clearing local outputs folder...")
+        outputs_dir = os.path.join(script_dir, "outputs")
+        if os.path.exists(outputs_dir):
+            count = 0
+            for root, dirs, files in os.walk(outputs_dir, topdown=False):
+                for name in files:
+                    try:
+                        os.remove(os.path.join(root, name))
+                        count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {name}: {e}")
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception as e:
+                        print(f"Failed to delete {name}: {e}")
+            os.makedirs(outputs_dir, exist_ok=True)
+            print(f"\n✓ Cleared {count} file(s) from outputs folder.")
+        else:
+            os.makedirs(outputs_dir, exist_ok=True)
+            print("\n✓ Outputs folder was already empty.")
         sys.exit(0)
 
     # Start local app (Option 1 or Option 6)

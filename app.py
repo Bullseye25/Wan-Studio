@@ -1,5 +1,7 @@
 import os
 import io
+import shutil
+import pathlib
 import random
 import cv2
 import numpy as np
@@ -133,6 +135,38 @@ def get_num_frames(duration_seconds: float):
         MIN_FRAMES_MODEL,
         MAX_FRAMES_MODEL,
     ))
+
+
+def clear_all_outputs():
+    """Safely cleans all files and subdirectories from the local outputs/ folder."""
+    outputs_dir = pathlib.Path(__file__).parent / "outputs"
+    if not outputs_dir.exists():
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            gr.Info("Outputs folder is already empty.")
+        except Exception:
+            pass
+        return "Outputs folder is already empty."
+
+    deleted_count = 0
+    for item in list(outputs_dir.iterdir()):
+        try:
+            if item.is_file() or item.is_symlink():
+                item.unlink()
+                deleted_count += 1
+            elif item.is_dir():
+                shutil.rmtree(item)
+                deleted_count += 1
+        except Exception as e:
+            print(f"[app] Error deleting {item}: {e}")
+
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    msg = f"Cleared {deleted_count} item(s) from outputs folder."
+    try:
+        gr.Info(msg)
+    except Exception:
+        pass
+    return msg
 
 
 # ── Qwen Image Edit Rapid AIO ────────────────────────────────────────────────
@@ -331,6 +365,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
     with gr.Row():
         wan_hb_btn = gr.Button("💤 Wan 2.2 Keep-Warm: Paused", variant="secondary", scale=1)
         qwen_hb_btn = gr.Button("💤 Qwen Keep-Warm: Paused", variant="secondary", scale=1)
+        clear_outputs_btn = gr.Button("🗑️ Clear All Outputs", variant="stop", scale=1)
 
     # ── Step 1: Qwen Image Edit Rapid AIO Generator / Editor ───────────────────
     with gr.Group(elem_classes="qwen-panel"):
@@ -573,6 +608,12 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         fn=toggle_qwen_heartbeat,
         inputs=[],
         outputs=[qwen_hb_btn],
+    )
+
+    clear_outputs_btn.click(
+        fn=clear_all_outputs,
+        inputs=[],
+        outputs=[],
     )
 
     # ── Periodic Client Heartbeat Timer ──────────────────────────────────────
