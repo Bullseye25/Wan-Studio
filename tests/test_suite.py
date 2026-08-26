@@ -140,6 +140,11 @@ class TestHeartbeatState(unittest.TestCase):
         backend.set_qwen_heartbeat_state(False)
         self.assertFalse(backend.qwen_heartbeat_enabled)
 
+        backend.set_minimax_heartbeat_state(True)
+        self.assertTrue(backend.minimax_heartbeat_enabled)
+        backend.set_minimax_heartbeat_state(False)
+        self.assertFalse(backend.minimax_heartbeat_enabled)
+
     def test_activity_tracking(self):
         """Activity recording functions should update timestamps."""
         backend.record_wan_activity()
@@ -147,6 +152,9 @@ class TestHeartbeatState(unittest.TestCase):
 
         backend.record_qwen_activity()
         self.assertGreater(backend.last_qwen_activity_time, 0)
+
+        backend.record_minimax_activity()
+        self.assertGreater(backend.last_minimax_activity_time, 0)
 
         backend.record_frontend_heartbeat()
         self.assertGreater(backend.last_frontend_heartbeat_time, 0)

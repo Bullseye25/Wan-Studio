@@ -10,8 +10,9 @@ from PIL import Image
 
 # Import remote inference helpers
 from backend import (
-    run_remote_inference, qwen_image_edit_remote, start_keepalive_thread,
-    record_frontend_heartbeat, set_wan_heartbeat_state, set_qwen_heartbeat_state
+    run_remote_inference, qwen_image_edit_remote, run_minimax_remote_inference,
+    start_keepalive_thread, record_frontend_heartbeat, set_wan_heartbeat_state,
+    set_qwen_heartbeat_state, set_minimax_heartbeat_state
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -60,11 +61,43 @@ CANVAS_MODES = [
 
 CANVAS_FIT_MODES = ["Cover", "Contain", "Stretch", "Pad"]
 
+MINIMAX_CANVASES = [
+    "960x544 · 16:9 fast",
+    "1024x576 · 16:9 fast",
+    "1152x640 · 16:9",
+    "1280x704 · 16:9",
+    "1344x768 · 16:9 full",
+    "544x960 · 9:16 fast",
+    "640x1152 · 9:16",
+    "768x1344 · 9:16 full",
+    "544x544 · 1:1 fast",
+    "768x768 · 1:1 full",
+    "1024x1024 · 1:1 max",
+    "768x576 · 4:3 fast",
+    "1024x768 · 4:3 full",
+    "576x768 · 3:4 fast",
+    "768x1024 · 3:4 full",
+    "1152x512 · 21:9 fast",
+    "1536x672 · 21:9 full",
+]
+DEFAULT_MINIMAX_CANVAS = "960x544 · 16:9 fast"
+default_minimax_prompt = "A cinematic camera gliding through a misty neon street with ambient rain and distant sirens, 4k high quality"
+
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 get_timestamp_js = """
 function() {
     const video = document.querySelector('#generated-video video');
+    if (video) {
+        return video.currentTime;
+    }
+    return 0;
+}
+"""
+
+get_minimax_timestamp_js = """
+function() {
+    const video = document.querySelector('#minimax-video video');
     if (video) {
         return video.currentTime;
     }
@@ -326,6 +359,61 @@ def route_qwen_to_video(selected_img, gallery=None):
     return extract_selected_image(selected_img, gallery)
 
 
+def route_qwen_to_minimax_first(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_qwen_to_minimax_last(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_minimax_to_qwen(video_path, timestamp):
+    return extract_frame(video_path, timestamp)
+
+
+def route_minimax_to_wan(video_path, timestamp):
+    return extract_frame(video_path, timestamp)
+
+
+def run_minimax_generate(
+    prompt,
+    upsample,
+    first_image,
+    last_image,
+    canvas,
+    duration,
+    steps,
+    seed,
+    randomize_seed,
+    progress=gr.Progress(track_tqdm=True),
+):
+    if not prompt or not prompt.strip():
+        prompt = default_minimax_prompt
+
+    actual_seed = random.randint(0, MAX_SEED) if randomize_seed else int(seed)
+    if progress:
+        progress(0.05, desc="Preparing MiniMax-H3 request on Modal A100 GPU...")
+
+    try:
+        video_path, report, refined_prompt = run_minimax_remote_inference(
+            prompt=prompt.strip(),
+            first_image=first_image,
+            last_image=last_image,
+            canvas=canvas,
+            duration=int(duration),
+            steps=int(steps),
+            seed=actual_seed,
+            upsample=bool(upsample),
+            progress=progress,
+        )
+    except Exception as e:
+        raise gr.Error(f"MiniMax-H3 generation failed: {e}")
+
+    if progress:
+        progress(1.0, desc="Done!")
+    return video_path, video_path, report, refined_prompt, gr.update(visible=bool(refined_prompt)), actual_seed
+
+
 def use_generated_as_video_input(generated_image):
     return extract_selected_image(generated_image, None)
 
@@ -365,6 +453,16 @@ body, .gradio-container {
     border-radius: 14px;
     padding: 16px;
     box-shadow: 0 0 30px rgba(139,92,246,0.1);
+    margin-bottom: 16px !important;
+}
+
+.minimax-panel {
+    background: linear-gradient(145deg, rgba(236,72,153,0.12), rgba(168,85,247,0.08));
+    border: 1px solid rgba(236,72,153,0.35);
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 0 30px rgba(236,72,153,0.1);
+    margin-bottom: 16px !important;
 }
 
 .wan-panel {
@@ -373,6 +471,18 @@ body, .gradio-container {
     border-radius: 14px;
     padding: 16px;
     box-shadow: 0 0 30px rgba(14,165,233,0.1);
+    margin-bottom: 16px !important;
+}
+
+.tool-accordion {
+    border-radius: 14px !important;
+    margin-bottom: 16px !important;
+}
+
+.toolbar-row {
+    margin-bottom: 12px !important;
+    display: flex;
+    gap: 8px !important;
 }
 
 .section-header {
@@ -515,23 +625,29 @@ DRAG_DROP_JS = """
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="Wan 2.2 Studio") as demo:
+with gr.Blocks(title="Wan & MiniMax Studio") as demo:
 
-    gr.Markdown("## 🎨 Wan 2.2 Studio", elem_classes="main-title")
+    gr.Markdown("## 🎨 Wan & MiniMax AI Studio", elem_classes="main-title")
     gr.Markdown(
-        "**Step 1 🖼️** — Edit or generate images with **Qwen Image Edit Rapid AIO**   |   "
-        "**Step 2 🎬** — Animate with **Wan 2.2** on Modal GPU",
+        "**Tool 1 🖼️** — Qwen Image Edit Rapid AIO   |   "
+        "**Tool 2 🎬** — MiniMax-H3 (33B Video + Audio)   |   "
+        "**Tool 3 🎥** — Wan 2.2 Video Generator",
         elem_classes="subtitle"
     )
 
     with gr.Row():
         wan_hb_btn = gr.Button("💤 Wan 2.2 Keep-Warm: Paused", variant="secondary", scale=1)
         qwen_hb_btn = gr.Button("💤 Qwen Keep-Warm: Paused", variant="secondary", scale=1)
+        minimax_hb_btn = gr.Button("💤 MiniMax-H3 Keep-Warm: Paused", variant="secondary", scale=1)
         clear_outputs_btn = gr.Button("🗑️ Clear All Outputs", variant="stop", scale=1)
 
-    # ── Step 1: Qwen Image Edit Rapid AIO Generator / Editor ───────────────────
-    with gr.Group(elem_classes="qwen-panel"):
-        gr.Markdown("### 🖼️ Step 1 — Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
+    with gr.Row(elem_classes="toolbar-row"):
+        expand_all_btn = gr.Button("🔽 Expand All Tools", variant="secondary", size="sm")
+        collapse_all_btn = gr.Button("🔼 Collapse All Tools", variant="secondary", size="sm")
+
+    # ── Tool 1: Qwen Image Edit Rapid AIO Generator / Editor ──────────────────
+    with gr.Accordion("🖼️ Tool 1 — Qwen Image Edit Rapid AIO (Image Generator & Editor)", open=True, elem_classes="tool-accordion qwen-panel") as qwen_accordion:
+        gr.Markdown("### 🖼️ Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
         gr.Markdown(
             "Upload an **image to edit** (or leave empty for text-to-image). "
             "Optionally add **reference images** for character / style transfer. "
@@ -544,16 +660,16 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
             with gr.Column(scale=1):
                 qwen_base_image = gr.Image(
                     type="pil", label="📷 Base Image (optional — for image editing)",
-                    sources=["upload", "clipboard"]
+                    sources=["upload", "clipboard"], elem_id="qwen-base-image"
                 )
                 with gr.Row():
                     qwen_ref_image_1 = gr.Image(
                         type="pil", label="🔗 Reference 1 (optional)",
-                        sources=["upload", "clipboard"], scale=1
+                        sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref1-image"
                     )
                     qwen_ref_image_2 = gr.Image(
                         type="pil", label="🔗 Reference 2 (optional)",
-                        sources=["upload", "clipboard"], scale=1
+                        sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref2-image"
                     )
 
                 qwen_prompt = gr.Textbox(
@@ -602,7 +718,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                 qwen_selected_image = gr.State(value=None)
                 
                 gr.Markdown(
-                    "💡 **Drag & Drop:** You can drag any generated image directly into an input box on the left, "
+                    "💡 **Drag & Drop:** You can drag any generated image directly into any input box across all tools, "
                     "or click an image and use the transfer buttons below:",
                     elem_classes="step-hint"
                 )
@@ -611,26 +727,104 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                     use_as_ref1_btn = gr.Button("🔗 Set as Ref 1", variant="secondary", scale=1)
                     use_as_ref2_btn = gr.Button("🔗 Set as Ref 2", variant="secondary", scale=1)
 
+                with gr.Row():
+                    qwen_to_minimax_first_btn = gr.Button("🎬 Send to MiniMax (First Frame)", variant="secondary", scale=1)
+                    qwen_to_minimax_last_btn = gr.Button("🎬 Send to MiniMax (Last Frame)", variant="secondary", scale=1)
+
                 use_qwen_as_video_btn = gr.Button(
-                    "🎬 Use for Video Generation (Step 2)",
+                    "🎥 Send to Wan 2.2 (Video Input)",
                     variant="secondary"
                 )
 
-    gr.Markdown("---")
-
-    # ── Step 2: Video Generator ───────────────────────────────────────────────
-    with gr.Group(elem_classes="wan-panel"):
-        gr.Markdown("### 🎬 Step 2 — Wan 2.2 Video Generator", elem_classes="section-header")
+    # ── Tool 2: MiniMax-H3 Video & Audio Studio ───────────────────────────────
+    with gr.Accordion("🎬 Tool 2 — MiniMax-H3 · 33B Video & Synchronized Soundtrack Studio (A100 GPU)", open=True, elem_classes="tool-accordion minimax-panel") as minimax_accordion:
+        gr.Markdown("### 🎬 MiniMax-H3 — Joint Video & Synchronized Audio Generation", elem_classes="section-header")
         gr.Markdown(
-            "Upload or use the image generated in Step 1. Add a motion prompt and click **Generate Video**.",
+            "Generates **cinematic video with synchronized sound effects, ambient audio, and voice** from text or images on an NVIDIA A100 GPU. "
+            "Outputs automatically save to `./outputs/`.",
             elem_classes="step-hint"
         )
 
         with gr.Row():
-            with gr.Column():
+            # ── Left column: inputs ───────────────────────────────────────────
+            with gr.Column(scale=1):
+                minimax_prompt = gr.Textbox(
+                    label="Prompt (Visual action + Audio description)",
+                    value=default_minimax_prompt,
+                    placeholder="Describe the visual scene, sound effects, ambience, and music to generate...",
+                    lines=3,
+                )
+                minimax_upsample = gr.Checkbox(
+                    label="✨ Upsample / Enhance prompt (AI prompt rewriter)",
+                    value=False,
+                    info="Uses Qwen3-VL conditioner to rewrite simple prompts into rich cinematic scenes."
+                )
+                with gr.Row():
+                    minimax_first_image = gr.Image(
+                        type="pil", label="📷 First Frame / Start Image (Optional)",
+                        sources=["upload", "clipboard"], elem_id="minimax-first-image", scale=1
+                    )
+                    minimax_last_image = gr.Image(
+                        type="pil", label="📷 Last Frame / End Image (Optional)",
+                        sources=["upload", "clipboard"], elem_id="minimax-last-image", scale=1
+                    )
+
+                with gr.Accordion("MiniMax Advanced Settings", open=False):
+                    minimax_canvas = gr.Dropdown(
+                        label="Canvas & Aspect Ratio",
+                        choices=MINIMAX_CANVASES,
+                        value=DEFAULT_MINIMAX_CANVAS,
+                        info="Higher resolutions produce sharper details."
+                    )
+                    with gr.Row():
+                        minimax_duration = gr.Slider(
+                            minimum=2, maximum=14, step=1, value=5,
+                            label="Duration (seconds)",
+                            info="Auto-snaps to valid 24fps chunk boundaries."
+                        )
+                        minimax_steps = gr.Slider(
+                            minimum=10, maximum=40, step=1, value=28,
+                            label="Inference Steps"
+                        )
+                    with gr.Row():
+                        minimax_seed = gr.Number(label="Seed", value=42, precision=0)
+                        minimax_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+
+                minimax_generate_btn = gr.Button("✨ Generate Video + Soundtrack (MiniMax-H3)", variant="primary")
+
+            # ── Right column: output ─────────────────────────────────────────
+            with gr.Column(scale=1):
+                minimax_video_output = gr.Video(
+                    label="🎬 Generated Video + Synchronized Soundtrack",
+                    autoplay=True, elem_id="minimax-video"
+                )
+                minimax_report = gr.Markdown(visible=True)
+                with gr.Accordion("📝 Upsampled / Rewritten Prompt", open=False, visible=False) as minimax_upsampled_panel:
+                    minimax_upsampled_text = gr.Textbox(show_label=False, lines=4, interactive=False)
+
+                with gr.Row():
+                    minimax_grab_frame_btn = gr.Button("📸 Use Current Frame", variant="secondary")
+                    minimax_timestamp_box = gr.Number(value=0, label="Timestamp", visible=True, elem_id="hidden-minimax-timestamp")
+
+                with gr.Row():
+                    minimax_to_qwen_btn = gr.Button("⬅️ Send Frame to Qwen (Edit)", variant="secondary", scale=1)
+                    minimax_to_wan_btn = gr.Button("🎥 Send Frame to Wan 2.2", variant="secondary", scale=1)
+
+                minimax_file_output = gr.File(label="Download MP4 Video + Audio")
+
+    # ── Tool 3: Wan 2.2 Video Generator ───────────────────────────────────────
+    with gr.Accordion("🎥 Tool 3 — Wan 2.2 · High-Motion Video Generator", open=True, elem_classes="tool-accordion wan-panel") as wan_accordion:
+        gr.Markdown("### 🎥 Wan 2.2 Video Generator", elem_classes="section-header")
+        gr.Markdown(
+            "Upload or route an image from Tool 1 or Tool 2. Add a motion prompt and click **Generate Video**.",
+            elem_classes="step-hint"
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1):
                 input_image_component = gr.Image(
                     type="pil", label="Input Image for Video",
-                    sources=["upload", "clipboard"]
+                    sources=["upload", "clipboard"], elem_id="wan-input-image"
                 )
                 prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v)
                 duration_seconds_input = gr.Slider(
@@ -652,7 +846,7 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                 with gr.Accordion("Advanced Settings", open=False):
                     last_image_component = gr.Image(
                         type="pil", label="Last Frame (Optional)",
-                        sources=["upload", "clipboard"]
+                        sources=["upload", "clipboard"], elem_id="wan-last-image"
                     )
                     negative_prompt_input = gr.Textbox(
                         label="Negative Prompt", value=default_negative_prompt, lines=3
@@ -667,9 +861,9 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                     flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
                     play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)
 
-                generate_button = gr.Button("🎬 Generate Video", variant="primary")
+                generate_button = gr.Button("🎬 Generate Video (Wan 2.2)", variant="primary")
 
-            with gr.Column():
+            with gr.Column(scale=1):
                 video_output = gr.Video(
                     label="Generated Video", autoplay=True,
                     sources=["upload"], interactive=True, elem_id="generated-video"
@@ -678,6 +872,19 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
                     grab_frame_btn = gr.Button("📸 Use Current Frame as Input", variant="secondary")
                     timestamp_box = gr.Number(value=0, label="Timestamp", visible=True, elem_id="hidden-timestamp")
                 file_output = gr.File(label="Download Video")
+
+    # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
+    expand_all_btn.click(
+        fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True)),
+        inputs=[],
+        outputs=[qwen_accordion, minimax_accordion, wan_accordion],
+    )
+
+    collapse_all_btn.click(
+        fn=lambda: (gr.update(open=False), gr.update(open=False), gr.update(open=False)),
+        inputs=[],
+        outputs=[qwen_accordion, minimax_accordion, wan_accordion],
+    )
 
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
 
@@ -737,9 +944,54 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         outputs=[qwen_ref_image_2],
     )
 
+    qwen_to_minimax_first_btn.click(
+        fn=route_qwen_to_minimax_first,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[minimax_first_image],
+    )
+
+    qwen_to_minimax_last_btn.click(
+        fn=route_qwen_to_minimax_last,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[minimax_last_image],
+    )
+
     use_qwen_as_video_btn.click(
         fn=route_qwen_to_video,
         inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[input_image_component],
+    )
+
+    # ── Events: MiniMax-H3 Video & Audio ──────────────────────────────────────
+
+    minimax_generate_btn.click(
+        fn=run_minimax_generate,
+        inputs=[
+            minimax_prompt, minimax_upsample,
+            minimax_first_image, minimax_last_image,
+            minimax_canvas, minimax_duration, minimax_steps,
+            minimax_seed, minimax_randomize_seed,
+        ],
+        outputs=[
+            minimax_video_output, minimax_file_output,
+            minimax_report, minimax_upsampled_text,
+            minimax_upsampled_panel, minimax_seed,
+        ],
+    )
+
+    minimax_grab_frame_btn.click(
+        fn=None, inputs=None, outputs=[minimax_timestamp_box], js=get_minimax_timestamp_js
+    )
+
+    minimax_to_qwen_btn.click(
+        fn=route_minimax_to_qwen,
+        inputs=[minimax_video_output, minimax_timestamp_box],
+        outputs=[qwen_base_image],
+    )
+
+    minimax_to_wan_btn.click(
+        fn=route_minimax_to_wan,
+        inputs=[minimax_video_output, minimax_timestamp_box],
         outputs=[input_image_component],
     )
 
@@ -788,6 +1040,15 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         else:
             return gr.update(value="💤 Qwen Keep-Warm: Paused", variant="secondary")
 
+    async def toggle_minimax_heartbeat():
+        import backend
+        new_state = not backend.minimax_heartbeat_enabled
+        set_minimax_heartbeat_state(new_state)
+        if new_state:
+            return gr.update(value="💓 MiniMax-H3 Keep-Warm: Active", variant="primary")
+        else:
+            return gr.update(value="💤 MiniMax-H3 Keep-Warm: Paused", variant="secondary")
+
     wan_hb_btn.click(
         fn=toggle_wan_heartbeat,
         inputs=[],
@@ -798,6 +1059,12 @@ with gr.Blocks(title="Wan 2.2 Studio") as demo:
         fn=toggle_qwen_heartbeat,
         inputs=[],
         outputs=[qwen_hb_btn],
+    )
+
+    minimax_hb_btn.click(
+        fn=toggle_minimax_heartbeat,
+        inputs=[],
+        outputs=[minimax_hb_btn],
     )
 
     clear_outputs_btn.click(
