@@ -5,6 +5,8 @@ credentials.txt
 
 # Outputs
 outputs/
+outputs*/
+*.zip
 *.mp4
 *.jpg
 *.jpeg

@@ -6,7 +6,6 @@ app = modal.App("wan-backend")
 
 # Define Modal Volumes for caching HF models and saving outputs
 weights_vol = modal.Volume.from_name("wan-cache", create_if_missing=True)
-outputs_vol = modal.Volume.from_name("wan-outputs", create_if_missing=True)
 
 # Build Modal Image with all required system packages, CUDA-enabled PyTorch, and RIFE + dependencies
 wan_image = (
@@ -93,7 +92,7 @@ def download_all_weights():
 @app.cls(
     image=wan_image,
     gpu="A100-80GB",  # A100-80GB provides 80GB VRAM to comfortably fit dual 14B transformers
-    volumes={"/root/.cache/huggingface": weights_vol, "/app/outputs": outputs_vol},
+    volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=1800,
     min_containers=0,
@@ -284,19 +283,6 @@ class WanModel:
 
         final_fps = 16 * int(frame_factor)
         export_to_video(final_frames, video_path, fps=final_fps, quality=quality)
-
-        # Copy to Modal persistent outputs volume
-        persistent_dir = "/app/outputs"
-        os.makedirs(persistent_dir, exist_ok=True)
-        persistent_path = os.path.join(persistent_dir, f"output_{seed}.mp4")
-        try:
-            print(f"[Remote] Copying video to persistent volume: {persistent_path}...")
-            shutil.copy2(video_path, persistent_path)
-            # Commit changes if the volume class has a commit method
-            if hasattr(outputs_vol, "commit"):
-                outputs_vol.commit()
-        except Exception as e:
-            print(f"ERROR: Could not copy video to persistent volume: {e}")
 
         # 6. Read and yield output bytes
         with open(video_path, "rb") as f:

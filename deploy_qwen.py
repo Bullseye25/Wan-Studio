@@ -10,7 +10,6 @@ import modal
 app = modal.App("qwen-image-backend")
 
 weights_vol = modal.Volume.from_name("wan-cache", create_if_missing=True)
-outputs_vol = modal.Volume.from_name("wan-outputs", create_if_missing=True)
 
 # Build image with Python 3.12, CUDA 12.4
 qwen_image = (
@@ -107,10 +106,7 @@ def download_qwen_weights():
 @app.cls(
     image=qwen_image,
     gpu="A100-80GB",  # 20B parameters (~40GB in bf16) runs comfortably and rapidly on 80GB VRAM
-    volumes={
-        "/root/.cache/huggingface": weights_vol,
-        "/outputs": outputs_vol,
-    },
+    volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=1800,
     min_containers=0,
@@ -245,27 +241,9 @@ class QwenImageEditModel:
             with torch.inference_mode():
                 result = self.pipe(**pipe_kwargs).images[0]
 
-            # Save copy to Modal volume output folder
-            try:
-                modal_output_dir = pathlib.Path("/outputs/output")
-                modal_output_dir.mkdir(parents=True, exist_ok=True)
-                
-                filename = f"qwen_{int(time.time())}_{current_seed}_{i+1}.jpg" if count > 1 else f"qwen_{int(time.time())}_{current_seed}.jpg"
-                modal_path = modal_output_dir / filename
-                
-                result.save(modal_path, format="JPEG", quality=95)
-                print(f"[QwenImageEditModel] Saved copy {i+1}/{count} to Modal Volume: {modal_path}")
-            except Exception as e:
-                print(f"[QwenImageEditModel] Warning: Could not save copy to Modal Volume: {e}")
-
             out_buf = io.BytesIO()
             result.save(out_buf, format="JPEG", quality=95)
             output_bytes_list.append(out_buf.getvalue())
-
-        try:
-            outputs_vol.commit()
-        except Exception:
-            pass
 
         # Cleanup
         gc.collect()
