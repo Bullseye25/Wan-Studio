@@ -19,10 +19,6 @@ qwen_image = (
         "git", "git-lfs", "libgl1", "libglib2.0-0",
         "build-essential", "ninja-build", "ffmpeg"
     )
-    .run_commands(
-        "git lfs install",
-        "git clone https://huggingface.co/spaces/davidharryv/qwen-image-edit-rapid-aio-nsfw-static /qwen"
-    )
     .pip_install(
         "torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0",
         index_url="https://download.pytorch.org/whl/cu124"
@@ -98,7 +94,8 @@ def download_qwen_weights():
         except Exception as e:
             print(f"Attempt for {model_id} failed: {e}. Trying fallback...")
 
-    print("\nQwen Image Edit weights cached successfully!")
+    weights_vol.commit()
+    print("\nQwen Image Edit weights cached successfully in Modal volume!")
 
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -133,9 +130,6 @@ class QwenImageEditModel:
         import os
         import torch
         import huggingface_hub
-
-        # Add cloned Space to Python path
-        sys.path.insert(0, "/qwen")
 
         hf_token = os.environ.get("HF_TOKEN")
         if hf_token:

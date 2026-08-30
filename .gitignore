@@ -3,9 +3,10 @@ credentials.txt
 *.env
 .env*
 
-# Outputs
+# Outputs & Local Assets
 outputs/
 outputs*/
+long shot/
 *.zip
 *.mp4
 *.jpg
