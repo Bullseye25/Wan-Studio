@@ -1,5 +1,6 @@
 # Secrets and Credentials
 credentials.txt
+New Text Document.txt
 *.env
 .env*
 
