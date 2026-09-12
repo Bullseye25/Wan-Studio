@@ -30,7 +30,7 @@ def main():
     print("6. Pre-cache Qwen Image Edit model weights on Modal")
     print("7. Pre-cache MiniMax-H3 model weights on Modal")
     print("8. Start frontend on Local Network (mobile access)")
-    print("9. Reconnect/Setup Modal account (runs 'modal setup')")
+    print("9. Switch / Manage Modal Account Profiles (runs 'modal profile' / 'modal setup')")
     print("10. Clear local outputs folder (outputs/)")
 
     choice = input("\nEnter choice [1-10] (default 1): ").strip()
@@ -39,19 +39,32 @@ def main():
         os.environ["WAN_SHARE_LAN"] = "1"
 
     if choice == "9":
-        print("\n---> Setting up Modal account...")
         try:
             import modal
         except ImportError:
             install_package("modal")
-        
-        cmd = [sys.executable, "-m", "modal", "setup"]
-        try:
-            subprocess.run(cmd, check=True)
-            print("\n✓ Modal setup completed successfully!")
-        except subprocess.CalledProcessError as e:
-            print(f"\n❌ Modal setup failed: {e}")
-            sys.exit(1)
+
+        print("\n" + "=" * 55)
+        print("         MODAL ACCOUNT & PROFILE MANAGER         ")
+        print("=" * 55)
+        subprocess.run([sys.executable, "-m", "modal", "profile", "list"])
+        print("\nActions:")
+        print("  [1] Switch to an existing profile (activate account)")
+        print("  [2] Log into / set up a new Modal account ('modal setup')")
+        print("  [0] Back to main menu")
+        sub_choice = input("\nEnter choice [0-2] (default 1): ").strip()
+        if sub_choice == "1" or sub_choice == "":
+            profile_name = input("Enter profile/workspace name to activate: ").strip()
+            if profile_name:
+                res = subprocess.run([sys.executable, "-m", "modal", "profile", "activate", profile_name])
+                if res.returncode == 0:
+                    print(f"\n✓ Switched active Modal account to: '{profile_name}'")
+                    print("  Note: Re-deploy backend to this account with option 2/3/4 if needed.")
+                else:
+                    print(f"\n❌ Could not activate profile '{profile_name}'. Check spelling.")
+        elif sub_choice == "2":
+            print("\n---> Running 'modal setup' in browser...")
+            subprocess.run([sys.executable, "-m", "modal", "setup"])
         sys.exit(0)
 
     if choice == "2":
