@@ -25,20 +25,18 @@ def main():
     print("1. Start Studio frontend locally")
     print("2. Deploy/Redeploy Wan 2.2 backend to Modal")
     print("3. Deploy/Redeploy Qwen Image Edit backend to Modal")
-    print("4. Deploy/Redeploy MiniMax-H3 backend to Modal (A100 GPU)")
-    print("5. Pre-cache Wan 2.2 model weights on Modal")
-    print("6. Pre-cache Qwen Image Edit model weights on Modal")
-    print("7. Pre-cache MiniMax-H3 model weights on Modal")
-    print("8. Start frontend on Local Network (mobile access)")
-    print("9. Switch / Manage Modal Account Profiles (runs 'modal profile' / 'modal setup')")
-    print("10. Clear local outputs folder (outputs/)")
+    print("4. Pre-cache Wan 2.2 model weights on Modal")
+    print("5. Pre-cache Qwen Image Edit model weights on Modal")
+    print("6. Start frontend on Local Network (mobile access)")
+    print("7. Switch / Manage Modal Account Profiles (runs 'modal profile' / 'modal setup')")
+    print("8. Clear local outputs folder (outputs/)")
 
-    choice = input("\nEnter choice [1-10] (default 1): ").strip()
+    choice = input("\nEnter choice [1-8] (default 1): ").strip()
 
-    if choice == "8":
+    if choice == "6":
         os.environ["WAN_SHARE_LAN"] = "1"
 
-    if choice == "9":
+    if choice == "7":
         try:
             import modal
         except ImportError:
@@ -59,7 +57,7 @@ def main():
                 res = subprocess.run([sys.executable, "-m", "modal", "profile", "activate", profile_name])
                 if res.returncode == 0:
                     print(f"\n✓ Switched active Modal account to: '{profile_name}'")
-                    print("  Note: Re-deploy backend to this account with option 2/3/4 if needed.")
+                    print("  Note: Re-deploy backend to this account with option 2 or 3 if needed.")
                 else:
                     print(f"\n❌ Could not activate profile '{profile_name}'. Check spelling.")
         elif sub_choice == "2":
@@ -100,22 +98,6 @@ def main():
         sys.exit(0)
 
     elif choice == "4":
-        print("\n---> Deploying MiniMax-H3 backend to Modal (A100 GPU)...")
-        try:
-            import modal
-        except ImportError:
-            install_package("modal")
-
-        cmd = [sys.executable, "-m", "modal", "deploy", "deploy_minimax.py"]
-        try:
-            subprocess.run(cmd, check=True)
-            print("\n✓ MiniMax-H3 backend deployed to Modal on A100 GPU!")
-        except subprocess.CalledProcessError as e:
-            print(f"\n❌ Deployment failed: {e}")
-            sys.exit(1)
-        sys.exit(0)
-
-    elif choice == "5":
         print("\n---> Caching Wan 2.2 model weights in Modal volume...")
         try:
             import modal
@@ -131,7 +113,7 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
-    elif choice == "6":
+    elif choice == "5":
         print("\n---> Caching Qwen Image Edit model weights in Modal volume...")
         try:
             import modal
@@ -147,23 +129,7 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
-    elif choice == "7":
-        print("\n---> Caching MiniMax-H3 model weights in Modal volume...")
-        try:
-            import modal
-        except ImportError:
-            install_package("modal")
-
-        cmd = [sys.executable, "-m", "modal", "run", "deploy_minimax.py::download_minimax_weights"]
-        try:
-            subprocess.run(cmd, check=True)
-            print("\n✓ MiniMax-H3 model weights cached successfully!")
-        except subprocess.CalledProcessError as e:
-            print(f"\n❌ Cache preloading failed: {e}")
-            sys.exit(1)
-        sys.exit(0)
-
-    elif choice == "10":
+    elif choice == "8":
         print("\n---> Clearing local outputs folder...")
         outputs_dir = os.path.join(script_dir, "outputs")
         if os.path.exists(outputs_dir):

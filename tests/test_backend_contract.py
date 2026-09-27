@@ -27,26 +27,19 @@ class TestQwenAndWanContracts(unittest.TestCase):
         self.assertNotIn("lora_name", params)
         self.assertNotIn("lora_weight", params)
 
-    def test_app_has_minimax_and_qwen_symbols(self):
-        """Verify app module defines and exports Qwen and MiniMax symbols."""
+    def test_app_has_qwen_and_wan_symbols_and_no_minimax(self):
+        """Verify app module defines Qwen/Wan and does not export MiniMax symbols."""
         self.assertFalse(hasattr(app, "run_flux_generate"))
         self.assertTrue(hasattr(app, "run_qwen_generate"))
-        self.assertTrue(hasattr(app, "run_minimax_generate"))
-        self.assertTrue(hasattr(app, "route_qwen_to_minimax_first"))
-        self.assertTrue(hasattr(app, "route_minimax_to_qwen"))
+        self.assertFalse(hasattr(app, "run_minimax_generate"))
+        self.assertFalse(hasattr(app, "route_qwen_to_minimax_first"))
+        self.assertFalse(hasattr(app, "route_minimax_to_qwen"))
 
-    def test_minimax_remote_inference_signature(self):
-        """Verify run_minimax_remote_inference has all required parameters."""
-        sig = inspect.signature(backend.run_minimax_remote_inference)
-        params = list(sig.parameters.keys())
-        self.assertIn("prompt", params)
-        self.assertIn("first_image", params)
-        self.assertIn("last_image", params)
-        self.assertIn("canvas", params)
-        self.assertIn("duration", params)
-        self.assertIn("steps", params)
-        self.assertIn("seed", params)
-        self.assertIn("upsample", params)
+    def test_no_minimax_in_backend(self):
+        """Verify MiniMax functions and models are removed from backend."""
+        self.assertFalse(hasattr(backend, "run_minimax_remote_inference"))
+        self.assertFalse(hasattr(backend, "get_minimax_model"))
+        self.assertFalse(hasattr(backend, "set_minimax_heartbeat_state"))
 
     def test_no_wan_t2v_in_backend(self):
         """Verify Wan 2.1 T2V functions are removed from backend."""

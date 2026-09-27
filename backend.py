@@ -8,15 +8,13 @@ import time
 # Global cached model references to avoid redundant gRPC metadata lookups
 _wan_model_instance = None
 _qwen_model_instance = None
-_minimax_model_instance = None
 
 
 def reset_cached_models():
     """Resets cached model instances (useful for testing and fresh reconnects)."""
-    global _wan_model_instance, _qwen_model_instance, _minimax_model_instance
+    global _wan_model_instance, _qwen_model_instance
     _wan_model_instance = None
     _qwen_model_instance = None
-    _minimax_model_instance = None
 
 
 def get_wan_model(force_refresh: bool = False):
@@ -33,14 +31,6 @@ def get_qwen_model(force_refresh: bool = False):
         model_cls = modal.Cls.from_name("qwen-image-backend", "QwenImageEditModel")
         _qwen_model_instance = model_cls()
     return _qwen_model_instance
-
-
-def get_minimax_model(force_refresh: bool = False):
-    global _minimax_model_instance
-    if _minimax_model_instance is None or force_refresh:
-        model_cls = modal.Cls.from_name("minimax-backend", "MiniMaxH3Model")
-        _minimax_model_instance = model_cls()
-    return _minimax_model_instance
 
 
 def run_remote_inference(
@@ -280,100 +270,16 @@ def qwen_image_edit_remote(
     return result_bytes_list
 
 
-def run_minimax_remote_inference(
-    prompt: str,
-    first_image=None,
-    last_image=None,
-    canvas: str = "960x544 · 16:9 fast",
-    duration: int = 5,
-    steps: int = 28,
-    seed: int = 42,
-    upsample: bool = False,
-    progress=None,
-) -> tuple[str, str, str]:
-    """
-    Forwards a video generation request to the MiniMax-H3 modal backend on A100 GPU.
-    Generates video with a synchronized soundtrack and saves the output to ./outputs/.
-    Returns: (video_path, report, refined_prompt)
-    """
-    import io
-    import time
-    import pathlib
-
-    first_bytes = None
-    if first_image is not None:
-        bio = io.BytesIO()
-        first_image.save(bio, format="PNG")
-        first_bytes = bio.getvalue()
-
-    last_bytes = None
-    if last_image is not None:
-        bio = io.BytesIO()
-        last_image.save(bio, format="PNG")
-        last_bytes = bio.getvalue()
-
-    max_retries = 2
-    model_instance = None
-    for attempt in range(max_retries + 1):
-        try:
-            model_instance = get_minimax_model(force_refresh=(attempt > 0))
-            break
-        except Exception as e:
-            if attempt < max_retries:
-                time.sleep(1.0)
-                continue
-            raise RuntimeError(
-                f"Could not connect to Modal backend 'minimax-backend'. Did you deploy it? "
-                f"Run Option 4 in start.py first. Error: {e}"
-            )
-
-    if progress:
-        progress(0.1, desc="Connecting to MiniMax-H3 on A100 GPU...")
-
-    res = model_instance.generate.remote(
-        prompt=prompt,
-        first_image_bytes=first_bytes,
-        last_image_bytes=last_bytes,
-        canvas=canvas,
-        duration=int(duration),
-        steps=int(steps),
-        seed=int(seed),
-        upsample=bool(upsample),
-    )
-
-    video_bytes = res.get("video_bytes")
-    report = res.get("report", "")
-    refined_prompt = res.get("refined_prompt", "")
-    filename = res.get("filename", f"minimax_{int(time.time())}_{seed}.mp4")
-
-    if not video_bytes:
-        raise RuntimeError("MiniMax-H3 backend finished execution but did not return any video bytes.")
-
-    outputs_dir = pathlib.Path(__file__).parent / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-    output_path = outputs_dir / filename
-
-    with open(output_path, "wb") as f:
-        f.write(video_bytes)
-
-    print(f"[local-backend] Writing output MiniMax video: {output_path} ({len(video_bytes)} bytes)")
-    record_minimax_activity()
-
-    return str(output_path), report, refined_prompt
-
-
 # ─── Heartbeat & Cost-Effective Keep-Alive State ─────────────────────────────
 
 last_frontend_heartbeat_time = time.time()
 last_wan_activity_time = 0.0
 last_qwen_activity_time = 0.0
-last_minimax_activity_time = 0.0
 
 # Heartbeats default to False (Paused) to prevent unintended Modal GPU credit burn.
 # Users can toggle keepalive on for active multi-generation sessions.
 wan_heartbeat_enabled = False
 qwen_heartbeat_enabled = False
-minimax_heartbeat_enabled = False
 
 # Maximum idle duration (3 minutes) to keep a warm container alive after generation
 KEEPALIVE_IDLE_WINDOW = 180.0
@@ -394,11 +300,6 @@ def record_qwen_activity():
     last_qwen_activity_time = time.time()
 
 
-def record_minimax_activity():
-    global last_minimax_activity_time
-    last_minimax_activity_time = time.time()
-
-
 def set_wan_heartbeat_state(enabled: bool):
     global wan_heartbeat_enabled
     wan_heartbeat_enabled = enabled
@@ -411,19 +312,13 @@ def set_qwen_heartbeat_state(enabled: bool):
     print(f"[backend] Qwen Image Edit heartbeat state toggled: {enabled}")
 
 
-def set_minimax_heartbeat_state(enabled: bool):
-    global minimax_heartbeat_enabled
-    minimax_heartbeat_enabled = enabled
-    print(f"[backend] MiniMax-H3 heartbeat state toggled: {enabled}")
-
-
 def start_keepalive_thread():
     """
     Spawns a background thread that pings active backends every 25 seconds ONLY when:
       1. The frontend tab is actively open (heartbeat received within 45s).
       2. The user explicitly enabled keepalive for that model.
       3. The user generated with that specific model within the last 3 minutes.
-    This strictly avoids waking up unneeded A100 GPU containers or draining credits when idle.
+    This strictly avoids waking up unneeded GPU containers or draining credits when idle.
     """
     import threading
     import time
@@ -450,15 +345,6 @@ def start_keepalive_thread():
                     if (now - last_qwen_activity_time) < KEEPALIVE_IDLE_WINDOW:
                         try:
                             m = get_qwen_model()
-                            m.heartbeat.remote()
-                        except Exception:
-                            pass
-
-                # 3. Ping MiniMax backend ONLY if enabled and recently used (Strict A100 cost guard)
-                if minimax_heartbeat_enabled and last_minimax_activity_time > 0:
-                    if (now - last_minimax_activity_time) < KEEPALIVE_IDLE_WINDOW:
-                        try:
-                            m = get_minimax_model()
                             m.heartbeat.remote()
                         except Exception:
                             pass
