@@ -20,8 +20,8 @@ wan_image = (
         index_url="https://download.pytorch.org/whl/cu124"
     )
     .run_commands(
-        # Clone the Hugging Face Space repository into /app (for layout, RIFE code, etc.)
-        "git clone https://huggingface.co/spaces/kulkas2pintu/wan555 /app"
+        # Clone Practical-RIFE repository into /app (for video frame interpolation)
+        "git clone https://github.com/hzwer/Practical-RIFE.git /app"
     )
     .run_commands(
         # Download and extract the RIFE model weights inside the container
