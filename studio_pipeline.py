@@ -2,23 +2,27 @@
 Studio Automated Multi-Agent Story & Video Production Pipeline
 =============================================================
 This module orchestrates the complete end-to-end studio pipeline:
-1. Story & Character Breakdown (Gemma 4: 31B via Ollama Cloud)
-2. Character Portrait Synthesis (Z-Image Turbo with locked identical seed)
-3. Scene Keyframe Synthesis (Qwen Image Edit with multi-reference character transfer)
-4. Video Clip Animation (Wan 2.2 with 4k+1 temporal constraints & CFG stability)
-5. Video Assembly & Stitching (Seamless 30s final movie generation)
+1. Story & Character Breakdown   (Gemma 4: 31B via Ollama Cloud)
+2. Character Portrait Synthesis  (Z-Image Turbo with locked identical seed)
+3. Scene Keyframe Synthesis      (Qwen Image Edit with multi-reference character transfer)
+4. Scene Animation Direction     (Gemma 4: 31B *vision* — watches each keyframe and writes
+                                  a per-clip shot plan: action timeline, camera, Wan params)
+5. Video Clip Animation          (Wan 2.2 with 4k+1 temporal constraints & CFG stability)
+6. Video Assembly & Stitching    (Seamless final movie generation)
 """
 
 import os
 import io
 import re
 import json
+import math
 import time
+import base64
 import pathlib
 import tempfile
 import subprocess
 import urllib.request
-from typing import Callable, Optional, Dict, List, Any, Tuple
+from typing import Callable, Optional, Dict, List, Any
 from PIL import Image
 
 import imageio_ffmpeg
@@ -42,6 +46,71 @@ ASPECT_RATIO_PRESETS = {
     "16:9 Landscape (Cinematic)":   {"qwen_w": 1024, "qwen_h": 576,  "wan_w": 832, "wan_h": 480},
     "1:1 Square (Social Media)":     {"qwen_w": 1024, "qwen_h": 1024, "wan_w": 640, "wan_h": 640},
 }
+
+# Wan 2.2 temporal limits (3D-VAE requires 4k+1 frames; native window 17..81 frames @ 16fps)
+WAN_FPS = 16
+WAN_MIN_FRAMES = 17
+WAN_MAX_FRAMES = 81
+MAX_CLIP_SECONDS = 5.0   # 81 frames / 16 fps ≈ 5.06s — longer clips degrade (pixel break-up, face drift)
+MIN_CLIP_SECONDS = 1.0
+
+# Wan 2.2 Lightning defaults — kept identical to the tuned Tool 2 defaults in app.py
+WAN_DEFAULTS = {
+    "steps": 8,
+    "guidance_scale": 2.0,
+    "guidance_scale_2": 1.5,
+    "flow_shift": 3.0,
+    "quality": 6,
+    "scheduler_name": "UniPCMultistep",
+    "frame_multiplier": WAN_FPS,   # no RIFE interpolation by default
+}
+
+# Safe ranges the Director's suggested parameters are clamped into
+DIRECTOR_PARAM_LIMITS = {
+    "guidance_scale": (1.5, 2.5),
+    "steps": (6, 12),
+    "flow_shift": (2.0, 5.0),
+    "motion_intensity": (1, 5),
+}
+
+IDENTITY_NEGATIVE = (
+    "face morphing, changing face, altered facial features, changing identity, inconsistent face, "
+    "shifting features, melting face, face distortion, mutating face, character design change, "
+    "outfit change, color shift, temporal flickering, pixel noise, pixel degradation, warping, tearing"
+)
+
+QWEN_MAX_INPUT_IMAGES = 3   # base + 2 references (Qwen-Image-Edit-Plus multi-image limit)
+
+
+# ── Pure helpers (unit-testable) ──────────────────────────────────────────────
+
+def frames_for_duration(duration_seconds: float) -> int:
+    """Nearest valid Wan 2.2 frame count (4k+1) for a duration, clamped to 17..81."""
+    raw = int(round(float(duration_seconds) * WAN_FPS))
+    k = round(raw / 4)
+    k = max((WAN_MIN_FRAMES - 1) // 4, min((WAN_MAX_FRAMES - 1) // 4, k))
+    return 1 + 4 * k
+
+
+def plan_scene_count(target_duration: float, requested_scenes: int = 0) -> int:
+    """Minimum scenes needed so no clip exceeds Wan's ~5s window (e.g. 30s -> 6 scenes)."""
+    needed = math.ceil(float(target_duration) / MAX_CLIP_SECONDS)
+    return max(int(requested_scenes or 0), needed, 1)
+
+
+def _clamp(value, lo, hi, default):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(v):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _trim(text: Any, limit: int) -> str:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    return s if len(s) <= limit else s[: limit - 1].rsplit(" ", 1)[0] + "…"
 
 
 class StudioPipeline:
@@ -74,32 +143,76 @@ class StudioPipeline:
             d.mkdir(parents=True, exist_ok=True)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # LLM transport (shared by Story Architect and Animation Director)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _chat_completion(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 2500,
+        temperature: float = 0.7,
+        timeout: int = 120,
+        max_retries: int = 2,
+    ) -> str:
+        """POSTs to the OpenAI-compatible Ollama Cloud endpoint and returns the message text."""
+        req_body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        last_err = None
+        for attempt in range(max_retries + 1):
+            req = urllib.request.Request(
+                self.endpoint_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                data=json.dumps(req_body).encode("utf-8"),
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    resp_data = json.loads(resp.read().decode("utf-8"))
+                    return resp_data["choices"][0]["message"]["content"]
+            except Exception as e:
+                last_err = e
+                if attempt < max_retries:
+                    time.sleep(2.0)
+                    continue
+        raise RuntimeError(f"Ollama API request failed: {last_err}")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # STAGE 1: Story Generation & Character Extraction (Gemma 4: 31B)
     # ─────────────────────────────────────────────────────────────────────────
 
     def generate_story_and_characters(
         self,
         prompt: str,
-        num_scenes: int = 5,
+        num_scenes: int = 6,
         target_duration: float = 30.0,
         art_style: str = "2D vibrant cartoon animation",
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Queries Ollama Cloud (gemma4:31b) to produce a structured short story with
-        extracted character visual details and scene-by-scene director instructions.
+        extracted character visual details and scene-by-scene story beats.
+        Scene count is raised automatically so no clip exceeds Wan's 5s window.
         """
-        if progress_cb:
-            progress_cb(0.05, f"Consulting Gemma 4: 31B for story and character architecture...")
+        num_scenes = plan_scene_count(target_duration, num_scenes)
+        scene_duration = round(min(MAX_CLIP_SECONDS, target_duration / num_scenes), 2)
 
-        scene_duration = round(target_duration / max(1, num_scenes), 1)
+        if progress_cb:
+            progress_cb(0.03, "Consulting Gemma 4: 31B for story and character architecture...")
 
         system_prompt = (
             "You are a master animation director and AI scriptwriter.\n"
-            f"The user wants a structured short movie ({target_duration} seconds total, broken into {num_scenes} scenes, ~{scene_duration}s each).\n"
-            "You MUST extract exact character visual details (face, hair, clothing, signature traits) and generate dedicated "
-            "prompts for: (1) Z-Image Turbo character portraits, (2) Qwen Image Edit scene keyframes, and (3) Wan 2.2 temporal camera motion.\n"
-            "CRITICAL: Output ONLY valid JSON matching this schema without any surrounding markdown backticks or commentary:\n"
+            f"The user wants a short movie: {target_duration} seconds total, EXACTLY {num_scenes} scenes, "
+            f"~{scene_duration}s each. Every scene is ONE continuous shot animated from a single keyframe, so each "
+            "scene must describe a single clear action that fits in 5 seconds (no cuts inside a scene).\n"
+            "Extract exact character visual details (face, hair, clothing, signature traits) so every image model "
+            "renders them identically. Keep character designs fixed across all scenes.\n"
+            "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
             "{\n"
             '  "title": "Short Film Title",\n'
             '  "art_style": "Visual style description",\n'
@@ -113,8 +226,8 @@ class StudioPipeline:
             '      "hair": "Hair/fur style, color, texture, length",\n'
             '      "clothing": "Complete outfit, fabric colors, style, shoes",\n'
             '      "signature_details": "Unique identifiable items, props, or accessories",\n'
-            '      "z_image_prompt": "Ultra-detailed portrait prompt for Z-Image Turbo focusing on upper body and face against clean neutral studio background, 4k, crisp character model sheet",\n'
-            '      "negative_prompt": "blurry, distorted, ugly, low quality, artifacts"\n'
+            '      "z_image_prompt": "Ultra-detailed full-body character sheet prompt for Z-Image Turbo, front view, '
+            'clean neutral studio background, in the target art style"\n'
             "    }\n"
             "  ],\n"
             '  "scenes": [\n'
@@ -122,84 +235,122 @@ class StudioPipeline:
             '      "scene_number": 1,\n'
             '      "title": "Scene Name",\n'
             f'      "duration_seconds": {scene_duration},\n'
-            '      "scenario": "Story beat narrative description",\n'
-            '      "qwen_scene_prompt": "Prompt for Qwen Image Edit describing the complete environment and character actions, incorporating referenced characters while maintaining locked identity",\n'
-            '      "wan_motion_prompt": "Wan 2.2 motion prompt describing temporal action, lighting shifts, and camera kinematics, preserving subject appearance and facial identity without morphing",\n'
-            '      "camera_movement": "Camera motion e.g. Slow Cinematic Push-In / Static Tripod Shot",\n'
+            '      "scenario": "Story beat: what happens in this single shot",\n'
+            '      "qwen_scene_prompt": "Keyframe image prompt: environment, composition, character poses at the START of the shot",\n'
+            '      "wan_motion_prompt": "Draft motion description for the shot",\n'
+            '      "camera_movement": "e.g. Slow Cinematic Push-In / Static Tripod Shot",\n'
             '      "character_ids": ["char_1"]\n'
             "    }\n"
             "  ]\n"
             "}"
         )
 
-        user_content = f"Story Premise: {prompt}\nTarget Style: {art_style}\nNumber of Scenes: {num_scenes}\nTotal Duration: {target_duration}s."
+        user_content = (
+            f"Story Premise: {prompt}\nTarget Style: {art_style}\n"
+            f"Number of Scenes: {num_scenes}\nTotal Duration: {target_duration}s."
+        )
 
-        req_body = {
-            "model": self.model,
-            "messages": [
+        raw_text = self._chat_completion(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "temperature": 0.7,
-            "max_tokens": 2500,
-        }
-
-        req = urllib.request.Request(
-            self.endpoint_url,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps(req_body).encode("utf-8"),
+            max_tokens=3000,
+            temperature=0.7,
         )
 
-        max_retries = 2
-        raw_text = ""
-        for attempt in range(max_retries + 1):
-            try:
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    resp_data = json.loads(resp.read().decode("utf-8"))
-                    raw_text = resp_data["choices"][0]["message"]["content"]
-                    break
-            except Exception as e:
-                if attempt < max_retries:
-                    time.sleep(2.0)
-                    continue
-                raise RuntimeError(f"Ollama API request failed: {e}")
-
         parsed_data = self._parse_json_safely(raw_text)
-
-        # Basic schema guarantees
-        if "characters" not in parsed_data or not isinstance(parsed_data["characters"], list):
-            parsed_data["characters"] = [
-                {
-                    "id": "char_1",
-                    "name": "Hero",
-                    "face": "Friendly and expressive",
-                    "hair": "Clean styled",
-                    "clothing": "Casual animation attire",
-                    "signature_details": "Signature badge",
-                    "z_image_prompt": f"Character portrait of {prompt}, clean neutral studio background, 4k",
-                }
-            ]
-        if "scenes" not in parsed_data or not isinstance(parsed_data["scenes"], list):
-            parsed_data["scenes"] = [
-                {
-                    "scene_number": 1,
-                    "title": "Scene 1",
-                    "duration_seconds": scene_duration,
-                    "scenario": prompt,
-                    "qwen_scene_prompt": prompt,
-                    "wan_motion_prompt": "cinematic smooth motion, locked facial identity, photorealistic animation",
-                    "camera_movement": "Slow Cinematic Push-In",
-                    "character_ids": ["char_1"],
-                }
-            ]
+        parsed_data = self.normalize_story(
+            parsed_data, prompt=prompt, num_scenes=num_scenes,
+            target_duration=target_duration, art_style=art_style,
+        )
 
         if progress_cb:
-            progress_cb(0.20, f"Story generated: '{parsed_data.get('title', 'Studio Story')}' ({len(parsed_data.get('characters', []))} characters, {len(parsed_data.get('scenes', []))} scenes)")
-
+            progress_cb(
+                0.15,
+                f"Story generated: '{parsed_data.get('title', 'Studio Story')}' "
+                f"({len(parsed_data['characters'])} characters, {len(parsed_data['scenes'])} scenes)",
+            )
         return parsed_data
+
+    @staticmethod
+    def normalize_story(
+        data: Dict[str, Any],
+        prompt: str,
+        num_scenes: int,
+        target_duration: float,
+        art_style: str,
+    ) -> Dict[str, Any]:
+        """
+        Enforces the schema contract on LLM output: valid character ids, scenes that reference
+        existing characters, sequential numbering, and per-scene durations within Wan's window.
+        """
+        data = dict(data or {})
+        data.setdefault("title", "Studio Story")
+        data.setdefault("art_style", art_style)
+
+        chars = data.get("characters")
+        if not isinstance(chars, list) or not chars:
+            chars = [{
+                "id": "char_1",
+                "name": "Hero",
+                "face": "Friendly and expressive",
+                "hair": "Clean styled",
+                "clothing": "Casual animation attire",
+                "signature_details": "",
+                "z_image_prompt": f"Character sheet of the protagonist of: {prompt}, {art_style}, neutral studio background",
+            }]
+        norm_chars, seen_ids = [], set()
+        for i, c in enumerate(chars):
+            if not isinstance(c, dict):
+                continue
+            c = dict(c)
+            cid = str(c.get("id") or f"char_{i+1}")
+            if cid in seen_ids:
+                cid = f"{cid}_{i+1}"
+            seen_ids.add(cid)
+            c["id"] = cid
+            c.setdefault("name", f"Character {i+1}")
+            norm_chars.append(c)
+        data["characters"] = norm_chars
+        valid_ids = [c["id"] for c in norm_chars]
+
+        scenes = data.get("scenes")
+        if not isinstance(scenes, list) or not scenes:
+            scenes = [{
+                "title": "Scene 1",
+                "scenario": prompt,
+                "qwen_scene_prompt": prompt,
+                "wan_motion_prompt": "cinematic smooth motion, locked character identity",
+                "camera_movement": "Slow Cinematic Push-In",
+                "character_ids": valid_ids[:1],
+            }]
+        scenes = [s for s in scenes if isinstance(s, dict)][: max(1, int(num_scenes))]
+
+        per_scene = round(_clamp(target_duration / max(1, len(scenes)), MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, 3.5), 2)
+        norm_scenes = []
+        for i, s in enumerate(scenes):
+            s = dict(s)
+            s["scene_number"] = i + 1
+            s.setdefault("title", f"Scene {i+1}")
+            s.setdefault("scenario", s.get("qwen_scene_prompt", ""))
+            ids = s.get("character_ids")
+            if isinstance(ids, str):
+                ids = [ids]
+            ids = [cid for cid in (ids or []) if cid in valid_ids]
+            s["character_ids"] = ids or valid_ids[:1]
+            s["duration_seconds"] = round(
+                _clamp(s.get("duration_seconds", per_scene), MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, per_scene), 2
+            )
+            norm_scenes.append(s)
+
+        # Re-balance so clip durations sum to the target (capped by the per-clip max)
+        total = sum(s["duration_seconds"] for s in norm_scenes)
+        if abs(total - target_duration) > 0.5:
+            for s in norm_scenes:
+                s["duration_seconds"] = per_scene
+        data["scenes"] = norm_scenes
+        return data
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 2: Character Portrait Synthesis via Z-Image Turbo (Locked Seed)
@@ -209,11 +360,12 @@ class StudioPipeline:
         self,
         characters: List[Dict[str, Any]],
         shared_seed: int = 42,
+        art_style: str = "",
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Synthesizes reference portrait images for all extracted characters using
-        Z-Image Turbo on Modal. Crucially, uses the SAME LOCKED SEED for all characters
+        Z-Image Turbo on Modal. Uses the SAME LOCKED SEED for all characters
         to establish a coherent base latent structure and visual harmony.
         """
         total = len(characters)
@@ -222,13 +374,17 @@ class StudioPipeline:
         for idx, char in enumerate(characters):
             name = char.get("name", f"Char_{idx+1}")
             char_id = char.get("id", f"char_{idx+1}")
-            char_prompt = char.get("z_image_prompt") or (
-                f"Full portrait of {name}, {char.get('face', '')}, {char.get('hair', '')}, "
-                f"{char.get('clothing', '')}, {char.get('signature_details', '')}, neutral studio background, 4k, crisp lighting"
+            details = ", ".join(
+                v for v in [char.get("face"), char.get("hair"), char.get("clothing"), char.get("signature_details")] if v
             )
+            base_prompt = char.get("z_image_prompt") or f"Full-body character sheet of {name}"
+            char_prompt = f"{base_prompt}, {details}" if details and details not in base_prompt else base_prompt
+            if art_style and art_style.lower() not in char_prompt.lower():
+                char_prompt = f"{char_prompt}, {art_style}"
+            char_prompt += ", single character, front view, clean neutral background, crisp lighting"
 
             if progress_cb:
-                pct = 0.20 + (idx / max(1, total)) * 0.20
+                pct = 0.15 + (idx / max(1, total)) * 0.15
                 progress_cb(pct, f"Synthesizing character reference {idx+1}/{total}: '{name}' (Seed {shared_seed})...")
 
             print(f"[StudioPipeline] Generating Z-Image Turbo portrait for '{name}' with locked seed {shared_seed}...")
@@ -249,7 +405,7 @@ class StudioPipeline:
             updated_characters.append(char_entry)
 
         if progress_cb:
-            progress_cb(0.40, f"All {total} character portraits synthesized with locked seed {shared_seed}.")
+            progress_cb(0.30, f"All {total} character portraits synthesized with locked seed {shared_seed}.")
 
         return updated_characters
 
@@ -274,7 +430,6 @@ class StudioPipeline:
         qwen_w = dims["qwen_w"]
         qwen_h = dims["qwen_h"]
 
-        # Build character lookup map
         char_map = {c.get("id"): c for c in characters}
         default_char = characters[0] if characters else None
 
@@ -286,31 +441,38 @@ class StudioPipeline:
             title = scene.get("title", f"Scene {scene_num}")
             char_ids = scene.get("character_ids", [])
 
-            # Gather reference portraits for characters in this scene
             ref_chars = [char_map[cid] for cid in char_ids if cid in char_map]
             if not ref_chars and default_char:
                 ref_chars = [default_char]
+            # Qwen Edit Plus accepts at most 3 input images (base + 2 refs)
+            ref_chars = [rc for rc in ref_chars if rc.get("portrait_pil") is not None][:QWEN_MAX_INPUT_IMAGES]
 
-            # Primary base image is Character 1 portrait
-            base_pil = ref_chars[0].get("portrait_pil") if ref_chars else None
-            # Additional reference images (Character 2, 3, etc.)
-            additional_refs = [rc.get("portrait_pil") for rc in ref_chars[1:] if rc.get("portrait_pil")]
+            if ref_chars:
+                base_pil = ref_chars[0]["portrait_pil"]
+                additional_refs = [rc["portrait_pil"] for rc in ref_chars[1:]]
+            else:
+                # No portraits available → pure text-to-image on a blank canvas (same as Tool 1)
+                base_pil = Image.new("RGB", (qwen_w, qwen_h), (255, 255, 255))
+                additional_refs = []
 
             scene_prompt = scene.get("qwen_scene_prompt") or scene.get("scenario") or "Scene background"
-            # Ensure prompt anchors character reference identity
-            char_names = ", ".join([rc.get("name", "character") for rc in ref_chars])
-            refined_prompt = (
-                f"{scene_prompt}, featuring {char_names} with identical faces, hairstyles, "
-                f"and outfits matching the reference images, full frame cinematic composition, 4k"
-            )
+            if ref_chars:
+                mapping = "; ".join(
+                    f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
+                )
+                refined_prompt = (
+                    f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
+                    f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
+                )
+            else:
+                refined_prompt = f"{scene_prompt}, full-frame cinematic composition, detailed background, 4k"
 
             if progress_cb:
-                pct = 0.40 + (idx / max(1, total)) * 0.25
+                pct = 0.30 + (idx / max(1, total)) * 0.20
                 progress_cb(pct, f"Synthesizing scene frame {idx+1}/{total}: '{title}' via Qwen Multi-Ref...")
 
             print(f"[StudioPipeline] Generating Qwen keyframe for Scene {scene_num} ({qwen_w}x{qwen_h})...")
-            
-            # Call Qwen remote
+
             results = qwen_image_edit_remote(
                 base_image=base_pil,
                 ref_images=additional_refs,
@@ -325,10 +487,8 @@ class StudioPipeline:
                 custom_height=qwen_h,
             )
 
-            keyframe_bytes = results[0]
-            keyframe_pil = Image.open(io.BytesIO(keyframe_bytes)).convert("RGB")
+            keyframe_pil = Image.open(io.BytesIO(results[0])).convert("RGB")
 
-            # Persist keyframe locally
             timestamp = int(time.time())
             filename = f"scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.jpg"
             keyframe_path = self.scenes_dir / filename
@@ -341,28 +501,253 @@ class StudioPipeline:
             updated_scenes.append(scene_entry)
 
         if progress_cb:
-            progress_cb(0.65, f"All {total} scene keyframes synthesized with consistent character references.")
+            progress_cb(0.50, f"All {total} scene keyframes synthesized with consistent character references.")
 
         return updated_scenes
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STAGE 4: Scene Video Animation via Wan 2.2
+    # STAGE 4: Animation Direction — Gemma 4: 31B directs each ≤5s clip
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def direct_scene_animations(
+        self,
+        scenes: List[Dict[str, Any]],
+        characters: List[Dict[str, Any]],
+        story_meta: Optional[Dict[str, Any]] = None,
+        use_vision: bool = True,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        For every scene, Gemma acts as the shot director: it LOOKS at the actual Qwen keyframe
+        (vision input), reads the story beat plus the previous/next beats for continuity, and
+        returns a structured shot plan — a 3-phase action timeline, camera move, motion
+        intensity, identity anchors and safe Wan 2.2 parameters. The plan is compiled into
+        the final Wan prompt/negative prompt. Falls back to text-only, then to a deterministic
+        template, so the pipeline never stalls on the Director.
+        """
+        story_meta = story_meta or {}
+        char_map = {c.get("id"): c for c in characters}
+        total = len(scenes)
+        directed = []
+
+        for idx, scene in enumerate(scenes):
+            scene_num = scene.get("scene_number", idx + 1)
+            if progress_cb:
+                pct = 0.50 + (idx / max(1, total)) * 0.10
+                progress_cb(pct, f"🎬 Director planning shot {idx+1}/{total}: '{scene.get('title', '')}'...")
+
+            prev_beat = scenes[idx - 1].get("scenario", "") if idx > 0 else "(opening shot)"
+            next_beat = scenes[idx + 1].get("scenario", "") if idx + 1 < total else "(final shot)"
+            cast = [char_map[c] for c in scene.get("character_ids", []) if c in char_map]
+
+            messages = self._build_director_messages(
+                scene, cast, story_meta, prev_beat, next_beat, include_image=use_vision
+            )
+
+            raw_plan, source = None, "fallback"
+            attempts = [(messages, "gemma-vision")] if use_vision and self._keyframe_b64(scene) else []
+            attempts.append((self._build_director_messages(
+                scene, cast, story_meta, prev_beat, next_beat, include_image=False), "gemma-text"))
+            for msgs, label in attempts:
+                try:
+                    text = self._chat_completion(msgs, max_tokens=1200, temperature=0.5, max_retries=1)
+                    raw_plan = self._parse_json_safely(text)
+                    source = label
+                    break
+                except Exception as e:
+                    print(f"[StudioPipeline] Director ({label}) failed for scene {scene_num}: {e}")
+
+            plan = self.compile_director_plan(raw_plan or {}, scene, cast, story_meta)
+            plan["source"] = source
+
+            scene_entry = dict(scene)
+            scene_entry["director"] = plan
+            directed.append(scene_entry)
+            print(f"[StudioPipeline] Scene {scene_num} directed via {source}: "
+                  f"camera='{plan['camera_movement']}', intensity={plan['motion_intensity']}, "
+                  f"cfg={plan['guidance_scale']}, steps={plan['steps']}")
+
+        if progress_cb:
+            progress_cb(0.60, f"Director planned all {total} shots.")
+        return directed
+
+    def _keyframe_b64(self, scene: Dict[str, Any], max_side: int = 768) -> Optional[str]:
+        img = scene.get("keyframe_pil")
+        if img is None and scene.get("keyframe_path") and os.path.exists(scene["keyframe_path"]):
+            img = Image.open(scene["keyframe_path"]).convert("RGB")
+        if img is None:
+            return None
+        img = img.copy()
+        img.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _build_director_messages(
+        self,
+        scene: Dict[str, Any],
+        cast: List[Dict[str, Any]],
+        story_meta: Dict[str, Any],
+        prev_beat: str,
+        next_beat: str,
+        include_image: bool = True,
+    ) -> List[Dict[str, Any]]:
+        duration = float(scene.get("duration_seconds", MAX_CLIP_SECONDS))
+        system = (
+            "You are the animation director for an image-to-video model (Wan 2.2). You receive the FIRST FRAME "
+            f"of a single continuous {duration:.1f}-second shot and must plan exactly how it moves.\n"
+            "Rules for good Wan 2.2 results:\n"
+            "- One clear, physically plausible action per shot; motion must start from the pose visible in the frame.\n"
+            "- Describe concrete body/face motion (e.g. 'raises left paw and offers the berry'), not abstract emotions.\n"
+            "- Never introduce new characters or objects that are not in the frame; never cut or change location.\n"
+            "- Prefer ONE camera move; static or slow moves keep faces stable. Fast action needs higher intensity.\n"
+            "- End the shot in a pose that flows naturally into the next story beat.\n"
+            "Output ONLY valid JSON, no markdown:\n"
+            "{\n"
+            '  "shot_type": "e.g. medium two-shot / close-up / wide establishing",\n'
+            '  "camera_movement": "single camera move, e.g. slow push-in",\n'
+            '  "motion_intensity": 1-5,\n'
+            '  "subject_action": "one-sentence summary of the main action",\n'
+            '  "timeline": ["phase 1 action (opening)", "phase 2 action (main beat)", "phase 3 action (settle/hand-off)"],\n'
+            '  "environment_motion": "ambient motion: wind, light, particles, background",\n'
+            '  "identity_anchors": "visual traits that must stay fixed (faces, colors, outfits, props)",\n'
+            '  "wan_prompt": "dense 1-2 sentence motion prompt for Wan 2.2",\n'
+            '  "negative_additions": "comma-separated things to avoid specific to this shot",\n'
+            '  "guidance_scale": 1.5-2.5,\n'
+            '  "steps": 6-12,\n'
+            '  "flow_shift": 2.0-5.0\n'
+            "}"
+        )
+        cast_desc = "\n".join(
+            f"- {c.get('name')}: face={c.get('face', '')}; hair={c.get('hair', '')}; "
+            f"clothing={c.get('clothing', '')}; props={c.get('signature_details', '')}"
+            for c in cast
+        ) or "- (no named characters)"
+        text = (
+            f"Film: {story_meta.get('title', '')} | Style: {story_meta.get('art_style', '')} | "
+            f"Theme: {story_meta.get('theme', '')}\n"
+            f"Shot {scene.get('scene_number')}: {scene.get('title', '')} ({duration:.1f}s)\n"
+            f"Story beat: {scene.get('scenario', '')}\n"
+            f"Draft motion from writer: {scene.get('wan_motion_prompt', '')}\n"
+            f"Draft camera: {scene.get('camera_movement', '')}\n"
+            f"Previous beat: {prev_beat}\nNext beat: {next_beat}\n"
+            f"Cast in frame:\n{cast_desc}\n"
+            + ("The attached image is the exact first frame. Base the motion on what you see."
+               if include_image else "No image attached; infer composition from the beat.")
+        )
+        b64 = self._keyframe_b64(scene) if include_image else None
+        user_content: Any = text
+        if b64:
+            user_content = [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+        return [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
+
+    @staticmethod
+    def compile_director_plan(
+        raw: Dict[str, Any],
+        scene: Dict[str, Any],
+        cast: List[Dict[str, Any]],
+        story_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Validates/clamps the Director's JSON and compiles it into the exact Wan 2.2 prompt,
+        negative prompt and sampler parameters. Works with an empty dict (deterministic fallback).
+        """
+        story_meta = story_meta or {}
+        raw = raw if isinstance(raw, dict) else {}
+        duration = float(_clamp(scene.get("duration_seconds", MAX_CLIP_SECONDS), MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, 3.5))
+
+        lim = DIRECTOR_PARAM_LIMITS
+        intensity = int(round(_clamp(raw.get("motion_intensity"), *lim["motion_intensity"], 2)))
+        cfg = round(_clamp(raw.get("guidance_scale"), *lim["guidance_scale"], WAN_DEFAULTS["guidance_scale"]), 2)
+        steps = int(round(_clamp(raw.get("steps"), *lim["steps"], WAN_DEFAULTS["steps"])))
+        flow_shift = round(_clamp(raw.get("flow_shift"), *lim["flow_shift"], WAN_DEFAULTS["flow_shift"]), 2)
+
+        camera = _trim(raw.get("camera_movement") or scene.get("camera_movement") or "static tripod shot", 80)
+        shot_type = _trim(raw.get("shot_type") or "medium shot", 60)
+        action = _trim(raw.get("subject_action") or scene.get("scenario") or "", 220)
+
+        timeline = raw.get("timeline")
+        if isinstance(timeline, dict):
+            timeline = list(timeline.values())
+        if not isinstance(timeline, list):
+            timeline = []
+        timeline = [
+            _trim(t.get("action") if isinstance(t, dict) else t, 160) for t in timeline if t
+        ][:3]
+        defaults = [
+            "characters begin from the pose shown in the frame with natural breathing",
+            action or "the main action unfolds smoothly",
+            "motion eases into a calm, stable final pose",
+        ]
+        while len(timeline) < 3:
+            timeline.append(defaults[len(timeline)])
+
+        p1, p2 = round(duration * 0.3, 1), round(duration * 0.8, 1)
+        phases = (
+            f"Phase 1 (0.0s-{p1}s): {timeline[0]}; "
+            f"Phase 2 ({p1}s-{p2}s): {timeline[1]}; "
+            f"Phase 3 ({p2}s-{duration:.1f}s): {timeline[2]}."
+        )
+
+        cast_names = ", ".join(c.get("name", "") for c in cast if c.get("name"))
+        anchors = _trim(
+            raw.get("identity_anchors")
+            or (f"{cast_names} keep identical faces, colors, outfits and proportions" if cast_names
+                else "subjects keep identical appearance"),
+            220,
+        )
+        env = _trim(raw.get("environment_motion") or "subtle ambient motion in the background", 140)
+        core = _trim(raw.get("wan_prompt") or scene.get("wan_motion_prompt") or action, 300)
+        style = _trim(story_meta.get("art_style") or "", 80)
+
+        wan_prompt = (
+            f"{core} [Shot]: {shot_type}, camera {camera}. [Timeline]: {phases} "
+            f"[Environment]: {env}. [Identity Anchors]: {anchors}, no morphing. "
+            f"{style + ', ' if style else ''}smooth fluid animation, consistent character design, high detail."
+        )
+
+        extra_neg = _trim(raw.get("negative_additions") or "", 200)
+        negative = ", ".join(x for x in [DEFAULT_NEGATIVE_PROMPT, IDENTITY_NEGATIVE, extra_neg] if x)
+
+        return {
+            "shot_type": shot_type,
+            "camera_movement": camera,
+            "motion_intensity": intensity,
+            "subject_action": action,
+            "timeline": timeline,
+            "environment_motion": env,
+            "identity_anchors": anchors,
+            "wan_prompt": wan_prompt,
+            "negative_prompt": negative,
+            "guidance_scale": cfg,
+            "guidance_scale_2": WAN_DEFAULTS["guidance_scale_2"],
+            "steps": steps,
+            "flow_shift": flow_shift,
+            "duration_seconds": duration,
+            "num_frames": frames_for_duration(duration),
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 5: Scene Video Animation via Wan 2.2
     # ─────────────────────────────────────────────────────────────────────────
 
     def generate_scene_videos(
         self,
         scenes: List[Dict[str, Any]],
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
+        base_seed: int = 42,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[str]:
         """
-        Animates each scene keyframe into a video clip using Wan 2.2 on Modal.
-        Adheres to 4k+1 frame rules (17, 33, 57, 81 frames), CFG 2.0 stability,
-        and temporal camera motion prompts.
+        Animates each scene keyframe into a clip with Wan 2.2 on Modal, using the Director's
+        shot plan (prompt, negative, CFG, steps, flow shift) when available and the tuned
+        Tool 2 defaults otherwise. Frame counts always obey the 4k+1 rule (17..81).
         """
         dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
-        wan_w = dims["wan_w"]
-        wan_h = dims["wan_h"]
+        wan_w, wan_h = dims["wan_w"], dims["wan_h"]
 
         total = len(scenes)
         clip_paths = []
@@ -371,49 +756,47 @@ class StudioPipeline:
             scene_num = scene.get("scene_number", idx + 1)
             title = scene.get("title", f"Scene {scene_num}")
             keyframe_pil = scene.get("keyframe_pil")
-            duration_sec = float(scene.get("duration_seconds", 3.5))
-
-            if keyframe_pil is None and "keyframe_path" in scene:
+            if keyframe_pil is None and scene.get("keyframe_path"):
                 keyframe_pil = Image.open(scene["keyframe_path"]).convert("RGB")
+            if keyframe_pil is None:
+                raise ValueError(f"Scene {scene_num} has no keyframe; run the Qwen keyframe stage first.")
 
-            # Resize to native Wan 2.2 dimensions (multiple of 16)
             resized_frame = keyframe_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
 
-            # Frame calculation adhering to 4k+1 rule (17 to 81 frames)
-            raw_frames = int(round(duration_sec * 16))
-            k = max(4, min(20, round(raw_frames / 4)))
-            clamped = 1 + (k * 4)
-
-            motion_prompt = scene.get("wan_motion_prompt") or "cinematic natural motion, preserve subject facial identity"
-            camera_movement = scene.get("camera_movement", "Slow Cinematic Push-In")
-            full_prompt = f"{motion_prompt}, camera: {camera_movement}, locked facial identity, photorealistic fluid animation"
+            plan = scene.get("director")
+            if not plan:
+                plan = self.compile_director_plan({}, scene, [], {})
+                plan["source"] = "fallback"
+            duration_sec = float(plan.get("duration_seconds", scene.get("duration_seconds", 3.5)))
+            num_frames = frames_for_duration(duration_sec)
 
             if progress_cb:
-                pct = 0.65 + (idx / max(1, total)) * 0.25
-                progress_cb(pct, f"Animating Scene {idx+1}/{total}: '{title}' ({clamped} frames @ 16fps)...")
+                pct = 0.60 + (idx / max(1, total)) * 0.30
+                progress_cb(pct, f"Animating Scene {idx+1}/{total}: '{title}' ({num_frames} frames @ {WAN_FPS}fps)...")
 
-            print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {clamped} frames)...")
+            print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
+                  f"director={plan.get('source')})...")
 
-            # Wan 2.2 remote inference
-            video_path = run_remote_inference(
+            result = run_remote_inference(
                 resized_image=resized_frame,
                 processed_last_image=None,
-                prompt=full_prompt,
-                steps=25,
-                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-                num_frames=clamped,
-                guidance_scale=2.0,  # Strict CFG for facial stability
-                guidance_scale_2=1.0,
-                current_seed=42 + idx,
-                scheduler_name="UniPCMultistep",
-                flow_shift=3.0,
-                frame_multiplier=16,
-                quality="High Quality",
+                prompt=plan["wan_prompt"],
+                steps=int(plan.get("steps", WAN_DEFAULTS["steps"])),
+                negative_prompt=plan.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+                num_frames=num_frames,
+                guidance_scale=float(plan.get("guidance_scale", WAN_DEFAULTS["guidance_scale"])),
+                guidance_scale_2=float(plan.get("guidance_scale_2", WAN_DEFAULTS["guidance_scale_2"])),
+                current_seed=int(base_seed) + idx,
+                scheduler_name=WAN_DEFAULTS["scheduler_name"],
+                flow_shift=float(plan.get("flow_shift", WAN_DEFAULTS["flow_shift"])),
+                frame_multiplier=WAN_DEFAULTS["frame_multiplier"],
+                quality=WAN_DEFAULTS["quality"],
                 duration_seconds=duration_sec,
                 safe_mode=True,
             )
+            # run_remote_inference returns (video_path, task_name)
+            video_path = result[0] if isinstance(result, (tuple, list)) else result
 
-            # Copy/rename into dedicated clips dir
             timestamp = int(time.time())
             clip_dest = self.clips_dir / f"clip_scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.mp4"
             with open(video_path, "rb") as src, open(clip_dest, "wb") as dst:
@@ -429,7 +812,7 @@ class StudioPipeline:
         return clip_paths
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STAGE 5: Video Assembly & Stitching (Seamless 30s Final Movie)
+    # STAGE 6: Video Assembly & Stitching
     # ─────────────────────────────────────────────────────────────────────────
 
     def stitch_clips(
@@ -439,56 +822,39 @@ class StudioPipeline:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> str:
         """
-        Concatenates individual scene clips into a single seamless movie using FFmpeg.
+        Concatenates individual scene clips into a single movie using FFmpeg.
         """
         if not clip_paths:
             raise ValueError("No video clips provided for stitching.")
+        missing = [p for p in clip_paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"Clip(s) not found for stitching: {missing}")
 
         if progress_cb:
             progress_cb(0.92, "Assembling and stitching scene clips into final movie...")
 
         ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         timestamp = int(time.time())
-        clean_title = self._sanitize_filename(movie_title)
+        clean_title = self._sanitize_filename(movie_title) or "Studio_Movie"
         output_movie_path = self.movies_dir / f"{clean_title}_{timestamp}.mp4"
 
-        # Create FFmpeg concat demuxer file list
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f_list:
             concat_list_file = f_list.name
             for p in clip_paths:
-                # Escape backslashes and single quotes for ffmpeg safe syntax
-                safe_path = os.path.abspath(p).replace("\\", "/")
+                safe_path = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
                 f_list.write(f"file '{safe_path}'\n")
 
         try:
-            # First try stream copy concatenation (instant, lossless)
-            cmd_copy = [
-                ffmpeg_bin,
-                "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_list_file,
-                "-c", "copy",
-                str(output_movie_path),
-            ]
+            cmd_copy = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                        "-c", "copy", str(output_movie_path)]
             print(f"[StudioPipeline] Stitching clips via FFmpeg copy: {' '.join(cmd_copy)}")
             res = subprocess.run(cmd_copy, capture_output=True, text=True)
 
-            # If copy failed (e.g. slight codec/fps variation), perform clean re-encoding
             if res.returncode != 0 or not output_movie_path.exists() or output_movie_path.stat().st_size == 0:
                 print(f"[StudioPipeline] FFmpeg copy returned {res.returncode}, re-encoding concat...")
-                cmd_reencode = [
-                    ffmpeg_bin,
-                    "-y",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-i", concat_list_file,
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "18",
-                    "-pix_fmt", "yuv420p",
-                    str(output_movie_path),
-                ]
+                cmd_reencode = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                str(output_movie_path)]
                 res_re = subprocess.run(cmd_reencode, capture_output=True, text=True)
                 if res_re.returncode != 0:
                     raise RuntimeError(f"FFmpeg stitching failed: {res_re.stderr}")
@@ -511,16 +877,16 @@ class StudioPipeline:
         self,
         user_prompt: str,
         shared_seed: int = 42,
-        num_scenes: int = 5,
+        num_scenes: int = 6,
         target_duration: float = 30.0,
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         art_style: str = "2D vibrant cartoon animation",
+        use_vision_director: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes all 5 stages of the Studio pipeline end-to-end.
+        Executes all 6 stages of the Studio pipeline end-to-end.
         """
-        # Stage 1: Story & Character Extraction
         story_data = self.generate_story_and_characters(
             prompt=user_prompt,
             num_scenes=num_scenes,
@@ -529,15 +895,14 @@ class StudioPipeline:
             progress_cb=progress_cb,
         )
 
-        # Stage 2: Character Portrait Generation (Z-Image Turbo with locked seed)
         characters = self.generate_character_portraits(
             characters=story_data.get("characters", []),
             shared_seed=shared_seed,
+            art_style=story_data.get("art_style", art_style),
             progress_cb=progress_cb,
         )
         story_data["characters"] = characters
 
-        # Stage 3: Scene Keyframe Generation (Qwen Multi-Reference)
         scenes = self.generate_scene_keyframes(
             scenes=story_data.get("scenes", []),
             characters=characters,
@@ -545,16 +910,23 @@ class StudioPipeline:
             shared_seed=shared_seed,
             progress_cb=progress_cb,
         )
+
+        scenes = self.direct_scene_animations(
+            scenes=scenes,
+            characters=characters,
+            story_meta=story_data,
+            use_vision=use_vision_director,
+            progress_cb=progress_cb,
+        )
         story_data["scenes"] = scenes
 
-        # Stage 4: Scene Video Animation (Wan 2.2)
         clip_paths = self.generate_scene_videos(
             scenes=scenes,
             aspect_ratio=aspect_ratio,
+            base_seed=shared_seed,
             progress_cb=progress_cb,
         )
 
-        # Stage 5: Movie Stitching
         final_movie = self.stitch_clips(
             clip_paths=clip_paths,
             movie_title=story_data.get("title", "Studio_Movie"),
@@ -562,6 +934,7 @@ class StudioPipeline:
         )
         story_data["final_movie_path"] = final_movie
         story_data["clip_paths"] = clip_paths
+        story_data["manifest_path"] = self.save_manifest(story_data)
 
         return story_data
 
@@ -570,16 +943,33 @@ class StudioPipeline:
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
+    def serializable(story_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Deep-copies story data without PIL images so it can be shown as JSON / saved."""
+        def strip(obj):
+            if isinstance(obj, dict):
+                return {k: strip(v) for k, v in obj.items() if not isinstance(v, Image.Image)}
+            if isinstance(obj, list):
+                return [strip(v) for v in obj if not isinstance(v, Image.Image)]
+            return obj
+        return strip(story_data or {})
+
+    def save_manifest(self, story_data: Dict[str, Any]) -> str:
+        """Saves the screenplay + director plans + output paths next to the final movie."""
+        name = self._sanitize_filename(story_data.get("title", "Studio_Movie")) or "Studio_Movie"
+        path = self.movies_dir / f"{name}_{int(time.time())}_manifest.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.serializable(story_data), f, indent=2, ensure_ascii=False)
+        return str(path)
+
+    @staticmethod
     def _parse_json_safely(raw_text: str) -> Dict[str, Any]:
-        clean = raw_text.strip()
-        # Remove markdown code blocks if wrapped
+        clean = (raw_text or "").strip()
         if "```json" in clean:
             clean = clean.split("```json", 1)[1].split("```", 1)[0]
         elif "```" in clean:
             clean = clean.split("```", 1)[1].split("```", 1)[0]
         clean = clean.strip()
 
-        # Find outer JSON braces
         start = clean.find("{")
         end = clean.rfind("}")
         if start != -1 and end != -1:
@@ -588,14 +978,13 @@ class StudioPipeline:
         try:
             return json.loads(clean)
         except json.JSONDecodeError as e:
-            # Fallback regex extraction if trailing comma or syntax error
             clean_fixed = re.sub(r",\s*([\]}])", r"\1", clean)
             try:
                 return json.loads(clean_fixed)
             except Exception:
-                raise ValueError(f"Could not parse valid JSON from Gemma response: {e}\nRaw: {raw_text[:300]}")
+                raise ValueError(f"Could not parse valid JSON from Gemma response: {e}\nRaw: {(raw_text or '')[:300]}")
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:
-        s = re.sub(r"[^\w\-_]", "_", name)
+        s = re.sub(r"[^\w\-_]", "_", str(name or ""))
         return re.sub(r"__+", "_", s).strip("_")[:40]
