@@ -268,6 +268,30 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertIsInstance(qwen_kwargs2["base_image"], Image.Image)
         self.assertEqual(qwen_kwargs2["ref_images"], [])
 
+    @patch("studio_pipeline.qwen_image_edit_remote")
+    def test_scene_keyframes_locked_same_seed_across_all_scenes(self, mock_qwen):
+        """All scene keyframes must receive the exact same locked qwen_seed (not shared_seed + idx)."""
+        img_bytes_io = io.BytesIO()
+        Image.new("RGB", (576, 1024), color="green").save(img_bytes_io, format="JPEG")
+        mock_qwen.return_value = [img_bytes_io.getvalue()]
+
+        chars = [{"id": "char_1", "name": "Barnaby", "portrait_pil": Image.new("RGB", (64, 64))}]
+        scenes = [
+            {"scene_number": 1, "title": "S1", "character_ids": ["char_1"]},
+            {"scene_number": 2, "title": "S2", "character_ids": ["char_1"]},
+            {"scene_number": 3, "title": "S3", "character_ids": ["char_1"]},
+        ]
+        locked_qwen_seed = 888888
+        updated = self.pipeline.generate_scene_keyframes(
+            scenes=scenes,
+            characters=chars,
+            shared_seed=locked_qwen_seed,
+        )
+        self.assertEqual(mock_qwen.call_count, 3)
+        for idx, call in enumerate(mock_qwen.call_args_list):
+            self.assertEqual(call[1]["seed"], locked_qwen_seed)
+            self.assertEqual(updated[idx]["keyframe_seed"], locked_qwen_seed)
+
     # ─────────────────────────────────────────────────────────────────────────
     # Test 5: Stage 4 — Gemma 4: 31B Animation Director (Vision + Fallbacks)
     # ─────────────────────────────────────────────────────────────────────────
@@ -371,7 +395,7 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertEqual(directed2[0]["director"]["num_frames"], 57)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Test 6: Stage 5 — Scene Video Animation (Wan 2.2 constraints & tuple unpack)
+    # Test 6: Stage 5 — Scene Video Animation (Wan 2.2 constraints & locked seed)
     # ─────────────────────────────────────────────────────────────────────────
 
     @patch("studio_pipeline.run_remote_inference")
@@ -391,25 +415,40 @@ class TestStudioPipeline(unittest.TestCase):
                 "duration_seconds": 3.5,
                 "wan_motion_prompt": "smooth camera push-in",
                 "camera_movement": "Slow Push-In",
-            }
+            },
+            {
+                "scene_number": 2,
+                "title": "Scene 2",
+                "keyframe_pil": keyframe,
+                "duration_seconds": 3.5,
+                "wan_motion_prompt": "gentle smile",
+                "camera_movement": "Static Tripod Shot",
+            },
         ]
 
+        locked_wan_seed = 999999
         clips = self.pipeline.generate_scene_videos(
             scenes=scenes,
             aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            base_seed=locked_wan_seed,
         )
 
-        self.assertEqual(len(clips), 1)
+        self.assertEqual(len(clips), 2)
         self.assertTrue(os.path.exists(clips[0]))
+        self.assertTrue(os.path.exists(clips[1]))
 
-        wan_kwargs = mock_wan.call_args[1]
-        self.assertEqual(wan_kwargs["num_frames"], 57)  # 4 * 14 + 1
-        self.assertEqual(wan_kwargs["guidance_scale"], 2.0)
-        self.assertEqual(wan_kwargs["guidance_scale_2"], WAN_DEFAULTS["guidance_scale_2"])
-        self.assertEqual(wan_kwargs["steps"], WAN_DEFAULTS["steps"])
-        self.assertIsInstance(wan_kwargs["quality"], int)
-        self.assertEqual(wan_kwargs["quality"], 6)
-        self.assertEqual(wan_kwargs["resized_image"].size, (480, 832))
+        # Both clips must use the exact same locked wan_seed (not base_seed + idx)
+        for idx, call in enumerate(mock_wan.call_args_list):
+            wan_kwargs = call[1]
+            self.assertEqual(wan_kwargs["current_seed"], locked_wan_seed)
+            self.assertEqual(scenes[idx]["video_seed"], locked_wan_seed)
+            self.assertEqual(wan_kwargs["num_frames"], 57)  # 4 * 14 + 1
+            self.assertEqual(wan_kwargs["guidance_scale"], 2.0)
+            self.assertEqual(wan_kwargs["guidance_scale_2"], WAN_DEFAULTS["guidance_scale_2"])
+            self.assertEqual(wan_kwargs["steps"], WAN_DEFAULTS["steps"])
+            self.assertIsInstance(wan_kwargs["quality"], int)
+            self.assertEqual(wan_kwargs["quality"], 6)
+            self.assertEqual(wan_kwargs["resized_image"].size, (480, 832))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Test 7: Video Assembly & Stitching with FFmpeg
@@ -501,7 +540,9 @@ class TestStudioPipeline(unittest.TestCase):
 
         story_data = self.pipeline.run_full_pipeline(
             user_prompt="Barnaby shares a berry",
-            shared_seed=42,
+            z_image_seed=111,
+            qwen_seed=222,
+            wan_seed=333,
             num_scenes=1,
             target_duration=5.0,
             aspect_ratio="9:16 Vertical (Shorts/Reels)",
@@ -511,6 +552,9 @@ class TestStudioPipeline(unittest.TestCase):
 
         self.assertTrue(os.path.exists(story_data["final_movie_path"]))
         self.assertTrue(os.path.exists(story_data["manifest_path"]))
+        self.assertEqual(story_data["z_image_seed"], 111)
+        self.assertEqual(story_data["qwen_seed"], 222)
+        self.assertEqual(story_data["wan_seed"], 333)
         self.assertEqual(story_data["scenes"][0]["director"]["source"], "gemma-vision")
         with open(story_data["manifest_path"], "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -518,7 +562,113 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertIn("director", manifest["scenes"][0])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Test 9: Gradio UI Step Handlers in app.py (including auto-Director in Step 5)
+    # Test 9: 3-Seed Helper & Single-Item Redo Methods (Character, Scene, Clip)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @patch("studio_pipeline.run_remote_inference")
+    @patch("studio_pipeline.qwen_image_edit_remote")
+    @patch("studio_pipeline.generate_z_image_turbo_remote")
+    def test_single_item_redos_and_three_seeds(self, mock_z_img, mock_qwen, mock_wan):
+        from studio_pipeline import generate_three_studio_seeds
+
+        seeds = generate_three_studio_seeds()
+        self.assertIn("z_image_seed", seeds)
+        self.assertIn("qwen_seed", seeds)
+        self.assertIn("wan_seed", seeds)
+        self.assertGreater(seeds["z_image_seed"], 0)
+        self.assertGreater(seeds["qwen_seed"], 0)
+        self.assertGreater(seeds["wan_seed"], 0)
+
+        # Setup story_data with 2 characters and 2 scenes
+        char_pil = Image.new("RGB", (256, 256), color="pink")
+        char_path = os.path.join(self.temp_dir.name, "redo_char.png")
+        char_pil.save(char_path)
+        mock_z_img.return_value = (char_pil, char_path)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (576, 1024), color="teal").save(buf, format="JPEG")
+        mock_qwen.return_value = [buf.getvalue()]
+
+        clip_path = os.path.join(self.temp_dir.name, "redo_clip.mp4")
+        out = cv2.VideoWriter(clip_path, cv2.VideoWriter_fourcc(*"mp4v"), 16.0, (160, 120))
+        for _ in range(16):
+            out.write(np.zeros((120, 160, 3), dtype=np.uint8))
+        out.release()
+        mock_wan.return_value = (clip_path, "task_redo")
+
+        story_data = {
+            "title": "Redo Story",
+            "art_style": "2D cartoon",
+            "characters": [
+                {"id": "char_1", "name": "Luna", "face": "old face", "portrait_pil": char_pil, "portrait_path": char_path, "portrait_seed": 100},
+                {"id": "char_2", "name": "Oliver", "face": "owl face", "portrait_pil": char_pil, "portrait_path": char_path, "portrait_seed": 100},
+            ],
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "title": "Scene 1",
+                    "duration_seconds": 5.0,
+                    "scenario": "old scenario",
+                    "qwen_scene_prompt": "old qwen prompt",
+                    "wan_motion_prompt": "old motion",
+                    "camera_movement": "Static Tripod Shot",
+                    "character_ids": ["char_1"],
+                    "keyframe_pil": char_pil,
+                    "keyframe_path": char_path,
+                    "video_path": clip_path,
+                },
+                {
+                    "scene_number": 2,
+                    "title": "Scene 2",
+                    "duration_seconds": 5.0,
+                    "scenario": "scene 2",
+                    "character_ids": ["char_2"],
+                    "keyframe_pil": char_pil,
+                    "keyframe_path": char_path,
+                    "video_path": clip_path,
+                },
+            ],
+        }
+
+        # 1. Redo single character (index 1 -> Oliver) with new seed & clothing
+        updated_char = self.pipeline.regenerate_single_character(
+            story_data=story_data,
+            char_index=1,
+            updated_fields={"clothing": "emerald wizard cape", "z_image_prompt": ""},
+            seed=55555,
+        )
+        self.assertEqual(updated_char["clothing"], "emerald wizard cape")
+        self.assertEqual(updated_char["portrait_seed"], 55555)
+        self.assertEqual(story_data["characters"][0]["portrait_seed"], 100)  # char 0 untouched!
+
+        # 2. Redo single scene keyframe (index 0 -> Scene 1) with new prompt & seed
+        updated_scene = self.pipeline.regenerate_single_scene_keyframe(
+            story_data=story_data,
+            scene_index=0,
+            updated_fields={"scenario": "Luna finds a glowing crystal", "qwen_scene_prompt": "Luna holding crystal"},
+            seed=66666,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+        )
+        self.assertEqual(updated_scene["scenario"], "Luna finds a glowing crystal")
+        self.assertEqual(updated_scene["keyframe_seed"], 66666)
+        self.assertEqual(mock_qwen.call_args[1]["seed"], 66666)
+
+        # 3. Redo single 5s video clip (index 0 -> Scene 1) with new motion description & seed
+        updated_clip_scene = self.pipeline.regenerate_single_scene_video(
+            story_data=story_data,
+            scene_index=0,
+            updated_fields={"wan_motion_prompt": "Luna lifts the glowing crystal high into the air"},
+            seed=77777,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            re_run_director=False,
+            auto_stitch=True,
+        )
+        self.assertEqual(updated_clip_scene["video_seed"], 77777)
+        self.assertEqual(mock_wan.call_args[1]["current_seed"], 77777)
+        self.assertTrue(os.path.exists(story_data["final_movie_path"]))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Test 10: Gradio UI 4-Phase Wizard & Individual Redo Handlers in app.py
     # ─────────────────────────────────────────────────────────────────────────
 
     @patch("studio_pipeline.run_remote_inference")
@@ -530,7 +680,7 @@ class TestStudioPipeline(unittest.TestCase):
             json.dumps({
                 "title": "UI Step Test",
                 "art_style": "2D cartoon",
-                "characters": [{"id": "char_1", "name": "Pippin"}],
+                "characters": [{"id": "char_1", "name": "Pippin", "face": "bunny face"}],
                 "scenes": [{"scene_number": 1, "title": "Hop", "duration_seconds": 3.5, "character_ids": ["char_1"]}],
             }),
             json.dumps({
@@ -566,32 +716,91 @@ class TestStudioPipeline(unittest.TestCase):
             orig_init(inst, api_key=api_key, model=model, endpoint_url=endpoint_url, output_base_dir=output_base_dir or temp_base)
 
         with patch.object(StudioPipeline, "__init__", patched_init):
-            # Step 1: Story
-            json_out, status1, state = app.studio_run_step1(
+            # Phase 1: Generate Story
+            step1_res = app.studio_run_step1(
                 "Pippin hops", "2D cartoon", 1, 3.5, "dummy_key", "gemma4:31b"
             )
+            json_out, status1, state = step1_res[0], step1_res[1], step1_res[2]
             self.assertIn("Step 1 Complete", status1)
             self.assertEqual(json_out["title"], "UI Step Test")
 
-            # Step 2: Characters
-            char_gallery, status2, state = app.studio_run_step2(42, "dummy_key", "gemma4:31b", state)
+            # Phase 2: Generate All Characters
+            step2_res = app.studio_run_step2(101, "dummy_key", "gemma4:31b", state)
+            char_gallery, status2, state = step2_res[0], step2_res[1], step2_res[2]
             self.assertIn("Step 2 Complete", status2)
             self.assertEqual(len(char_gallery), 1)
 
-            # Step 3: Keyframes
-            scene_gallery, status3, state = app.studio_run_step3(
-                "9:16 Vertical (Shorts/Reels)", 42, "dummy_key", "gemma4:31b", state
+            # Phase 2 Individual Redo: Redo Character #1 with new seed 102
+            redo_char_res = app.studio_redo_single_character(
+                "1. Pippin (char_1)",
+                "Pippin",
+                "fluffy white bunny face",
+                "long ears",
+                "blue vest",
+                "carrot badge",
+                "",
+                102,
+                "dummy_key",
+                "gemma4:31b",
+                state,
             )
+            char_gallery, char_preview, _, status_redo_char, state = redo_char_res
+            self.assertIn("Character Redo Complete", status_redo_char)
+            self.assertEqual(state["characters"][0]["portrait_seed"], 102)
+            self.assertEqual(state["characters"][0]["clothing"], "blue vest")
+
+            # Phase 3: Generate All Scene Images
+            step3_res = app.studio_run_step3(
+                "9:16 Vertical (Shorts/Reels)", 201, "dummy_key", "gemma4:31b", state
+            )
+            scene_gallery, status3, state = step3_res[0], step3_res[1], step3_res[2]
             self.assertIn("Step 3 Complete", status3)
             self.assertEqual(len(scene_gallery), 1)
 
-            # Step 5 directly (skipping Step 4 button) -> must auto-invoke Director!
-            final_video, status5, state = app.studio_run_step4(
-                "9:16 Vertical (Shorts/Reels)", 42, "dummy_key", "gemma4:31b", True, state
+            # Phase 3 Individual Redo: Redo Scene #1 with new seed 202
+            redo_scene_res = app.studio_redo_single_scene(
+                "Scene 1: Hop",
+                "Hop in Meadow",
+                "Pippin leaps over a sparkling brook",
+                "Pippin jumping over brook in sunlit meadow",
+                "char_1",
+                202,
+                "9:16 Vertical (Shorts/Reels)",
+                "dummy_key",
+                "gemma4:31b",
+                state,
             )
+            scene_gallery, scene_preview, _, status_redo_scene, state = redo_scene_res
+            self.assertIn("Keyframe Redo Complete", status_redo_scene)
+            self.assertEqual(state["scenes"][0]["keyframe_seed"], 202)
+
+            # Phase 4: Generate All Video Clips & Final Movie
+            step4_res = app.studio_run_step4(
+                "9:16 Vertical (Shorts/Reels)", 301, "dummy_key", "gemma4:31b", True, state
+            )
+            final_video, status5, state = step4_res[0], step4_res[1], step4_res[2]
             self.assertIn("Step 5 Complete", status5)
             self.assertTrue(os.path.exists(final_video))
             self.assertIn("director", state["scenes"][0])
+
+            # Phase 4 Individual Redo: Redo Clip #1 with new seed 302
+            redo_clip_res = app.studio_redo_single_clip(
+                "Scene 1: Hop in Meadow",
+                "Pippin does a joyful backflip and lands softly",
+                "Slow Push-In",
+                "Pippin backflip prompt",
+                302,
+                False,
+                True,
+                "9:16 Vertical (Shorts/Reels)",
+                "dummy_key",
+                "gemma4:31b",
+                state,
+            )
+            clip_video, final_video2, _, status_redo_clip, state = redo_clip_res
+            self.assertIn("Video Clip Redo Complete", status_redo_clip)
+            self.assertEqual(state["scenes"][0]["video_seed"], 302)
+            self.assertTrue(os.path.exists(final_video2))
 
 
 if __name__ == "__main__":

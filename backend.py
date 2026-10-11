@@ -389,22 +389,27 @@ def generate_z_image_turbo_remote(
     pil_img.save(file_path, format="PNG")
     print(f"[local-backend] Saved Z-Image Turbo portrait to: {file_path}")
 
+    record_z_image_activity()
+
     return pil_img, str(file_path)
 
 
-# ─── Heartbeat & Cost-Effective Keep-Alive State ─────────────────────────────
+# ─── Heartbeat & Automatic Tri-Model Keep-Warm State ─────────────────────────
 
 last_frontend_heartbeat_time = time.time()
-last_wan_activity_time = 0.0
-last_qwen_activity_time = 0.0
+last_wan_activity_time = time.time()
+last_qwen_activity_time = time.time()
+last_z_image_activity_time = time.time()
 
-# Heartbeats default to False (Paused) to prevent unintended Modal GPU credit burn.
-# Users can toggle keepalive on for active multi-generation sessions.
-wan_heartbeat_enabled = False
-qwen_heartbeat_enabled = False
+# All three AI backends (Z-Image Turbo, Qwen Image Edit, Wan 2.2) start with
+# heartbeats ENABLED by default so they warm up and stay warm automatically
+# as soon as the frontend launches until the user closes the frontend.
+wan_heartbeat_enabled = True
+qwen_heartbeat_enabled = True
+z_image_heartbeat_enabled = True
 
-# Maximum idle duration (3 minutes) to keep a warm container alive after generation
-KEEPALIVE_IDLE_WINDOW = 180.0
+# Keep warm continuously while frontend tab is open (browser sends gr.Timer tick every 25s)
+FRONTEND_HEARTBEAT_TIMEOUT = 65.0
 
 
 def record_frontend_heartbeat():
@@ -422,63 +427,76 @@ def record_qwen_activity():
     last_qwen_activity_time = time.time()
 
 
+def record_z_image_activity():
+    global last_z_image_activity_time
+    last_z_image_activity_time = time.time()
+
+
 def set_wan_heartbeat_state(enabled: bool):
     global wan_heartbeat_enabled
-    wan_heartbeat_enabled = enabled
-    print(f"[backend] Wan heartbeat state toggled: {enabled}")
+    wan_heartbeat_enabled = bool(enabled)
+    print(f"[backend] Wan heartbeat state toggled: {wan_heartbeat_enabled}")
 
 
 def set_qwen_heartbeat_state(enabled: bool):
     global qwen_heartbeat_enabled
-    qwen_heartbeat_enabled = enabled
-    print(f"[backend] Qwen Image Edit heartbeat state toggled: {enabled}")
+    qwen_heartbeat_enabled = bool(enabled)
+    print(f"[backend] Qwen Image Edit heartbeat state toggled: {qwen_heartbeat_enabled}")
+
+
+def set_z_image_heartbeat_state(enabled: bool):
+    global z_image_heartbeat_enabled
+    z_image_heartbeat_enabled = bool(enabled)
+    print(f"[backend] Z-Image Turbo heartbeat state toggled: {z_image_heartbeat_enabled}")
+
+
+def ping_all_active_backends():
+    """
+    Pings all enabled Modal backends in parallel threads so Z-Image Turbo,
+    Qwen Image Edit, and Wan 2.2 stay warm while the frontend is running.
+    """
+    import threading
+
+    def _ping(getter, label):
+        try:
+            m = getter()
+            m.heartbeat.remote()
+        except Exception as e:
+            print(f"[keepalive] {label} ping note: {e}")
+
+    threads = []
+    if z_image_heartbeat_enabled:
+        threads.append(threading.Thread(target=_ping, args=(get_z_image_model, "Z-Image Turbo"), daemon=True))
+    if qwen_heartbeat_enabled:
+        threads.append(threading.Thread(target=_ping, args=(get_qwen_model, "Qwen Image Edit"), daemon=True))
+    if wan_heartbeat_enabled:
+        threads.append(threading.Thread(target=_ping, args=(get_wan_model, "Wan 2.2"), daemon=True))
+
+    for t in threads:
+        t.start()
+    return len(threads)
 
 
 def start_keepalive_thread():
     """
-    Spawns a background thread that pings active backends every 25 seconds ONLY when:
-      1. The frontend tab is actively open (heartbeat received within 45s).
-      2. The user explicitly enabled keepalive for that model.
-      3. The user generated with that specific model within the last 3 minutes.
-    This strictly avoids waking up unneeded GPU containers or draining credits when idle.
+    Spawns a background daemon thread that automatically pings Z-Image Turbo,
+    Qwen Image Edit, and Wan 2.2 every 25 seconds while the frontend is open.
+    When the user closes the frontend, heartbeats stop automatically and Modal
+    scales down the containers cleanly.
     """
     import threading
-    import time
 
     def keepalive_worker():
-        time.sleep(5)
-        print("[keepalive] Cost-optimized keep-alive worker started.")
+        time.sleep(2)
+        print("[keepalive] Auto-heartbeat worker started for Z-Image Turbo, Qwen Image Edit & Wan 2.2.")
         while True:
             now = time.time()
-            is_frontend_open = (now - last_frontend_heartbeat_time) < 45.0
-
+            is_frontend_open = (now - last_frontend_heartbeat_time) < FRONTEND_HEARTBEAT_TIMEOUT
             if is_frontend_open:
-                # 1. Ping Wan backend ONLY if enabled and recently used
-                if wan_heartbeat_enabled and last_wan_activity_time > 0:
-                    if (now - last_wan_activity_time) < KEEPALIVE_IDLE_WINDOW:
-                        try:
-                            m = get_wan_model()
-                            m.heartbeat.remote()
-                        except Exception:
-                            pass
-
-                # 2. Ping Qwen backend ONLY if enabled and recently used
-                if qwen_heartbeat_enabled and last_qwen_activity_time > 0:
-                    if (now - last_qwen_activity_time) < KEEPALIVE_IDLE_WINDOW:
-                        try:
-                            m = get_qwen_model()
-                            m.heartbeat.remote()
-                        except Exception:
-                            pass
-
+                ping_all_active_backends()
             time.sleep(25)
 
     t = threading.Thread(target=keepalive_worker, name="ModalKeepAliveThread")
     t.daemon = True
     t.start()
-
-
-
-
-
 

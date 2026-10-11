@@ -130,7 +130,7 @@ class TestFrameExtraction(unittest.TestCase):
 
 class TestHeartbeatState(unittest.TestCase):
     def test_heartbeat_toggle(self):
-        """Heartbeat state toggles should update backend flags."""
+        """Heartbeat state toggles should update backend flags for Wan, Qwen, and Z-Image Turbo."""
         backend.set_wan_heartbeat_state(True)
         self.assertTrue(backend.wan_heartbeat_enabled)
         backend.set_wan_heartbeat_state(False)
@@ -141,6 +141,16 @@ class TestHeartbeatState(unittest.TestCase):
         backend.set_qwen_heartbeat_state(False)
         self.assertFalse(backend.qwen_heartbeat_enabled)
 
+        backend.set_z_image_heartbeat_state(True)
+        self.assertTrue(backend.z_image_heartbeat_enabled)
+        backend.set_z_image_heartbeat_state(False)
+        self.assertFalse(backend.z_image_heartbeat_enabled)
+
+        # Restore defaults (True for all 3 models on frontend launch)
+        backend.set_wan_heartbeat_state(True)
+        backend.set_qwen_heartbeat_state(True)
+        backend.set_z_image_heartbeat_state(True)
+
     def test_activity_tracking(self):
         """Activity recording functions should update timestamps."""
         backend.record_wan_activity()
@@ -149,8 +159,32 @@ class TestHeartbeatState(unittest.TestCase):
         backend.record_qwen_activity()
         self.assertGreater(backend.last_qwen_activity_time, 0)
 
+        backend.record_z_image_activity()
+        self.assertGreater(backend.last_z_image_activity_time, 0)
+
         backend.record_frontend_heartbeat()
         self.assertGreater(backend.last_frontend_heartbeat_time, 0)
+
+    def test_ping_all_active_backends(self):
+        """ping_all_active_backends should ping all 3 Modal backends when enabled."""
+        from unittest.mock import patch, MagicMock
+        mock_wan_inst = MagicMock()
+        mock_qwen_inst = MagicMock()
+        mock_z_inst = MagicMock()
+
+        backend.set_wan_heartbeat_state(True)
+        backend.set_qwen_heartbeat_state(True)
+        backend.set_z_image_heartbeat_state(True)
+
+        with patch.object(backend, "get_wan_model", return_value=mock_wan_inst), \
+             patch.object(backend, "get_qwen_model", return_value=mock_qwen_inst), \
+             patch.object(backend, "get_z_image_model", return_value=mock_z_inst):
+            pinged_count = backend.ping_all_active_backends()
+
+        self.assertEqual(pinged_count, 3)
+        mock_wan_inst.heartbeat.remote.assert_called_once()
+        mock_qwen_inst.heartbeat.remote.assert_called_once()
+        mock_z_inst.heartbeat.remote.assert_called_once()
 
 
 class TestClearOutputs(unittest.TestCase):

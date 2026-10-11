@@ -12,13 +12,14 @@ from PIL import Image
 from backend import (
     run_remote_inference, qwen_image_edit_remote, generate_z_image_turbo_remote,
     start_keepalive_thread, record_frontend_heartbeat, set_wan_heartbeat_state,
-    set_qwen_heartbeat_state
+    set_qwen_heartbeat_state, set_z_image_heartbeat_state
 )
 from studio_pipeline import (
     StudioPipeline,
     ASPECT_RATIO_PRESETS,
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_MODEL,
+    generate_three_studio_seeds,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -686,6 +687,14 @@ DRAG_DROP_JS = """
 # ── Studio (Tool 3) Handlers ──────────────────────────────────────────────────
 # Kept at module level so they can be unit-tested without launching Gradio.
 
+INITIAL_STUDIO_SEEDS = generate_three_studio_seeds()
+
+
+def roll_three_studio_seeds():
+    seeds = generate_three_studio_seeds()
+    return seeds["z_image_seed"], seeds["qwen_seed"], seeds["wan_seed"]
+
+
 def _studio_progress(progress):
     def cb(pct, msg):
         try:
@@ -701,7 +710,7 @@ def _studio_gallery_items(story_data):
         for c in (story_data or {}).get("characters", []) if c.get("portrait_path")
     ]
     scenes = [
-        (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')}")
+        (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} (Seed: {s.get('keyframe_seed', '')})")
         for s in (story_data or {}).get("scenes", []) if s.get("keyframe_path")
     ]
     return chars, scenes
@@ -722,15 +731,300 @@ def _studio_director_summary(scenes):
             + "\n".join(rows))
 
 
+def _character_choices(story_data):
+    chars = (story_data or {}).get("characters", [])
+    return [f"{i+1}. {c.get('name', f'Character {i+1}')} ({c.get('id', f'char_{i+1}')})" for i, c in enumerate(chars)]
+
+
+def _scene_choices(story_data):
+    scenes = (story_data or {}).get("scenes", [])
+    return [f"Scene {s.get('scene_number', i+1)}: {s.get('title', f'Shot {i+1}')}" for i, s in enumerate(scenes)]
+
+
+def _parse_selector_index(choice_label, choices_list):
+    if not choices_list:
+        return 0
+    if isinstance(choice_label, int):
+        return max(0, min(len(choices_list) - 1, choice_label))
+    if choice_label in choices_list:
+        return choices_list.index(choice_label)
+    if isinstance(choice_label, str):
+        for idx, c in enumerate(choices_list):
+            if c.startswith(choice_label) or choice_label in c:
+                return idx
+    return 0
+
+
+def studio_load_character_fields(choice_label, current_state, default_seed=42):
+    chars = (current_state or {}).get("characters", [])
+    choices = _character_choices(current_state)
+    if not chars:
+        return "", "", "", "", "", "", int(default_seed), None
+    idx = _parse_selector_index(choice_label, choices)
+    c = chars[idx]
+    img = c.get("portrait_path") if c.get("portrait_path") and os.path.exists(c.get("portrait_path")) else None
+    return (
+        c.get("name", ""),
+        c.get("face", ""),
+        c.get("hair", ""),
+        c.get("clothing", ""),
+        c.get("signature_details", ""),
+        c.get("z_image_prompt", ""),
+        int(c.get("portrait_seed", default_seed)),
+        img,
+    )
+
+
+def studio_save_character_text_edits(
+    choice_label, name, face, hair, clothing, sig_details, z_prompt, current_state
+):
+    chars = list((current_state or {}).get("characters", []))
+    choices = _character_choices(current_state)
+    if not chars:
+        return StudioPipeline.serializable(current_state or {}), "### ⚠️ Generate a story first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    c = dict(chars[idx])
+    c["name"] = name
+    c["face"] = face
+    c["hair"] = hair
+    c["clothing"] = clothing
+    c["signature_details"] = sig_details
+    c["z_image_prompt"] = z_prompt
+    chars[idx] = c
+    current_state["characters"] = chars
+    return (
+        StudioPipeline.serializable(current_state),
+        f"### ✅ Saved description updates for Character #{idx+1} (`{name}`).",
+        current_state,
+    )
+
+
+def studio_redo_single_character(
+    choice_label, name, face, hair, clothing, sig_details, z_prompt, char_seed,
+    api_key, model, current_state, progress=gr.Progress(track_tqdm=True),
+):
+    chars = (current_state or {}).get("characters", [])
+    choices = _character_choices(current_state)
+    if not chars:
+        return [], None, {}, "### ⚠️ Please run Phase 1 (Story Generation) first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    try:
+        updated_char = pipeline.regenerate_single_character(
+            story_data=current_state,
+            char_index=idx,
+            updated_fields={
+                "name": name,
+                "face": face,
+                "hair": hair,
+                "clothing": clothing,
+                "signature_details": sig_details,
+                "z_image_prompt": z_prompt,
+            },
+            seed=int(char_seed),
+            progress_cb=_studio_progress(progress),
+        )
+        char_items, _ = _studio_gallery_items(current_state)
+        status = (
+            f"### 🔄 Character Redo Complete: `{updated_char.get('name')}`\n"
+            f"Regenerated with Z-Image Turbo using seed `{int(char_seed)}`."
+        )
+        return char_items, updated_char.get("portrait_path"), StudioPipeline.serializable(current_state), status, current_state
+    except Exception as e:
+        char_items, _ = _studio_gallery_items(current_state)
+        return char_items, None, StudioPipeline.serializable(current_state), f"### ❌ Character Redo Error\n`{e}`", current_state
+
+
+def studio_load_scene_fields(choice_label, current_state, default_seed=42):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return "", "", "", "", int(default_seed), None
+    idx = _parse_selector_index(choice_label, choices)
+    s = scenes[idx]
+    img = s.get("keyframe_path") if s.get("keyframe_path") and os.path.exists(s.get("keyframe_path")) else None
+    char_ids_str = ", ".join(s.get("character_ids", []))
+    return (
+        s.get("title", ""),
+        s.get("scenario", ""),
+        s.get("qwen_scene_prompt", ""),
+        char_ids_str,
+        int(s.get("keyframe_seed", default_seed)),
+        img,
+    )
+
+
+def studio_save_scene_text_edits(choice_label, title, scenario, qwen_prompt, char_ids_str, current_state):
+    scenes = list((current_state or {}).get("scenes", []))
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return StudioPipeline.serializable(current_state or {}), "### ⚠️ Generate a story first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    s = dict(scenes[idx])
+    s["title"] = title
+    s["scenario"] = scenario
+    s["qwen_scene_prompt"] = qwen_prompt
+    if char_ids_str and str(char_ids_str).strip():
+        s["character_ids"] = [x.strip() for x in str(char_ids_str).split(",") if x.strip()]
+    scenes[idx] = s
+    current_state["scenes"] = scenes
+    return (
+        StudioPipeline.serializable(current_state),
+        f"### ✅ Saved description updates for Scene #{idx+1} (`{title}`).",
+        current_state,
+    )
+
+
+def studio_redo_single_scene(
+    choice_label, title, scenario, qwen_prompt, char_ids_str, scene_seed,
+    aspect_ratio, api_key, model, current_state, progress=gr.Progress(track_tqdm=True),
+):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return [], None, {}, "### ⚠️ Please run Phase 1 & Phase 2 first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    char_ids = [x.strip() for x in str(char_ids_str or "").split(",") if x.strip()] or scenes[idx].get("character_ids", [])
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    try:
+        updated_scene = pipeline.regenerate_single_scene_keyframe(
+            story_data=current_state,
+            scene_index=idx,
+            updated_fields={
+                "title": title,
+                "scenario": scenario,
+                "qwen_scene_prompt": qwen_prompt,
+                "character_ids": char_ids,
+            },
+            seed=int(scene_seed),
+            aspect_ratio=aspect_ratio,
+            progress_cb=_studio_progress(progress),
+        )
+        _, scene_items = _studio_gallery_items(current_state)
+        status = (
+            f"### 🔄 Scene #{idx+1} Keyframe Redo Complete: `{updated_scene.get('title')}`\n"
+            f"Regenerated with Qwen Multi-Ref using seed `{int(scene_seed)}`."
+        )
+        return scene_items, updated_scene.get("keyframe_path"), StudioPipeline.serializable(current_state), status, current_state
+    except Exception as e:
+        _, scene_items = _studio_gallery_items(current_state)
+        return scene_items, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Redo Error\n`{e}`", current_state
+
+
+def studio_load_clip_fields(choice_label, current_state, default_seed=42):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return "", "", "", int(default_seed), None
+    idx = _parse_selector_index(choice_label, choices)
+    s = scenes[idx]
+    d = s.get("director") or {}
+    vid = s.get("video_path") if s.get("video_path") and os.path.exists(s.get("video_path")) else None
+    return (
+        s.get("wan_motion_prompt", d.get("subject_action", "")),
+        d.get("camera_movement", s.get("camera_movement", "Static Tripod Shot")),
+        d.get("wan_prompt", ""),
+        int(s.get("video_seed", default_seed)),
+        vid,
+    )
+
+
+def studio_redirect_single_clip(
+    choice_label, motion_desc, camera_move, use_vision, api_key, model, current_state
+):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return "", "", {}, "### ⚠️ Please run earlier phases first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    if motion_desc:
+        scenes[idx]["wan_motion_prompt"] = motion_desc
+    if camera_move:
+        scenes[idx]["camera_movement"] = camera_move
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    try:
+        plan = pipeline.direct_single_scene_animation(current_state, idx, use_vision=bool(use_vision))
+        status = (
+            f"### 🎬 Gemma Vision Re-Directed Scene #{idx+1}\n"
+            f"Camera: `{plan.get('camera_movement')}` | Intensity: `{plan.get('motion_intensity')}` | Source: `{plan.get('source')}`"
+        )
+        return (
+            plan.get("camera_movement", camera_move),
+            plan.get("wan_prompt", ""),
+            StudioPipeline.serializable(current_state),
+            status,
+            current_state,
+        )
+    except Exception as e:
+        return camera_move, "", StudioPipeline.serializable(current_state), f"### ❌ Director Error\n`{e}`", current_state
+
+
+def studio_redo_single_clip(
+    choice_label, motion_desc, camera_move, compiled_wan_prompt, clip_seed,
+    re_run_director, use_vision, aspect_ratio, api_key, model, current_state,
+    progress=gr.Progress(track_tqdm=True),
+):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return None, None, {}, "### ⚠️ Please generate scene keyframes first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    try:
+        updated_scene = pipeline.regenerate_single_scene_video(
+            story_data=current_state,
+            scene_index=idx,
+            updated_fields={
+                "wan_motion_prompt": motion_desc,
+                "camera_movement": camera_move,
+                "wan_prompt": compiled_wan_prompt,
+            },
+            seed=int(clip_seed),
+            aspect_ratio=aspect_ratio,
+            re_run_director=bool(re_run_director),
+            use_vision=bool(use_vision),
+            auto_stitch=True,
+            progress_cb=_studio_progress(progress),
+        )
+        clip_path = updated_scene.get("video_path")
+        final_movie = current_state.get("final_movie_path")
+        status = (
+            f"### 🔄 Scene #{idx+1} Video Clip Redo Complete!\n"
+            f"- **Clip:** `{pathlib.Path(clip_path).name if clip_path else 'N/A'}` (Seed `{int(clip_seed)}`)\n"
+            f"- **Final Movie Re-Stitched:** `{pathlib.Path(final_movie).name if final_movie else 'Pending remaining clips'}`"
+        )
+        return (
+            clip_path,
+            final_movie,
+            StudioPipeline.serializable(current_state),
+            status,
+            current_state,
+        )
+    except Exception as e:
+        return (
+            None,
+            current_state.get("final_movie_path"),
+            StudioPipeline.serializable(current_state),
+            f"### ❌ Clip Redo Error\n`{e}`",
+            current_state,
+        )
+
+
 def studio_run_full(
     prompt, art_style, aspect_ratio, seed, num_scenes, duration, api_key, model,
-    use_vision=True, progress=gr.Progress(track_tqdm=True),
+    use_vision=True, qwen_seed=None, wan_seed=None, progress=gr.Progress(track_tqdm=True),
 ):
     pipeline = StudioPipeline(api_key=api_key, model=model)
+    z_seed = int(seed)
+    q_seed = int(qwen_seed if qwen_seed is not None else seed)
+    w_seed = int(wan_seed if wan_seed is not None else seed)
     try:
         story_data = pipeline.run_full_pipeline(
             user_prompt=prompt,
-            shared_seed=int(seed),
+            shared_seed=z_seed,
+            z_image_seed=z_seed,
+            qwen_seed=q_seed,
+            wan_seed=w_seed,
             num_scenes=int(num_scenes),
             target_duration=float(duration),
             aspect_ratio=aspect_ratio,
@@ -743,8 +1037,9 @@ def studio_run_full(
         status_msg = (
             f"### 🎬 Production Complete!\n\n"
             f"- **Screenplay:** '{story_data.get('title')}'\n"
-            f"- **Characters:** {len(char_items)} (Z-Image Turbo, locked seed {int(seed)})\n"
-            f"- **Scene Keyframes:** {len(scene_items)} (Qwen Multi-Reference)\n"
+            f"- **Characters:** {len(char_items)} (Z-Image Turbo, locked seed `{z_seed}`)\n"
+            f"- **Scene Keyframes:** {len(scene_items)} (Qwen Multi-Reference, locked seed `{q_seed}`)\n"
+            f"- **Video Clips:** {len(story_data.get('clip_paths', []))} (Wan 2.2, locked seed `{w_seed}`)\n"
             f"- **Final Movie:** `{pathlib.Path(final_video).name if final_video else 'N/A'}`"
             + _studio_director_summary(story_data.get("scenes"))
         )
@@ -765,8 +1060,9 @@ def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, pr
         )
         status_msg = (
             f"### 📝 Step 1 Complete: Screenplay & Characters Generated\n"
-            f"Extracted {len(story_data.get('characters', []))} character(s) and "
-            f"{len(story_data.get('scenes', []))} shot(s) of ≤5s each."
+            f"**Title:** *{story_data.get('title')}* — Extracted **{len(story_data.get('characters', []))}** character(s) and "
+            f"**{len(story_data.get('scenes', []))}** shot(s) of ≤5s each.\n"
+            f"Review/edit below, then click **Next: Validate Story ➔ Phase 2 (Characters)**."
         )
         return StudioPipeline.serializable(story_data), status_msg, story_data
     except Exception as e:
@@ -787,7 +1083,9 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
         current_state["characters"] = chars
         char_items, _ = _studio_gallery_items(current_state)
         return char_items, (
-            f"### 👤 Step 2 Complete: {len(chars)} Character Portraits\nAll characters locked to seed `{int(seed)}`."
+            f"### 👤 Step 2 Complete: {len(chars)} Character Portraits\n"
+            f"All characters generated with locked Z-Image seed `{int(seed)}`. "
+            f"Select any character on the right to edit descriptions/seed and redo individually, or click **Next ➔ Phase 3**."
         ), current_state
     except Exception as e:
         return [], f"### ❌ Step 2 Error\n`{e}`", current_state
@@ -795,7 +1093,7 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
 
 def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
     if not current_state or "scenes" not in current_state or not any(
-        c.get("portrait_path") for c in current_state.get("characters", [])
+        c.get("portrait_path") or c.get("portrait_pil") for c in current_state.get("characters", [])
     ):
         return [], "### ⚠️ Please run Step 1 & Step 2 first.", current_state
     pipeline = StudioPipeline(api_key=api_key, model=model)
@@ -810,7 +1108,9 @@ def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress
         current_state["scenes"] = scenes
         _, scene_items = _studio_gallery_items(current_state)
         return scene_items, (
-            f"### 🖼️ Step 3 Complete: {len(scenes)} Scene Keyframes\nCharacter identities locked via multi-reference transfer."
+            f"### 🖼️ Step 3 Complete: {len(scenes)} Scene Keyframes\n"
+            f"All scenes generated with locked Qwen seed `{int(seed)}` & character multi-references. "
+            f"Select any scene on the right to edit its scenario/seed and redo individually, or click **Next ➔ Phase 4**."
         ), current_state
     except Exception as e:
         return [], f"### ❌ Step 3 Error\n`{e}`", current_state
@@ -818,7 +1118,7 @@ def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress
 
 def studio_run_director(api_key, model, use_vision, current_state, progress=gr.Progress(track_tqdm=True)):
     scenes = (current_state or {}).get("scenes", [])
-    if not scenes or not all(s.get("keyframe_path") for s in scenes):
+    if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
         return StudioPipeline.serializable(current_state or {}), \
             "### ⚠️ Please run Step 3 (Scene Keyframes) first — the Director needs to see each keyframe.", current_state
     pipeline = StudioPipeline(api_key=api_key, model=model)
@@ -840,7 +1140,7 @@ def studio_run_director(api_key, model, use_vision, current_state, progress=gr.P
 
 def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_state, progress=gr.Progress(track_tqdm=True)):
     scenes = (current_state or {}).get("scenes", [])
-    if not scenes or not all(s.get("keyframe_path") for s in scenes):
+    if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
         return None, "### ⚠️ Please run Step 3 (Scene Keyframes) first.", current_state
     pipeline = StudioPipeline(api_key=api_key, model=model)
     cb = _studio_progress(progress)
@@ -862,7 +1162,8 @@ def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_sta
         current_state["final_movie_path"] = final_movie
         current_state["manifest_path"] = pipeline.save_manifest(current_state)
         return final_movie, (
-            f"### 🎬 Step 5 Complete: Movie Stitched!\nFinal file: `{pathlib.Path(final_movie).name}`"
+            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`)\n"
+            f"Final file: `{pathlib.Path(final_movie).name}`"
             + _studio_director_summary(scenes)
         ), current_state
     except Exception as e:
@@ -871,27 +1172,352 @@ def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_sta
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
+with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
-    gr.Markdown("## 🎨 Wan 2.2 & Qwen Image Studio", elem_classes="main-title")
+    gr.Markdown("## 🎬 Wan 2.2 AI Filmmaking Studio", elem_classes="main-title")
     gr.Markdown(
-        "**Tool 1 🖼️** — Qwen Image Edit Rapid AIO   |   "
-        "**Tool 2 🎥** — Wan 2.2 Video Generator   |   "
-        "**Tool 3 🎬** — Studio Automated Director",
+        "**Auto-Heartbeats Active:** `Z-Image Turbo` + `Qwen Image Edit` + `Wan 2.2` stay warm automatically while this UI is open   |   "
+        "**3-Seed Consistency Engine** (`Z-Image Seed` · `Qwen Scene Seed` · `Wan Video Seed`)",
         elem_classes="subtitle"
     )
 
     with gr.Row():
-        wan_hb_btn = gr.Button("💤 Wan 2.2 Keep-Warm: Paused", variant="secondary", scale=1)
-        qwen_hb_btn = gr.Button("💤 Qwen Keep-Warm: Paused", variant="secondary", scale=1)
+        z_image_hb_btn = gr.Button("💓 Z-Image Turbo Keep-Warm: Active", variant="primary", scale=1)
+        qwen_hb_btn = gr.Button("💓 Qwen Keep-Warm: Active", variant="primary", scale=1)
+        wan_hb_btn = gr.Button("💓 Wan 2.2 Keep-Warm: Active", variant="primary", scale=1)
         clear_outputs_btn = gr.Button("🗑️ Clear All Outputs", variant="stop", scale=1)
 
     with gr.Row(elem_classes="toolbar-row"):
         expand_all_btn = gr.Button("🔽 Expand All Tools", variant="secondary", size="sm")
         collapse_all_btn = gr.Button("🔼 Collapse All Tools", variant="secondary", size="sm")
 
-    # ── Tool 1: Qwen Image Edit Rapid AIO Generator / Editor ──────────────────
-    with gr.Accordion("🖼️ Tool 1 — Qwen Image Edit Rapid AIO (Image Generator & Editor)", open=True, elem_classes="tool-accordion qwen-panel") as qwen_accordion:
+    # ── Tool 3 (Primary): 4-Phase Interactive AI Filmmaking Studio Wizard ─────
+    with gr.Accordion(
+        "🎬 AI Filmmaking Studio — 4-Phase Interactive Story-to-Movie Wizard (Gemma 4: 31B ➔ Z-Image ➔ Qwen ➔ Wan 2.2)",
+        open=True,
+        elem_classes="tool-accordion studio-panel",
+    ) as studio_accordion:
+        gr.Markdown(
+            "### 🎬 4-Phase Interactive Studio · Validate & Redo Every Character, Scene, and 5s Video Clip",
+            elem_classes="section-header",
+        )
+
+        # Global 3-Seed Bar & Global Studio Configuration
+        with gr.Group():
+            with gr.Row():
+                studio_seed = gr.Number(
+                    value=INITIAL_STUDIO_SEEDS["z_image_seed"],
+                    precision=0,
+                    label="🎲 Seed #1: Z-Image Turbo (All Characters)",
+                    scale=1,
+                )
+                studio_qwen_seed = gr.Number(
+                    value=INITIAL_STUDIO_SEEDS["qwen_seed"],
+                    precision=0,
+                    label="🎲 Seed #2: Qwen Image Edit (All Scene Images)",
+                    scale=1,
+                )
+                studio_wan_seed = gr.Number(
+                    value=INITIAL_STUDIO_SEEDS["wan_seed"],
+                    precision=0,
+                    label="🎲 Seed #3: Wan 2.2 (All 5s Video Clips)",
+                    scale=1,
+                )
+                studio_roll_seeds_btn = gr.Button("🎲 Roll 3 New Random Seeds", variant="secondary", scale=1)
+
+            with gr.Row():
+                studio_art_style = gr.Dropdown(
+                    label="Art Style",
+                    choices=[
+                        "2D vibrant cartoon animation",
+                        "Cyberpunk anime aesthetic",
+                        "3D Pixar / Disney animation style",
+                        "Photorealistic cinematic",
+                        "Watercolor children's book illustration",
+                    ],
+                    value="2D vibrant cartoon animation",
+                    scale=1,
+                )
+                studio_aspect_ratio = gr.Dropdown(
+                    label="Aspect Ratio / Format",
+                    choices=list(ASPECT_RATIO_PRESETS.keys()),
+                    value="9:16 Vertical (Shorts/Reels)",
+                    scale=1,
+                )
+                studio_num_scenes = gr.Slider(
+                    minimum=3, maximum=8, step=1, value=6,
+                    label="Scenes Count (≤5s each)",
+                    scale=1,
+                )
+                studio_total_duration = gr.Slider(
+                    minimum=15.0, maximum=40.0, step=2.5, value=30.0,
+                    label="Total Movie Duration (s)",
+                    scale=1,
+                )
+
+        studio_status = gr.Markdown(
+            "### 🟢 Phase 1 Ready — Enter your story idea below and click **1️⃣ Generate Story (Gemma 4: 31B)**."
+        )
+
+        # ── 4-Phase Wizard Tabs ───────────────────────────────────────────────
+        with gr.Tabs(selected="phase1") as studio_wizard_tabs:
+
+            # ══════════════════════════════════════════════════════════════════
+            # PHASE 1: STORY & SCREENPLAY
+            # ══════════════════════════════════════════════════════════════════
+            with gr.TabItem("1️⃣ Phase 1: Story & Screenplay", id="phase1"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        studio_prompt = gr.Textbox(
+                            label="Story Premise / Idea",
+                            value="Two best friends, Barnaby the fluffy brown bear and Pippin the white rabbit, discover a basket of sweet wild berries in an enchanted forest meadow and learn that sharing brings true happiness.",
+                            placeholder="Describe your story premise or thematic concept...",
+                            lines=4,
+                        )
+                        studio_use_vision = gr.Checkbox(
+                            label="🎬 Enable Gemma 4: 31B Multimodal Vision Director (inspects each keyframe before animating)",
+                            value=True,
+                        )
+                        with gr.Accordion("⚙️ Ollama Cloud API & One-Click Auto Mode", open=False):
+                            with gr.Row():
+                                studio_ollama_key = gr.Textbox(
+                                    label="Ollama Cloud API Key",
+                                    value=DEFAULT_OLLAMA_API_KEY,
+                                    type="password",
+                                    scale=2,
+                                )
+                                studio_ollama_model = gr.Textbox(
+                                    label="Ollama Model",
+                                    value=DEFAULT_OLLAMA_MODEL,
+                                    scale=1,
+                                )
+                            studio_run_full_btn = gr.Button(
+                                "🚀 Run Full Automated Pipeline (All 4 Phases Non-Stop)",
+                                variant="secondary",
+                            )
+
+                        studio_step1_btn = gr.Button(
+                            "1️⃣ Generate Story & Extract Characters (Gemma 4: 31B)",
+                            variant="primary",
+                            size="lg",
+                        )
+
+                    with gr.Column(scale=1):
+                        studio_story_title_edit = gr.Textbox(
+                            label="Movie Title (Editable)",
+                            placeholder="Generated story title will appear here...",
+                        )
+                        studio_json_display = gr.JSON(label="Generated Screenplay, Cast & Scene Breakdown")
+                        studio_phase1_next_btn = gr.Button(
+                            "✅ Validate Story & Next ➔ Phase 2: Characters",
+                            variant="primary",
+                            size="lg",
+                        )
+
+            # ══════════════════════════════════════════════════════════════════
+            # PHASE 2: CHARACTER STUDIO (Z-IMAGE TURBO)
+            # ══════════════════════════════════════════════════════════════════
+            with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2"):
+                with gr.Row():
+                    studio_step2_btn = gr.Button(
+                        "🎨 Generate All Characters (Using Locked Z-Image Seed)",
+                        variant="primary",
+                        size="lg",
+                        scale=2,
+                    )
+                    studio_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary", scale=1)
+                    studio_phase2_next_btn = gr.Button(
+                        "✅ Validate Characters & Next ➔ Phase 3: Scene Images",
+                        variant="primary",
+                        scale=2,
+                    )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        studio_char_gallery = gr.Gallery(
+                            label="👤 Generated Character Reference Sheets (Click a character to inspect/redo)",
+                            columns=[2],
+                            height=420,
+                            object_fit="contain",
+                            preview=True,
+                        )
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 🛠️ Individual Character Inspector & Redo")
+                        studio_char_selector = gr.Dropdown(
+                            label="Select Character to Edit / Redo",
+                            choices=[],
+                            interactive=True,
+                        )
+                        studio_char_preview = gr.Image(
+                            label="Selected Character Portrait",
+                            height=200,
+                            interactive=False,
+                        )
+                        with gr.Row():
+                            studio_char_name_edit = gr.Textbox(label="Character Name", scale=1)
+                            studio_char_seed_edit = gr.Number(
+                                label="Character Seed (Change to vary portrait)",
+                                value=INITIAL_STUDIO_SEEDS["z_image_seed"],
+                                precision=0,
+                                scale=1,
+                            )
+                        studio_char_face_edit = gr.Textbox(label="Face Details (eyes, expression, muzzle/features)")
+                        studio_char_hair_edit = gr.Textbox(label="Hair / Fur / Feathers Details")
+                        studio_char_cloth_edit = gr.Textbox(label="Clothing & Outfit Details")
+                        studio_char_sig_edit = gr.Textbox(label="Signature Props / Accessories")
+                        studio_char_prompt_edit = gr.Textbox(
+                            label="Z-Image Prompt Override",
+                            lines=2,
+                        )
+                        with gr.Row():
+                            studio_char_save_btn = gr.Button("💾 Save Description Changes Only", variant="secondary")
+                            studio_char_redo_btn = gr.Button(
+                                "🔄 Redo This Character Image (Z-Image Turbo)",
+                                variant="primary",
+                            )
+
+            # ══════════════════════════════════════════════════════════════════
+            # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF)
+            # ══════════════════════════════════════════════════════════════════
+            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Multi-Ref)", id="phase3"):
+                with gr.Row():
+                    studio_step3_btn = gr.Button(
+                        "🖼️ Generate All Scene Images (Using Locked Qwen Seed + Character Refs)",
+                        variant="primary",
+                        size="lg",
+                        scale=2,
+                    )
+                    studio_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary", scale=1)
+                    studio_phase3_next_btn = gr.Button(
+                        "✅ Validate Scene Images & Next ➔ Phase 4: Video Clips",
+                        variant="primary",
+                        scale=2,
+                    )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        studio_scenes_gallery = gr.Gallery(
+                            label="🖼️ Generated Scene Keyframes (Click any scene to inspect/redo)",
+                            columns=[2, 3],
+                            height=440,
+                            object_fit="contain",
+                            preview=True,
+                        )
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 🛠️ Individual Scene / Scenario Inspector & Redo")
+                        studio_scene_selector = gr.Dropdown(
+                            label="Select Scene to Edit / Redo",
+                            choices=[],
+                            interactive=True,
+                        )
+                        studio_scene_preview = gr.Image(
+                            label="Selected Scene Keyframe",
+                            height=220,
+                            interactive=False,
+                        )
+                        with gr.Row():
+                            studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=1)
+                            studio_scene_seed_edit = gr.Number(
+                                label="Scene Seed (Change to vary composition)",
+                                value=INITIAL_STUDIO_SEEDS["qwen_seed"],
+                                precision=0,
+                                scale=1,
+                            )
+                        studio_scene_scenario_edit = gr.Textbox(
+                            label="Scene Scenario / Story Beat Description",
+                            lines=2,
+                        )
+                        studio_scene_prompt_edit = gr.Textbox(
+                            label="Qwen Visual Scene Prompt (Framing, environment, character pose)",
+                            lines=3,
+                        )
+                        studio_scene_chars_edit = gr.Textbox(
+                            label="Character IDs in Scene (comma-separated, e.g. char_1, char_2)",
+                        )
+                        with gr.Row():
+                            studio_scene_save_btn = gr.Button("💾 Save Scene Description Only", variant="secondary")
+                            studio_scene_redo_btn = gr.Button(
+                                "🔄 Redo This Scene Image (Qwen Multi-Ref)",
+                                variant="primary",
+                            )
+
+            # ══════════════════════════════════════════════════════════════════
+            # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2)
+            # ══════════════════════════════════════════════════════════════════
+            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2)", id="phase4"):
+                with gr.Row():
+                    studio_step_director_btn = gr.Button(
+                        "🎬 Step 4A: Run Gemma Vision Director on All Scenes",
+                        variant="secondary",
+                        scale=1,
+                    )
+                    studio_step4_btn = gr.Button(
+                        "🎥 Step 4B: Generate All 5s Video Clips & Stitch Final Movie (Locked Wan Seed)",
+                        variant="primary",
+                        size="lg",
+                        scale=2,
+                    )
+                    studio_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary", scale=1)
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        studio_final_video = gr.Video(
+                            label="🎬 Final Stitched Movie (All Clips Combined)",
+                            autoplay=True,
+                            interactive=False,
+                            height=360,
+                        )
+                        studio_clip_preview = gr.Video(
+                            label="🎞️ Selected Individual 5-Second Scene Clip Preview",
+                            autoplay=False,
+                            interactive=False,
+                            height=260,
+                        )
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 🛠️ Individual 5s Video Clip Inspector & Redo")
+                        studio_clip_selector = gr.Dropdown(
+                            label="Select 5s Scene Clip to Inspect / Edit / Redo",
+                            choices=[],
+                            interactive=True,
+                        )
+                        with gr.Row():
+                            studio_clip_camera_edit = gr.Textbox(
+                                label="Camera Movement",
+                                value="Slow Cinematic Push-In",
+                                scale=1,
+                            )
+                            studio_clip_seed_edit = gr.Number(
+                                label="Clip Seed (Change to vary motion trajectory)",
+                                value=INITIAL_STUDIO_SEEDS["wan_seed"],
+                                precision=0,
+                                scale=1,
+                            )
+                        studio_clip_motion_edit = gr.Textbox(
+                            label="Video Motion Description (What happens in this 5-second clip)",
+                            lines=3,
+                            placeholder="Describe the character movement, action, and expression for this 5s clip...",
+                        )
+                        studio_clip_wan_prompt_edit = gr.Textbox(
+                            label="Full Compiled Director / Wan 2.2 Prompt (Editable)",
+                            lines=4,
+                        )
+                        studio_clip_rerundir_chk = gr.Checkbox(
+                            label="🪄 Ask Gemma 4: 31B Vision Director to re-plan this clip before animating",
+                            value=False,
+                        )
+                        with gr.Row():
+                            studio_clip_director_btn = gr.Button(
+                                "🪄 Re-Direct Only This Clip (Gemma Vision)",
+                                variant="secondary",
+                            )
+                            studio_clip_redo_btn = gr.Button(
+                                "🔄 Redo This 5s Video Clip & Re-Stitch Movie",
+                                variant="primary",
+                            )
+
+    # ── Tool 1: Qwen Image Edit Rapid AIO Generator / Editor (Standalone) ─────
+    with gr.Accordion("🖼️ Standalone Tool 1 — Qwen Image Edit Rapid AIO (Image Generator & Editor)", open=False, elem_classes="tool-accordion qwen-panel") as qwen_accordion:
         gr.Markdown("### 🖼️ Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
         gr.Markdown(
             "Upload an **image to edit** (or leave empty for text-to-image). "
@@ -984,8 +1610,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                         scale=1
                     )
 
-    # ── Tool 2: Wan 2.2 Video Generator ───────────────────────────────────────
-    with gr.Accordion("🎥 Tool 2 — Wan 2.2 · High-Motion Video Generator", open=True, elem_classes="tool-accordion wan-panel") as wan_accordion:
+    # ── Tool 2: Wan 2.2 Video Generator (Standalone) ──────────────────────────
+    with gr.Accordion("🎥 Standalone Tool 2 — Wan 2.2 · High-Motion Video Generator", open=False, elem_classes="tool-accordion wan-panel") as wan_accordion:
         gr.Markdown("### 🎥 Wan 2.2 Video Generator", elem_classes="section-header")
         gr.Markdown(
             "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.\n\n"
@@ -1117,120 +1743,6 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                     timestamp_last_box = gr.Number(value=0, label="Timestamp Last", visible=False, elem_id="hidden-timestamp-last")
                 file_output = gr.File(label="Download Video")
 
-    # ── Tool 3: Studio Multi-Agent Automated Story & Video Production Studio ────
-    with gr.Accordion("🎬 Tool 3 — Studio Automated Director (Story ➔ Z-Image Turbo ➔ Qwen Multi-Ref ➔ Wan 2.2)", open=True, elem_classes="tool-accordion studio-panel") as studio_accordion:
-        gr.Markdown("### 🎬 Studio Automated Director · End-to-End Multi-Agent Video Pipeline", elem_classes="section-header")
-        gr.Markdown(
-            "1. **Story Architect (Gemma 4: 31B)** writes the screenplay (one ≤5s shot per scene) and extracts character visual details.\n"
-            "2. **Character Generator (Z-Image Turbo)** synthesizes portraits using an **identical locked seed** for maximum consistency.\n"
-            "3. **Scene Synthesizer (Qwen Image Edit)** transfers character faces, hair, and clothes as multi-references across all scenes.\n"
-            "4. **Animation Director (Gemma 4: 31B vision)** *looks at each keyframe* and writes a per-shot plan: 3-phase action timeline, camera move, identity anchors and Wan settings.\n"
-            "5. **Scene Animator (Wan 2.2)** animates each shot from the Director's plan (4k+1 frames, ≤81 frames / 5s).\n"
-            "6. **Film Assembly (FFmpeg)** concatenates all clips into the final movie (a JSON manifest is saved alongside).",
-            elem_classes="step-hint"
-        )
-
-        with gr.Row():
-            with gr.Column(scale=1):
-                studio_prompt = gr.Textbox(
-                    label="Story Premise / Idea",
-                    value="Two best friends, Barnaby the fluffy brown bear and Pippin the white rabbit, discover a basket of sweet wild berries in an enchanted forest meadow and learn that sharing brings true happiness.",
-                    placeholder="Describe your story premise or thematic concept...",
-                    lines=3,
-                )
-                with gr.Row():
-                    studio_art_style = gr.Dropdown(
-                        label="Art Style",
-                        choices=[
-                            "2D vibrant cartoon animation",
-                            "Cyberpunk anime aesthetic",
-                            "3D Pixar / Disney animation style",
-                            "Photorealistic cinematic",
-                            "Watercolor children's book illustration"
-                        ],
-                        value="2D vibrant cartoon animation",
-                        scale=1
-                    )
-                    studio_aspect_ratio = gr.Dropdown(
-                        label="Aspect Ratio / Format",
-                        choices=list(ASPECT_RATIO_PRESETS.keys()),
-                        value="9:16 Vertical (Shorts/Reels)",
-                        scale=1
-                    )
-                with gr.Row():
-                    studio_seed = gr.Slider(
-                        minimum=0, maximum=MAX_SEED, step=1, value=42,
-                        label="Character Locked Seed (Ensures Identical Faces)",
-                        scale=2
-                    )
-                    studio_num_scenes = gr.Slider(
-                        minimum=3, maximum=8, step=1, value=6,
-                        label="Scenes Count",
-                        info="Auto-raised so no shot exceeds 5s (30s → 6 scenes).",
-                        scale=1
-                    )
-                    studio_total_duration = gr.Slider(
-                        minimum=15.0, maximum=40.0, step=2.5, value=30.0,
-                        label="Total Duration (s)",
-                        scale=1
-                    )
-                studio_use_vision = gr.Checkbox(
-                    label="🎬 Vision Director — Gemma watches each keyframe before directing its animation",
-                    value=True,
-                )
-
-                with gr.Accordion("⚙️ AI Model & API Configuration", open=False):
-                    with gr.Row():
-                        studio_ollama_key = gr.Textbox(
-                            label="Ollama Cloud API Key",
-                            value=DEFAULT_OLLAMA_API_KEY,
-                            type="password",
-                            scale=2
-                        )
-                        studio_ollama_model = gr.Textbox(
-                            label="Ollama Model",
-                            value=DEFAULT_OLLAMA_MODEL,
-                            scale=1
-                        )
-
-                studio_run_full_btn = gr.Button("🚀 Run Full Automated Pipeline", variant="primary", size="lg")
-
-                with gr.Accordion("🛠️ Step-by-Step Production Controls", open=False):
-                    gr.Markdown("Inspect or execute each production stage individually:", elem_classes="step-hint")
-                    with gr.Row():
-                        studio_step1_btn = gr.Button("1️⃣ Story & Character Extraction", variant="secondary")
-                        studio_step2_btn = gr.Button("2️⃣ Z-Image Turbo Portraits", variant="secondary")
-                    with gr.Row():
-                        studio_step3_btn = gr.Button("3️⃣ Qwen Scene Keyframes", variant="secondary")
-                        studio_step_director_btn = gr.Button("4️⃣ Gemma Animation Director", variant="secondary")
-                    with gr.Row():
-                        studio_step4_btn = gr.Button("5️⃣ Animate (Wan 2.2) & Stitch", variant="secondary")
-
-            with gr.Column(scale=1):
-                studio_status = gr.Markdown("### 🟢 Pipeline Ready\nEnter a prompt and click **Run Full Automated 30s Pipeline**.")
-                studio_final_video = gr.Video(label="🎬 Final Assembled 30-Second Movie", autoplay=True, interactive=False)
-
-                with gr.Accordion("👤 Character Reference Portraits (Z-Image Turbo)", open=True):
-                    studio_char_gallery = gr.Gallery(
-                        label="Consistent Character References (Locked Seed)",
-                        columns=[2, 3],
-                        height=200,
-                        object_fit="contain",
-                        preview=True
-                    )
-
-                with gr.Accordion("🖼️ Synthesized Scene Keyframes (Qwen Multi-Reference)", open=True):
-                    studio_scenes_gallery = gr.Gallery(
-                        label="Scene Frames with Anchored Identity",
-                        columns=[2, 3],
-                        height=200,
-                        object_fit="contain",
-                        preview=True
-                    )
-
-                with gr.Accordion("📝 Screenplay & Character JSON Data", open=False):
-                    studio_json_display = gr.JSON(label="Gemma 4: 31B Screenplay Data")
-
     # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
     expand_all_btn.click(
         fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True)),
@@ -1357,10 +1869,339 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         outputs=[last_image_component],
     )
 
-    # ── Events: Studio Multi-Agent Automated Pipeline ─────────────────────────
-    # Handlers live at module level (studio_run_* above) so they are unit-testable.
+    # ── Events: 4-Phase Studio Wizard ─────────────────────────────────────────
 
     studio_pipeline_state = gr.State(value={})
+
+    def _roll_and_sync_seeds():
+        z_s, q_s, w_s = roll_three_studio_seeds()
+        return z_s, q_s, w_s, z_s, q_s, w_s
+
+    studio_roll_seeds_btn.click(
+        fn=_roll_and_sync_seeds,
+        inputs=[],
+        outputs=[
+            studio_seed, studio_qwen_seed, studio_wan_seed,
+            studio_char_seed_edit, studio_scene_seed_edit, studio_clip_seed_edit,
+        ],
+    )
+
+    # Phase 1: Generate Story & populate dropdowns for Phases 2, 3, 4
+    def _ui_step1(prompt, art_style, num_scenes, duration, api_key, model, z_seed, q_seed, w_seed, progress=gr.Progress(track_tqdm=True)):
+        json_data, status_msg, state = studio_run_step1(
+            prompt, art_style, num_scenes, duration, api_key, model, progress=progress
+        )
+        char_opts = _character_choices(state)
+        scene_opts = _scene_choices(state)
+        first_char = char_opts[0] if char_opts else None
+        first_scene = scene_opts[0] if scene_opts else None
+        c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img = studio_load_character_fields(
+            first_char, state, default_seed=z_seed
+        )
+        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img = studio_load_scene_fields(
+            first_scene, state, default_seed=q_seed
+        )
+        v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(
+            first_scene, state, default_seed=w_seed
+        )
+        return (
+            json_data,
+            status_msg,
+            state,
+            state.get("title", ""),
+            gr.update(choices=char_opts, value=first_char),
+            c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img,
+            gr.update(choices=scene_opts, value=first_scene),
+            s_title, s_scen, s_qprompt, s_cids, s_seed, s_img,
+            gr.update(choices=scene_opts, value=first_scene),
+            v_mot, v_cam, v_wprompt, v_seed, v_vid,
+        )
+
+    studio_step1_btn.click(
+        fn=_ui_step1,
+        inputs=[
+            studio_prompt, studio_art_style, studio_num_scenes,
+            studio_total_duration, studio_ollama_key, studio_ollama_model,
+            studio_seed, studio_qwen_seed, studio_wan_seed,
+        ],
+        outputs=[
+            studio_json_display, studio_status, studio_pipeline_state,
+            studio_story_title_edit,
+            studio_char_selector,
+            studio_char_name_edit, studio_char_face_edit, studio_char_hair_edit,
+            studio_char_cloth_edit, studio_char_sig_edit, studio_char_prompt_edit,
+            studio_char_seed_edit, studio_char_preview,
+            studio_scene_selector,
+            studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
+            studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
+            studio_clip_selector,
+            studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
+            studio_clip_seed_edit, studio_clip_preview,
+        ],
+    )
+
+    # Phase 1 -> Phase 2 validation & navigation
+    def _validate_phase1(title_edit, current_state):
+        if current_state and title_edit and str(title_edit).strip():
+            current_state["title"] = str(title_edit).strip()
+        return (
+            gr.update(selected="phase2"),
+            "### ✅ Phase 1 Validated — Now in **Phase 2: Character Studio**. Click **Generate All Characters**.",
+            current_state,
+        )
+
+    studio_phase1_next_btn.click(
+        fn=_validate_phase1,
+        inputs=[studio_story_title_edit, studio_pipeline_state],
+        outputs=[studio_wizard_tabs, studio_status, studio_pipeline_state],
+    )
+
+    studio_phase2_back_btn.click(
+        fn=lambda: gr.update(selected="phase1"),
+        inputs=[],
+        outputs=[studio_wizard_tabs],
+    )
+
+    studio_phase2_next_btn.click(
+        fn=lambda: (
+            gr.update(selected="phase3"),
+            "### ✅ Phase 2 Validated — Now in **Phase 3: Scene Images**. Click **Generate All Scene Images**.",
+        ),
+        inputs=[],
+        outputs=[studio_wizard_tabs, studio_status],
+    )
+
+    studio_phase3_back_btn.click(
+        fn=lambda: gr.update(selected="phase2"),
+        inputs=[],
+        outputs=[studio_wizard_tabs],
+    )
+
+    studio_phase3_next_btn.click(
+        fn=lambda: (
+            gr.update(selected="phase4"),
+            "### ✅ Phase 3 Validated — Now in **Phase 4: Video Clips & Final Movie**. Click **Generate All 5s Video Clips**.",
+        ),
+        inputs=[],
+        outputs=[studio_wizard_tabs, studio_status],
+    )
+
+    studio_phase4_back_btn.click(
+        fn=lambda: gr.update(selected="phase3"),
+        inputs=[],
+        outputs=[studio_wizard_tabs],
+    )
+
+    # Phase 2: Generate All Characters & Individual Character Inspector
+    def _ui_step2(seed, api_key, model, current_state, selected_char, progress=gr.Progress(track_tqdm=True)):
+        char_items, status, state = studio_run_step2(seed, api_key, model, current_state, progress=progress)
+        c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img = studio_load_character_fields(
+            selected_char, state, default_seed=seed
+        )
+        return char_items, status, state, c_seed, c_img
+
+    studio_step2_btn.click(
+        fn=_ui_step2,
+        inputs=[studio_seed, studio_ollama_key, studio_ollama_model, studio_pipeline_state, studio_char_selector],
+        outputs=[studio_char_gallery, studio_status, studio_pipeline_state, studio_char_seed_edit, studio_char_preview],
+    )
+
+    studio_char_selector.change(
+        fn=studio_load_character_fields,
+        inputs=[studio_char_selector, studio_pipeline_state, studio_seed],
+        outputs=[
+            studio_char_name_edit, studio_char_face_edit, studio_char_hair_edit,
+            studio_char_cloth_edit, studio_char_sig_edit, studio_char_prompt_edit,
+            studio_char_seed_edit, studio_char_preview,
+        ],
+    )
+
+    def _on_char_gallery_select(evt: gr.SelectData, current_state, default_seed):
+        choices = _character_choices(current_state)
+        if not choices or evt.index >= len(choices):
+            return gr.update(), "", "", "", "", "", "", int(default_seed), None
+        chosen = choices[evt.index]
+        fields = studio_load_character_fields(chosen, current_state, default_seed)
+        return (gr.update(value=chosen), *fields)
+
+    studio_char_gallery.select(
+        fn=_on_char_gallery_select,
+        inputs=[studio_pipeline_state, studio_seed],
+        outputs=[
+            studio_char_selector,
+            studio_char_name_edit, studio_char_face_edit, studio_char_hair_edit,
+            studio_char_cloth_edit, studio_char_sig_edit, studio_char_prompt_edit,
+            studio_char_seed_edit, studio_char_preview,
+        ],
+    )
+
+    studio_char_save_btn.click(
+        fn=studio_save_character_text_edits,
+        inputs=[
+            studio_char_selector, studio_char_name_edit, studio_char_face_edit,
+            studio_char_hair_edit, studio_char_cloth_edit, studio_char_sig_edit,
+            studio_char_prompt_edit, studio_pipeline_state,
+        ],
+        outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_char_redo_btn.click(
+        fn=studio_redo_single_character,
+        inputs=[
+            studio_char_selector, studio_char_name_edit, studio_char_face_edit,
+            studio_char_hair_edit, studio_char_cloth_edit, studio_char_sig_edit,
+            studio_char_prompt_edit, studio_char_seed_edit,
+            studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+        ],
+        outputs=[
+            studio_char_gallery, studio_char_preview, studio_json_display,
+            studio_status, studio_pipeline_state,
+        ],
+    )
+
+    # Phase 3: Generate All Scene Images & Individual Scene Inspector
+    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, progress=gr.Progress(track_tqdm=True)):
+        scene_items, status, state = studio_run_step3(
+            aspect_ratio, q_seed, api_key, model, current_state, progress=progress
+        )
+        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img = studio_load_scene_fields(
+            selected_scene, state, default_seed=q_seed
+        )
+        return scene_items, status, state, s_seed, s_img
+
+    studio_step3_btn.click(
+        fn=_ui_step3,
+        inputs=[
+            studio_aspect_ratio, studio_qwen_seed, studio_ollama_key,
+            studio_ollama_model, studio_pipeline_state, studio_scene_selector,
+        ],
+        outputs=[
+            studio_scenes_gallery, studio_status, studio_pipeline_state,
+            studio_scene_seed_edit, studio_scene_preview,
+        ],
+    )
+
+    studio_scene_selector.change(
+        fn=studio_load_scene_fields,
+        inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
+        outputs=[
+            studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
+            studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
+        ],
+    )
+
+    def _on_scene_gallery_select(evt: gr.SelectData, current_state, default_seed):
+        choices = _scene_choices(current_state)
+        if not choices or evt.index >= len(choices):
+            return gr.update(), "", "", "", "", int(default_seed), None
+        chosen = choices[evt.index]
+        fields = studio_load_scene_fields(chosen, current_state, default_seed)
+        return (gr.update(value=chosen), *fields)
+
+    studio_scenes_gallery.select(
+        fn=_on_scene_gallery_select,
+        inputs=[studio_pipeline_state, studio_qwen_seed],
+        outputs=[
+            studio_scene_selector,
+            studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
+            studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
+        ],
+    )
+
+    studio_scene_save_btn.click(
+        fn=studio_save_scene_text_edits,
+        inputs=[
+            studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
+            studio_scene_prompt_edit, studio_scene_chars_edit, studio_pipeline_state,
+        ],
+        outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_scene_redo_btn.click(
+        fn=studio_redo_single_scene,
+        inputs=[
+            studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
+            studio_scene_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
+            studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+        ],
+        outputs=[
+            studio_scenes_gallery, studio_scene_preview, studio_json_display,
+            studio_status, studio_pipeline_state,
+        ],
+    )
+
+    # Phase 4: Director, Generate All Video Clips, and Individual Clip Redo
+    def _ui_director(api_key, model, use_vision, current_state, selected_clip, w_seed, progress=gr.Progress(track_tqdm=True)):
+        json_out, status, state = studio_run_director(api_key, model, use_vision, current_state, progress=progress)
+        v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
+        return json_out, status, state, v_mot, v_cam, v_wprompt
+
+    studio_step_director_btn.click(
+        fn=_ui_director,
+        inputs=[
+            studio_ollama_key, studio_ollama_model, studio_use_vision,
+            studio_pipeline_state, studio_clip_selector, studio_wan_seed,
+        ],
+        outputs=[
+            studio_json_display, studio_status, studio_pipeline_state,
+            studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
+        ],
+    )
+
+    def _ui_step4(aspect_ratio, w_seed, api_key, model, use_vision, current_state, selected_clip, progress=gr.Progress(track_tqdm=True)):
+        final_vid, status, state = studio_run_step4(
+            aspect_ratio, w_seed, api_key, model, use_vision, current_state, progress=progress
+        )
+        v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
+        return final_vid, status, state, v_mot, v_cam, v_wprompt, v_seed, v_vid
+
+    studio_step4_btn.click(
+        fn=_ui_step4,
+        inputs=[
+            studio_aspect_ratio, studio_wan_seed, studio_ollama_key,
+            studio_ollama_model, studio_use_vision, studio_pipeline_state, studio_clip_selector,
+        ],
+        outputs=[
+            studio_final_video, studio_status, studio_pipeline_state,
+            studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
+            studio_clip_seed_edit, studio_clip_preview,
+        ],
+    )
+
+    studio_clip_selector.change(
+        fn=studio_load_clip_fields,
+        inputs=[studio_clip_selector, studio_pipeline_state, studio_wan_seed],
+        outputs=[
+            studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
+            studio_clip_seed_edit, studio_clip_preview,
+        ],
+    )
+
+    studio_clip_director_btn.click(
+        fn=studio_redirect_single_clip,
+        inputs=[
+            studio_clip_selector, studio_clip_motion_edit, studio_clip_camera_edit,
+            studio_use_vision, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+        ],
+        outputs=[
+            studio_clip_camera_edit, studio_clip_wan_prompt_edit,
+            studio_json_display, studio_status, studio_pipeline_state,
+        ],
+    )
+
+    studio_clip_redo_btn.click(
+        fn=studio_redo_single_clip,
+        inputs=[
+            studio_clip_selector, studio_clip_motion_edit, studio_clip_camera_edit,
+            studio_clip_wan_prompt_edit, studio_clip_seed_edit,
+            studio_clip_rerundir_chk, studio_use_vision, studio_aspect_ratio,
+            studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+        ],
+        outputs=[
+            studio_clip_preview, studio_final_video, studio_json_display,
+            studio_status, studio_pipeline_state,
+        ],
+    )
 
     studio_run_full_btn.click(
         fn=studio_run_full,
@@ -1368,6 +2209,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
             studio_prompt, studio_art_style, studio_aspect_ratio,
             studio_seed, studio_num_scenes, studio_total_duration,
             studio_ollama_key, studio_ollama_model, studio_use_vision,
+            studio_qwen_seed, studio_wan_seed,
         ],
         outputs=[
             studio_final_video, studio_char_gallery, studio_scenes_gallery,
@@ -1375,41 +2217,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         ],
     )
 
-    studio_step1_btn.click(
-        fn=studio_run_step1,
-        inputs=[
-            studio_prompt, studio_art_style, studio_num_scenes,
-            studio_total_duration, studio_ollama_key, studio_ollama_model,
-        ],
-        outputs=[studio_json_display, studio_status, studio_pipeline_state],
-    )
+    # ── Heartbeat Toggles (All 3 Models Active by Default on Startup) ─────────
+    async def toggle_z_image_heartbeat():
+        import backend
+        new_state = not backend.z_image_heartbeat_enabled
+        set_z_image_heartbeat_state(new_state)
+        if new_state:
+            return gr.update(value="💓 Z-Image Turbo Keep-Warm: Active", variant="primary")
+        else:
+            return gr.update(value="💤 Z-Image Turbo Keep-Warm: Paused", variant="secondary")
 
-    studio_step2_btn.click(
-        fn=studio_run_step2,
-        inputs=[studio_seed, studio_ollama_key, studio_ollama_model, studio_pipeline_state],
-        outputs=[studio_char_gallery, studio_status, studio_pipeline_state],
-    )
-
-    studio_step3_btn.click(
-        fn=studio_run_step3,
-        inputs=[studio_aspect_ratio, studio_seed, studio_ollama_key, studio_ollama_model, studio_pipeline_state],
-        outputs=[studio_scenes_gallery, studio_status, studio_pipeline_state],
-    )
-
-    studio_step_director_btn.click(
-        fn=studio_run_director,
-        inputs=[studio_ollama_key, studio_ollama_model, studio_use_vision, studio_pipeline_state],
-        outputs=[studio_json_display, studio_status, studio_pipeline_state],
-    )
-
-    studio_step4_btn.click(
-        fn=studio_run_step4,
-        inputs=[studio_aspect_ratio, studio_seed, studio_ollama_key, studio_ollama_model,
-                studio_use_vision, studio_pipeline_state],
-        outputs=[studio_final_video, studio_status, studio_pipeline_state],
-    )
-
-    # ── Heartbeat Toggles ────────────────────────────────────────────────────
     async def toggle_wan_heartbeat():
         import backend
         new_state = not backend.wan_heartbeat_enabled
@@ -1427,6 +2244,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
             return gr.update(value="💓 Qwen Keep-Warm: Active", variant="primary")
         else:
             return gr.update(value="💤 Qwen Keep-Warm: Paused", variant="secondary")
+
+    z_image_hb_btn.click(
+        fn=toggle_z_image_heartbeat,
+        inputs=[],
+        outputs=[z_image_hb_btn],
+    )
 
     wan_hb_btn.click(
         fn=toggle_wan_heartbeat,
@@ -1463,7 +2286,7 @@ if __name__ == "__main__":
     share_lan = os.environ.get("WAN_SHARE_LAN") == "1"
     server_name = "0.0.0.0" if share_lan else None
 
-    # Start background heartbeat to prevent Modal GPU containers from scaling down
+    # Start background heartbeat to keep Z-Image Turbo, Qwen, and Wan 2.2 warm while frontend is open
     start_keepalive_thread()
 
     demo.queue().launch(
@@ -1472,3 +2295,4 @@ if __name__ == "__main__":
         css=CSS,
         head=DRAG_DROP_JS,
     )
+

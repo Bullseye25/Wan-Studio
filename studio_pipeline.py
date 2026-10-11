@@ -17,6 +17,7 @@ import re
 import json
 import math
 import time
+import random
 import base64
 import pathlib
 import tempfile
@@ -83,6 +84,20 @@ QWEN_MAX_INPUT_IMAGES = 3   # base + 2 references (Qwen-Image-Edit-Plus multi-im
 
 
 # ── Pure helpers (unit-testable) ──────────────────────────────────────────────
+
+def generate_three_studio_seeds() -> Dict[str, int]:
+    """
+    Picks three random 6-digit seeds — one locked seed for each of the three AI tools:
+      1. z_image_seed : used for every Z-Image Turbo character portrait
+      2. qwen_seed    : used for every Qwen Image Edit scene/scenario keyframe
+      3. wan_seed     : used for every Wan 2.2 5-second video clip
+    """
+    return {
+        "z_image_seed": random.randint(100000, 999999),
+        "qwen_seed": random.randint(100000, 999999),
+        "wan_seed": random.randint(100000, 999999),
+    }
+
 
 def frames_for_duration(duration_seconds: float) -> int:
     """Nearest valid Wan 2.2 frame count (4k+1) for a duration, clamped to 17..81."""
@@ -356,6 +371,21 @@ class StudioPipeline:
     # STAGE 2: Character Portrait Synthesis via Z-Image Turbo (Locked Seed)
     # ─────────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def build_character_prompt(char: Dict[str, Any], art_style: str = "") -> str:
+        """Constructs the full Z-Image Turbo character reference sheet prompt."""
+        name = char.get("name", "Character")
+        details = ", ".join(
+            v for v in [char.get("face"), char.get("hair"), char.get("clothing"), char.get("signature_details")] if v
+        )
+        base_prompt = char.get("z_image_prompt") or f"Full-body character sheet of {name}"
+        char_prompt = f"{base_prompt}, {details}" if details and details not in base_prompt else base_prompt
+        if art_style and art_style.lower() not in char_prompt.lower():
+            char_prompt = f"{char_prompt}, {art_style}"
+        if "single character" not in char_prompt.lower():
+            char_prompt += ", single character, front view, clean neutral background, crisp lighting"
+        return char_prompt
+
     def generate_character_portraits(
         self,
         characters: List[Dict[str, Any]],
@@ -370,27 +400,21 @@ class StudioPipeline:
         """
         total = len(characters)
         updated_characters = []
+        locked_seed = int(shared_seed)
 
         for idx, char in enumerate(characters):
             name = char.get("name", f"Char_{idx+1}")
             char_id = char.get("id", f"char_{idx+1}")
-            details = ", ".join(
-                v for v in [char.get("face"), char.get("hair"), char.get("clothing"), char.get("signature_details")] if v
-            )
-            base_prompt = char.get("z_image_prompt") or f"Full-body character sheet of {name}"
-            char_prompt = f"{base_prompt}, {details}" if details and details not in base_prompt else base_prompt
-            if art_style and art_style.lower() not in char_prompt.lower():
-                char_prompt = f"{char_prompt}, {art_style}"
-            char_prompt += ", single character, front view, clean neutral background, crisp lighting"
+            char_prompt = self.build_character_prompt(char, art_style)
 
             if progress_cb:
                 pct = 0.15 + (idx / max(1, total)) * 0.15
-                progress_cb(pct, f"Synthesizing character reference {idx+1}/{total}: '{name}' (Seed {shared_seed})...")
+                progress_cb(pct, f"Synthesizing character reference {idx+1}/{total}: '{name}' (Seed {locked_seed})...")
 
-            print(f"[StudioPipeline] Generating Z-Image Turbo portrait for '{name}' with locked seed {shared_seed}...")
+            print(f"[StudioPipeline] Generating Z-Image Turbo portrait for '{name}' with locked seed {locked_seed}...")
             pil_img, local_path = generate_z_image_turbo_remote(
                 prompt=char_prompt,
-                seed=shared_seed,
+                seed=locked_seed,
                 width=1024,
                 height=1024,
                 steps=9,
@@ -401,17 +425,151 @@ class StudioPipeline:
             char_entry = dict(char)
             char_entry["portrait_pil"] = pil_img
             char_entry["portrait_path"] = local_path
-            char_entry["portrait_seed"] = shared_seed
+            char_entry["portrait_seed"] = locked_seed
             updated_characters.append(char_entry)
 
         if progress_cb:
-            progress_cb(0.30, f"All {total} character portraits synthesized with locked seed {shared_seed}.")
+            progress_cb(0.30, f"All {total} character portraits synthesized with locked seed {locked_seed}.")
 
         return updated_characters
+
+    def regenerate_single_character(
+        self,
+        story_data: Dict[str, Any],
+        char_index: int,
+        updated_fields: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Updates a single character's attributes (name, face, hair, clothing, signature_details,
+        z_image_prompt) and regenerates ONLY that character's image with Z-Image Turbo using
+        the specified seed.
+        """
+        chars = list((story_data or {}).get("characters", []))
+        if not chars or char_index < 0 or char_index >= len(chars):
+            raise IndexError(f"Character index {char_index} is out of range (total: {len(chars)}).")
+
+        target = dict(chars[char_index])
+        if updated_fields:
+            for k in ("name", "description", "face", "hair", "clothing", "signature_details", "z_image_prompt"):
+                if k in updated_fields and updated_fields[k] is not None:
+                    target[k] = updated_fields[k]
+
+        use_seed = int(seed if seed is not None else target.get("portrait_seed", 42))
+        art_style = (story_data or {}).get("art_style", "")
+        name = target.get("name", f"Char_{char_index+1}")
+        char_id = target.get("id", f"char_{char_index+1}")
+        char_prompt = self.build_character_prompt(target, art_style)
+
+        if progress_cb:
+            progress_cb(0.25, f"Redoing character '{name}' with Z-Image Turbo (Seed {use_seed})...")
+
+        print(f"[StudioPipeline] Redoing Z-Image Turbo portrait for '{name}' (index={char_index}, seed={use_seed})...")
+        pil_img, local_path = generate_z_image_turbo_remote(
+            prompt=char_prompt,
+            seed=use_seed,
+            width=1024,
+            height=1024,
+            steps=9,
+            save_dir=str(self.char_dir),
+            filename_prefix=f"{char_id}_{self._sanitize_filename(name)}",
+        )
+
+        target["portrait_pil"] = pil_img
+        target["portrait_path"] = local_path
+        target["portrait_seed"] = use_seed
+        chars[char_index] = target
+        story_data["characters"] = chars
+
+        if progress_cb:
+            progress_cb(1.0, f"Character '{name}' regenerated with seed {use_seed}.")
+        return target
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 3: Scene Frame Synthesis via Qwen Image Edit (Multi-Reference)
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _synthesize_single_scene_frame(
+        self,
+        scene: Dict[str, Any],
+        characters: List[Dict[str, Any]],
+        aspect_ratio: str,
+        seed: int,
+    ) -> Dict[str, Any]:
+        """Internal helper that generates a single scene keyframe with Qwen Image Edit."""
+        dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
+        qwen_w, qwen_h = dims["qwen_w"], dims["qwen_h"]
+
+        char_map = {c.get("id"): c for c in characters}
+        default_char = characters[0] if characters else None
+
+        scene_num = scene.get("scene_number", 1)
+        title = scene.get("title", f"Scene {scene_num}")
+        char_ids = scene.get("character_ids", [])
+
+        # Ensure portrait_pil is loaded if only portrait_path is present
+        for c in characters:
+            if c.get("portrait_pil") is None and c.get("portrait_path") and os.path.exists(c["portrait_path"]):
+                try:
+                    c["portrait_pil"] = Image.open(c["portrait_path"]).convert("RGB")
+                except Exception:
+                    pass
+
+        ref_chars = [char_map[cid] for cid in char_ids if cid in char_map]
+        if not ref_chars and default_char:
+            ref_chars = [default_char]
+        ref_chars = [rc for rc in ref_chars if rc.get("portrait_pil") is not None][:QWEN_MAX_INPUT_IMAGES]
+
+        if ref_chars:
+            base_pil = ref_chars[0]["portrait_pil"]
+            additional_refs = [rc["portrait_pil"] for rc in ref_chars[1:]]
+        else:
+            base_pil = Image.new("RGB", (qwen_w, qwen_h), (255, 255, 255))
+            additional_refs = []
+
+        scene_prompt = scene.get("qwen_scene_prompt") or scene.get("scenario") or "Scene background"
+        if ref_chars:
+            mapping = "; ".join(
+                f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
+            )
+            refined_prompt = (
+                f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
+                f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
+            )
+        else:
+            refined_prompt = f"{scene_prompt}, full-frame cinematic composition, detailed background, 4k"
+
+        use_seed = int(seed)
+        print(f"[StudioPipeline] Generating Qwen keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_seed})...")
+
+        results = qwen_image_edit_remote(
+            base_image=base_pil,
+            ref_images=additional_refs,
+            prompt=refined_prompt,
+            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            seed=use_seed,
+            steps=20,
+            true_cfg_scale=4.0,
+            guidance_scale=1.0,
+            num_images=1,
+            custom_width=qwen_w,
+            custom_height=qwen_h,
+        )
+
+        keyframe_pil = Image.open(io.BytesIO(results[0])).convert("RGB")
+
+        timestamp = int(time.time())
+        filename = f"scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.jpg"
+        keyframe_path = self.scenes_dir / filename
+        keyframe_pil.save(keyframe_path, format="JPEG", quality=95)
+        print(f"[StudioPipeline] Saved Scene {scene_num} keyframe: {keyframe_path}")
+
+        scene_entry = dict(scene)
+        scene_entry["keyframe_pil"] = keyframe_pil
+        scene_entry["keyframe_path"] = str(keyframe_path)
+        scene_entry["keyframe_seed"] = use_seed
+        return scene_entry
 
     def generate_scene_keyframes(
         self,
@@ -423,87 +581,86 @@ class StudioPipeline:
     ) -> List[Dict[str, Any]]:
         """
         Synthesizes scene keyframes using Qwen Image Edit Rapid AIO.
-        Transfers the exact character faces, clothing, and styles from Stage 2 by passing
-        the Z-Image Turbo character portraits as multiple reference images into Qwen.
+        Uses the SAME LOCKED SEED (`shared_seed` / `qwen_seed`) across all scenes so lighting,
+        palette, and rendering grain stay consistent, while transferring character faces and
+        outfits via multi-reference conditioning.
         """
-        dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
-        qwen_w = dims["qwen_w"]
-        qwen_h = dims["qwen_h"]
-
-        char_map = {c.get("id"): c for c in characters}
-        default_char = characters[0] if characters else None
-
         total = len(scenes)
         updated_scenes = []
+        locked_qwen_seed = int(shared_seed)
 
         for idx, scene in enumerate(scenes):
             scene_num = scene.get("scene_number", idx + 1)
             title = scene.get("title", f"Scene {scene_num}")
-            char_ids = scene.get("character_ids", [])
-
-            ref_chars = [char_map[cid] for cid in char_ids if cid in char_map]
-            if not ref_chars and default_char:
-                ref_chars = [default_char]
-            # Qwen Edit Plus accepts at most 3 input images (base + 2 refs)
-            ref_chars = [rc for rc in ref_chars if rc.get("portrait_pil") is not None][:QWEN_MAX_INPUT_IMAGES]
-
-            if ref_chars:
-                base_pil = ref_chars[0]["portrait_pil"]
-                additional_refs = [rc["portrait_pil"] for rc in ref_chars[1:]]
-            else:
-                # No portraits available → pure text-to-image on a blank canvas (same as Tool 1)
-                base_pil = Image.new("RGB", (qwen_w, qwen_h), (255, 255, 255))
-                additional_refs = []
-
-            scene_prompt = scene.get("qwen_scene_prompt") or scene.get("scenario") or "Scene background"
-            if ref_chars:
-                mapping = "; ".join(
-                    f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
-                )
-                refined_prompt = (
-                    f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
-                    f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
-                )
-            else:
-                refined_prompt = f"{scene_prompt}, full-frame cinematic composition, detailed background, 4k"
 
             if progress_cb:
                 pct = 0.30 + (idx / max(1, total)) * 0.20
-                progress_cb(pct, f"Synthesizing scene frame {idx+1}/{total}: '{title}' via Qwen Multi-Ref...")
+                progress_cb(
+                    pct,
+                    f"Synthesizing scene frame {idx+1}/{total}: '{title}' via Qwen Multi-Ref (Seed {locked_qwen_seed})...",
+                )
 
-            print(f"[StudioPipeline] Generating Qwen keyframe for Scene {scene_num} ({qwen_w}x{qwen_h})...")
-
-            results = qwen_image_edit_remote(
-                base_image=base_pil,
-                ref_images=additional_refs,
-                prompt=refined_prompt,
-                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-                seed=shared_seed + idx,
-                steps=20,
-                true_cfg_scale=4.0,
-                guidance_scale=1.0,
-                num_images=1,
-                custom_width=qwen_w,
-                custom_height=qwen_h,
+            scene_entry = self._synthesize_single_scene_frame(
+                scene=scene,
+                characters=characters,
+                aspect_ratio=aspect_ratio,
+                seed=locked_qwen_seed,
             )
-
-            keyframe_pil = Image.open(io.BytesIO(results[0])).convert("RGB")
-
-            timestamp = int(time.time())
-            filename = f"scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.jpg"
-            keyframe_path = self.scenes_dir / filename
-            keyframe_pil.save(keyframe_path, format="JPEG", quality=95)
-            print(f"[StudioPipeline] Saved Scene {scene_num} keyframe: {keyframe_path}")
-
-            scene_entry = dict(scene)
-            scene_entry["keyframe_pil"] = keyframe_pil
-            scene_entry["keyframe_path"] = str(keyframe_path)
             updated_scenes.append(scene_entry)
 
         if progress_cb:
-            progress_cb(0.50, f"All {total} scene keyframes synthesized with consistent character references.")
+            progress_cb(
+                0.50,
+                f"All {total} scene keyframes synthesized with locked Qwen seed {locked_qwen_seed}.",
+            )
 
         return updated_scenes
+
+    def regenerate_single_scene_keyframe(
+        self,
+        story_data: Dict[str, Any],
+        scene_index: int,
+        updated_fields: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Updates a single scene's description/scenario/prompt/character_ids and regenerates
+        ONLY that scene's keyframe image via Qwen Image Edit using the given seed.
+        """
+        scenes = list((story_data or {}).get("scenes", []))
+        if not scenes or scene_index < 0 or scene_index >= len(scenes):
+            raise IndexError(f"Scene index {scene_index} is out of range (total: {len(scenes)}).")
+
+        target = dict(scenes[scene_index])
+        if updated_fields:
+            for k in ("title", "scenario", "qwen_scene_prompt", "wan_motion_prompt", "camera_movement", "character_ids"):
+                if k in updated_fields and updated_fields[k] is not None:
+                    target[k] = updated_fields[k]
+
+        use_seed = int(seed if seed is not None else target.get("keyframe_seed", 42))
+        title = target.get("title", f"Scene {scene_index+1}")
+
+        if progress_cb:
+            progress_cb(0.35, f"Redoing Scene {scene_index+1} ('{title}') keyframe with Qwen (Seed {use_seed})...")
+
+        updated_scene = self._synthesize_single_scene_frame(
+            scene=target,
+            characters=story_data.get("characters", []),
+            aspect_ratio=aspect_ratio,
+            seed=use_seed,
+        )
+        # Clear stale director plan if keyframe changed so it can be re-directed cleanly
+        if updated_fields and any(k in updated_fields for k in ("scenario", "qwen_scene_prompt", "wan_motion_prompt", "camera_movement")):
+            updated_scene.pop("director", None)
+
+        scenes[scene_index] = updated_scene
+        story_data["scenes"] = scenes
+
+        if progress_cb:
+            progress_cb(1.0, f"Scene {scene_index+1} ('{title}') keyframe regenerated with seed {use_seed}.")
+        return updated_scene
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 4: Animation Direction — Gemma 4: 31B directs each ≤5s clip
@@ -730,9 +887,115 @@ class StudioPipeline:
             "num_frames": frames_for_duration(duration),
         }
 
+    def direct_single_scene_animation(
+        self,
+        story_data: Dict[str, Any],
+        scene_index: int,
+        use_vision: bool = True,
+    ) -> Dict[str, Any]:
+        """Runs the Gemma 4: 31B Animation Director on a single scene by index."""
+        scenes = list((story_data or {}).get("scenes", []))
+        if not scenes or scene_index < 0 or scene_index >= len(scenes):
+            raise IndexError(f"Scene index {scene_index} is out of range (total: {len(scenes)}).")
+
+        characters = (story_data or {}).get("characters", [])
+        char_map = {c.get("id"): c for c in characters}
+        scene = dict(scenes[scene_index])
+        scene_num = scene.get("scene_number", scene_index + 1)
+        prev_beat = scenes[scene_index - 1].get("scenario", "") if scene_index > 0 else "(opening shot)"
+        next_beat = scenes[scene_index + 1].get("scenario", "") if scene_index + 1 < len(scenes) else "(final shot)"
+        cast = [char_map[c] for c in scene.get("character_ids", []) if c in char_map]
+
+        messages = self._build_director_messages(
+            scene, cast, story_data, prev_beat, next_beat, include_image=use_vision
+        )
+        raw_plan, source = None, "fallback"
+        attempts = [(messages, "gemma-vision")] if use_vision and self._keyframe_b64(scene) else []
+        attempts.append((self._build_director_messages(
+            scene, cast, story_data, prev_beat, next_beat, include_image=False), "gemma-text"))
+        for msgs, label in attempts:
+            try:
+                text = self._chat_completion(msgs, max_tokens=1200, temperature=0.5, max_retries=1)
+                raw_plan = self._parse_json_safely(text)
+                source = label
+                break
+            except Exception as e:
+                print(f"[StudioPipeline] Single-scene Director ({label}) failed for scene {scene_num}: {e}")
+
+        plan = self.compile_director_plan(raw_plan or {}, scene, cast, story_data)
+        plan["source"] = source
+        scene["director"] = plan
+        scenes[scene_index] = scene
+        story_data["scenes"] = scenes
+        return plan
+
     # ─────────────────────────────────────────────────────────────────────────
-    # STAGE 5: Scene Video Animation via Wan 2.2
+    # STAGE 5: Scene Video Animation via Wan 2.2 (Locked Wan Seed)
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _animate_single_scene_clip(
+        self,
+        scene: Dict[str, Any],
+        aspect_ratio: str,
+        seed: int,
+        characters: Optional[List[Dict[str, Any]]] = None,
+        story_meta: Optional[Dict[str, Any]] = None,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """Internal helper that animates a single scene keyframe with Wan 2.2."""
+        dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
+        wan_w, wan_h = dims["wan_w"], dims["wan_h"]
+
+        scene_num = scene.get("scene_number", 1)
+        title = scene.get("title", f"Scene {scene_num}")
+        keyframe_pil = scene.get("keyframe_pil")
+        if keyframe_pil is None and scene.get("keyframe_path") and os.path.exists(scene["keyframe_path"]):
+            keyframe_pil = Image.open(scene["keyframe_path"]).convert("RGB")
+        if keyframe_pil is None:
+            raise ValueError(f"Scene {scene_num} has no keyframe; run the Qwen keyframe stage first.")
+
+        resized_frame = keyframe_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
+
+        plan = scene.get("director")
+        if not plan:
+            plan = self.compile_director_plan({}, scene, characters or [], story_meta or {})
+            plan["source"] = "fallback"
+            scene["director"] = plan
+        duration_sec = float(plan.get("duration_seconds", scene.get("duration_seconds", 3.5)))
+        num_frames = frames_for_duration(duration_sec)
+        use_seed = int(seed)
+
+        print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
+              f"seed={use_seed}, director={plan.get('source')})...")
+
+        result = run_remote_inference(
+            resized_image=resized_frame,
+            processed_last_image=None,
+            prompt=plan["wan_prompt"],
+            steps=int(plan.get("steps", WAN_DEFAULTS["steps"])),
+            negative_prompt=plan.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+            num_frames=num_frames,
+            guidance_scale=float(plan.get("guidance_scale", WAN_DEFAULTS["guidance_scale"])),
+            guidance_scale_2=float(plan.get("guidance_scale_2", WAN_DEFAULTS["guidance_scale_2"])),
+            current_seed=use_seed,
+            scheduler_name=WAN_DEFAULTS["scheduler_name"],
+            flow_shift=float(plan.get("flow_shift", WAN_DEFAULTS["flow_shift"])),
+            frame_multiplier=WAN_DEFAULTS["frame_multiplier"],
+            quality=WAN_DEFAULTS["quality"],
+            duration_seconds=duration_sec,
+            safe_mode=True,
+        )
+        video_path = result[0] if isinstance(result, (tuple, list)) else result
+
+        timestamp = int(time.time())
+        clip_dest = self.clips_dir / f"clip_scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.mp4"
+        with open(video_path, "rb") as src, open(clip_dest, "wb") as dst:
+            dst.write(src.read())
+
+        print(f"[StudioPipeline] Saved Scene {scene_num} clip: {clip_dest}")
+        scene["video_path"] = str(clip_dest)
+        scene["video_seed"] = use_seed
+        return str(clip_dest)
 
     def generate_scene_videos(
         self,
@@ -742,74 +1005,132 @@ class StudioPipeline:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[str]:
         """
-        Animates each scene keyframe into a clip with Wan 2.2 on Modal, using the Director's
-        shot plan (prompt, negative, CFG, steps, flow shift) when available and the tuned
-        Tool 2 defaults otherwise. Frame counts always obey the 4k+1 rule (17..81).
+        Animates each scene keyframe into a clip with Wan 2.2 on Modal.
+        Uses the SAME LOCKED SEED (`base_seed` / `wan_seed`) across all 5-second clips
+        for uniform temporal noise and motion physics across cuts.
         """
-        dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
-        wan_w, wan_h = dims["wan_w"], dims["wan_h"]
-
         total = len(scenes)
         clip_paths = []
+        locked_wan_seed = int(base_seed)
 
         for idx, scene in enumerate(scenes):
             scene_num = scene.get("scene_number", idx + 1)
             title = scene.get("title", f"Scene {scene_num}")
-            keyframe_pil = scene.get("keyframe_pil")
-            if keyframe_pil is None and scene.get("keyframe_path"):
-                keyframe_pil = Image.open(scene["keyframe_path"]).convert("RGB")
-            if keyframe_pil is None:
-                raise ValueError(f"Scene {scene_num} has no keyframe; run the Qwen keyframe stage first.")
-
-            resized_frame = keyframe_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
-
-            plan = scene.get("director")
-            if not plan:
-                plan = self.compile_director_plan({}, scene, [], {})
-                plan["source"] = "fallback"
+            plan = scene.get("director") or {}
             duration_sec = float(plan.get("duration_seconds", scene.get("duration_seconds", 3.5)))
             num_frames = frames_for_duration(duration_sec)
 
             if progress_cb:
                 pct = 0.60 + (idx / max(1, total)) * 0.30
-                progress_cb(pct, f"Animating Scene {idx+1}/{total}: '{title}' ({num_frames} frames @ {WAN_FPS}fps)...")
+                progress_cb(
+                    pct,
+                    f"Animating Scene {idx+1}/{total}: '{title}' ({num_frames} frames @ {WAN_FPS}fps, Seed {locked_wan_seed})...",
+                )
 
-            print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
-                  f"director={plan.get('source')})...")
-
-            result = run_remote_inference(
-                resized_image=resized_frame,
-                processed_last_image=None,
-                prompt=plan["wan_prompt"],
-                steps=int(plan.get("steps", WAN_DEFAULTS["steps"])),
-                negative_prompt=plan.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
-                num_frames=num_frames,
-                guidance_scale=float(plan.get("guidance_scale", WAN_DEFAULTS["guidance_scale"])),
-                guidance_scale_2=float(plan.get("guidance_scale_2", WAN_DEFAULTS["guidance_scale_2"])),
-                current_seed=int(base_seed) + idx,
-                scheduler_name=WAN_DEFAULTS["scheduler_name"],
-                flow_shift=float(plan.get("flow_shift", WAN_DEFAULTS["flow_shift"])),
-                frame_multiplier=WAN_DEFAULTS["frame_multiplier"],
-                quality=WAN_DEFAULTS["quality"],
-                duration_seconds=duration_sec,
-                safe_mode=True,
+            clip_dest = self._animate_single_scene_clip(
+                scene=scene,
+                aspect_ratio=aspect_ratio,
+                seed=locked_wan_seed,
             )
-            # run_remote_inference returns (video_path, task_name)
-            video_path = result[0] if isinstance(result, (tuple, list)) else result
-
-            timestamp = int(time.time())
-            clip_dest = self.clips_dir / f"clip_scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.mp4"
-            with open(video_path, "rb") as src, open(clip_dest, "wb") as dst:
-                dst.write(src.read())
-
-            print(f"[StudioPipeline] Saved Scene {scene_num} clip: {clip_dest}")
-            clip_paths.append(str(clip_dest))
-            scene["video_path"] = str(clip_dest)
+            clip_paths.append(clip_dest)
 
         if progress_cb:
-            progress_cb(0.90, f"All {total} scene clips animated successfully.")
+            progress_cb(0.90, f"All {total} scene clips animated with locked Wan seed {locked_wan_seed}.")
 
         return clip_paths
+
+    def regenerate_single_scene_video(
+        self,
+        story_data: Dict[str, Any],
+        scene_index: int,
+        updated_fields: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
+        re_run_director: bool = False,
+        use_vision: bool = True,
+        auto_stitch: bool = True,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Updates a single scene's motion description / director prompt / seed, regenerates ONLY
+        that 5-second video clip on Wan 2.2, and automatically re-stitches the final movie if all
+        scene clips exist.
+        """
+        scenes = list((story_data or {}).get("scenes", []))
+        if not scenes or scene_index < 0 or scene_index >= len(scenes):
+            raise IndexError(f"Scene index {scene_index} is out of range (total: {len(scenes)}).")
+
+        target = dict(scenes[scene_index])
+        characters = (story_data or {}).get("characters", [])
+        char_map = {c.get("id"): c for c in characters}
+        cast = [char_map[c] for c in target.get("character_ids", []) if c in char_map]
+
+        if updated_fields:
+            for k in ("title", "scenario", "wan_motion_prompt", "camera_movement", "duration_seconds"):
+                if k in updated_fields and updated_fields[k] is not None:
+                    target[k] = updated_fields[k]
+
+        scenes[scene_index] = target
+        story_data["scenes"] = scenes
+
+        if re_run_director:
+            self.direct_single_scene_animation(story_data, scene_index, use_vision=use_vision)
+            target = story_data["scenes"][scene_index]
+        else:
+            existing_dir = dict(target.get("director") or {})
+            custom_wan_prompt = (updated_fields or {}).get("wan_prompt")
+            if updated_fields and any(k in updated_fields for k in ("wan_motion_prompt", "camera_movement", "scenario")):
+                # Recompile director plan incorporating user's updated motion description / camera
+                raw_override = dict(existing_dir)
+                if "wan_motion_prompt" in updated_fields and updated_fields["wan_motion_prompt"]:
+                    raw_override["wan_prompt"] = updated_fields["wan_motion_prompt"]
+                    raw_override["subject_action"] = updated_fields["wan_motion_prompt"]
+                if "camera_movement" in updated_fields and updated_fields["camera_movement"]:
+                    raw_override["camera_movement"] = updated_fields["camera_movement"]
+                plan = self.compile_director_plan(raw_override, target, cast, story_data)
+                plan["source"] = existing_dir.get("source") or "user-edited"
+                if custom_wan_prompt and str(custom_wan_prompt).strip():
+                    plan["wan_prompt"] = str(custom_wan_prompt).strip()
+                target["director"] = plan
+            elif custom_wan_prompt and str(custom_wan_prompt).strip():
+                if not existing_dir:
+                    existing_dir = self.compile_director_plan({}, target, cast, story_data)
+                existing_dir["wan_prompt"] = str(custom_wan_prompt).strip()
+                existing_dir["source"] = "user-edited"
+                target["director"] = existing_dir
+
+        use_seed = int(seed if seed is not None else target.get("video_seed", 42))
+        title = target.get("title", f"Scene {scene_index+1}")
+
+        if progress_cb:
+            progress_cb(0.30, f"Redoing 5s video clip for Scene {scene_index+1} ('{title}', Seed {use_seed})...")
+
+        clip_path = self._animate_single_scene_clip(
+            scene=target,
+            aspect_ratio=aspect_ratio,
+            seed=use_seed,
+            characters=characters,
+            story_meta=story_data,
+            progress_cb=progress_cb,
+        )
+        scenes[scene_index] = target
+        story_data["scenes"] = scenes
+
+        all_clips = [s.get("video_path") for s in scenes if s.get("video_path") and os.path.exists(s.get("video_path"))]
+        story_data["clip_paths"] = all_clips
+
+        if auto_stitch and len(all_clips) == len(scenes):
+            final_movie = self.stitch_clips(
+                clip_paths=all_clips,
+                movie_title=story_data.get("title", "Studio_Movie"),
+                progress_cb=progress_cb,
+            )
+            story_data["final_movie_path"] = final_movie
+            story_data["manifest_path"] = self.save_manifest(story_data)
+
+        if progress_cb:
+            progress_cb(1.0, f"Scene {scene_index+1} video clip regenerated with seed {use_seed}: {os.path.basename(clip_path)}")
+        return target
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 6: Video Assembly & Stitching
@@ -876,7 +1197,10 @@ class StudioPipeline:
     def run_full_pipeline(
         self,
         user_prompt: str,
-        shared_seed: int = 42,
+        shared_seed: Optional[int] = None,
+        z_image_seed: Optional[int] = None,
+        qwen_seed: Optional[int] = None,
+        wan_seed: Optional[int] = None,
         num_scenes: int = 6,
         target_duration: float = 30.0,
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
@@ -885,8 +1209,18 @@ class StudioPipeline:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes all 6 stages of the Studio pipeline end-to-end.
+        Executes all 6 stages of the Studio pipeline end-to-end using three dedicated seeds:
+          - z_image_seed : locked across all Z-Image Turbo character portraits
+          - qwen_seed    : locked across all Qwen Image Edit scene keyframes
+          - wan_seed     : locked across all Wan 2.2 5s video clips
+        If any of the 3 seeds is not provided, falls back to `shared_seed` if given, or picks
+        3 random seeds via `generate_three_studio_seeds()`.
         """
+        random_seeds = generate_three_studio_seeds()
+        seed_z = int(z_image_seed if z_image_seed is not None else (shared_seed if shared_seed is not None else random_seeds["z_image_seed"]))
+        seed_qwen = int(qwen_seed if qwen_seed is not None else (shared_seed if shared_seed is not None else random_seeds["qwen_seed"]))
+        seed_wan = int(wan_seed if wan_seed is not None else (shared_seed if shared_seed is not None else random_seeds["wan_seed"]))
+
         story_data = self.generate_story_and_characters(
             prompt=user_prompt,
             num_scenes=num_scenes,
@@ -894,10 +1228,18 @@ class StudioPipeline:
             art_style=art_style,
             progress_cb=progress_cb,
         )
+        story_data["z_image_seed"] = seed_z
+        story_data["qwen_seed"] = seed_qwen
+        story_data["wan_seed"] = seed_wan
+        story_data["seeds"] = {
+            "z_image_seed": seed_z,
+            "qwen_seed": seed_qwen,
+            "wan_seed": seed_wan,
+        }
 
         characters = self.generate_character_portraits(
             characters=story_data.get("characters", []),
-            shared_seed=shared_seed,
+            shared_seed=seed_z,
             art_style=story_data.get("art_style", art_style),
             progress_cb=progress_cb,
         )
@@ -907,7 +1249,7 @@ class StudioPipeline:
             scenes=story_data.get("scenes", []),
             characters=characters,
             aspect_ratio=aspect_ratio,
-            shared_seed=shared_seed,
+            shared_seed=seed_qwen,
             progress_cb=progress_cb,
         )
 
@@ -923,7 +1265,7 @@ class StudioPipeline:
         clip_paths = self.generate_scene_videos(
             scenes=scenes,
             aspect_ratio=aspect_ratio,
-            base_seed=shared_seed,
+            base_seed=seed_wan,
             progress_cb=progress_cb,
         )
 
