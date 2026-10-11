@@ -153,6 +153,50 @@ class TestQwenAndWanContracts(unittest.TestCase):
         mock_from_name.assert_called_once_with("wan-backend", "WanModel")
         self.assertGreater(len(progress_calls), 0)
 
+    @patch("modal.Cls.from_name")
+    def test_wan_remote_inference_with_lora_and_deflicker(self, mock_from_name):
+        """Verify run_remote_inference forwards LoRA parameters and deflicker flag to Modal."""
+        mock_instance = MagicMock()
+        fake_video_bytes = b"fake_mp4_lora_data"
+        mock_instance.generate.remote_gen.return_value = [
+            {"type": "progress", "step": 1, "total_steps": 8},
+            {"type": "output", "filename": "test_lora.mp4", "video_bytes": fake_video_bytes},
+        ]
+        mock_from_name.return_value = MagicMock(return_value=mock_instance)
+
+        resized_img = Image.new("RGB", (832, 480), color="magenta")
+        last_img = Image.new("RGB", (832, 480), color="yellow")
+
+        video_path, task_name = backend.run_remote_inference(
+            resized_image=resized_img,
+            processed_last_image=last_img,
+            prompt="cyberpunk hitman loading gun, neon reflections",
+            steps=8,
+            negative_prompt="blurry, distorted",
+            num_frames=57,
+            guidance_scale=2.25,
+            guidance_scale_2=1.5,
+            current_seed=1337,
+            scheduler_name="UniPCMultistep",
+            flow_shift=3.0,
+            frame_multiplier=32,
+            quality=6,
+            duration_seconds=3.5,
+            lora_repo_or_path="user/wan-cyberpunk-consistency",
+            lora_scale=0.85,
+            deflicker_frames=True,
+        )
+
+        mock_instance.generate.remote_gen.assert_called_once()
+        call_kwargs = mock_instance.generate.remote_gen.call_args[1]
+        self.assertEqual(call_kwargs["lora_repo_or_path"], "user/wan-cyberpunk-consistency")
+        self.assertEqual(call_kwargs["lora_scale"], 0.85)
+        self.assertTrue(call_kwargs["deflicker_frames"])
+        self.assertEqual(call_kwargs["guidance_scale"], 2.25)
+        self.assertIsNotNone(call_kwargs["last_image_bytes"])
+        self.assertTrue(video_path.endswith("test_lora.mp4"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
