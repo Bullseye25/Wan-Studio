@@ -24,11 +24,12 @@ MULTIPLE_OF = 16
 MAX_SEED = np.iinfo(np.int32).max
 
 FIXED_FPS = 16
-MIN_FRAMES_MODEL = 8
-MAX_FRAMES_MODEL = 1280
+MIN_FRAMES_MODEL = 16  # 16 + 1 = 17 frames (~1.0s)
+MAX_FRAMES_MODEL = 80  # 80 + 1 = 81 frames (~5.0s, native max capacity of Wan 2.2)
 
-MIN_DURATION = round(MIN_FRAMES_MODEL / FIXED_FPS, 1)
-MAX_DURATION = round(MAX_FRAMES_MODEL / FIXED_FPS, 1)
+MIN_DURATION = 1.0
+MAX_DURATION = 5.0
+DEFAULT_DURATION = 3.5
 
 SCHEDULERS = [
     "UniPCMultistep",
@@ -41,14 +42,17 @@ SCHEDULERS = [
 ]
 
 default_prompt_qwen = "camera capturing overall people in a complete full frame, 4k resolution, preserve face details"
-default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
+default_prompt_i2v = "cinematic natural motion, preserve subject appearance and facial identity, smooth animation, photorealistic high resolution"
 default_negative_prompt = (
     "blurry, low quality, low resolution, worst quality, jpeg artifacts, compression artifacts, "
     "pixelated, out of focus, grainy, noisy, oversaturated, undersaturated, bad anatomy, deformed, "
     "disfigured, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, mutated hands, "
     "poorly drawn hands, poorly drawn face, malformed limbs, long neck, distorted proportions, "
     "asymmetrical eyes, cross-eyed, watermark, signature, text, logo, cropped, cut off, frame, "
-    "border, duplicate, cloned face, mutation, ugly, tiling"
+    "border, duplicate, cloned face, mutation, ugly, tiling, "
+    "face morphing, changing face, altered facial features, changing identity, inconsistent face, "
+    "shifting features, melting face, face distortion, facial transformation, mutating face, "
+    "temporal flickering, pixel noise, pixel degradation, digital artifacts, warping"
 )
 
 CANVAS_MODES = [
@@ -136,11 +140,14 @@ def resize_and_crop_to_match(target_image, reference_image):
 
 
 def get_num_frames(duration_seconds: float):
-    return 1 + int(np.clip(
+    """Calculates valid Wan 2.2 frame count strictly adhering to 3D VAE 4k+1 math (17 to 81 frames)."""
+    raw_frames = int(np.clip(
         int(round(duration_seconds * FIXED_FPS)),
         MIN_FRAMES_MODEL,
         MAX_FRAMES_MODEL,
     ))
+    k = max(MIN_FRAMES_MODEL // 4, min(MAX_FRAMES_MODEL // 4, round(raw_frames / 4)))
+    return 1 + (k * 4)
 
 
 def clear_all_outputs():
@@ -239,14 +246,14 @@ def generate_video(
     input_image,
     last_image,
     prompt,
-    steps=6,
+    steps=8,
     negative_prompt=default_negative_prompt,
     duration_seconds=3.5,
-    guidance_scale=1,
-    guidance_scale_2=1,
+    guidance_scale=2.0,
+    guidance_scale_2=1.5,
     seed=42,
     randomize_seed=False,
-    quality=5,
+    quality=6,
     scheduler="UniPCMultistep",
     flow_shift=3.0,
     frame_multiplier=16,
@@ -639,7 +646,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
     with gr.Accordion("🎥 Tool 2 — Wan 2.2 · High-Motion Video Generator", open=True, elem_classes="tool-accordion wan-panel") as wan_accordion:
         gr.Markdown("### 🎥 Wan 2.2 Video Generator", elem_classes="section-header")
         gr.Markdown(
-            "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.",
+            "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.\n\n"
+            "💡 **Facial Consistency & Stability Tip:** To prevent the subject's face from altering after 3–4 seconds, "
+            "keep duration within **3.0s – 5.0s**, leave Guidance Scale at **1.5 – 2.5** so the negative prompt is actively enforced, "
+            "and include *'preserve facial features, consistent facial identity'* in your motion prompt.",
             elem_classes="step-hint"
         )
 
@@ -651,9 +661,9 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                 )
                 prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v)
                 duration_seconds_input = gr.Slider(
-                    minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=3.5,
+                    minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=DEFAULT_DURATION,
                     label="Duration (seconds)",
-                    info=f"Clamped to model's {MIN_FRAMES_MODEL}-{MAX_FRAMES_MODEL} frames at {FIXED_FPS}fps."
+                    info="Native Wan 2.2 window: 1.0s to 5.0s (17 to 81 frames at 16fps) to prevent pixel degradation and facial drift."
                 )
                 frame_multi = gr.Dropdown(
                     choices=[FIXED_FPS, FIXED_FPS * 2, FIXED_FPS * 4, FIXED_FPS * 8],
@@ -668,7 +678,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
 
                 with gr.Accordion("Advanced Settings", open=False):
                     last_image_component = gr.Image(
-                        type="pil", label="Last Frame (Optional)",
+                        type="pil", label="Last Frame (Optional — Anchors End Pose)",
                         sources=["upload", "clipboard"], elem_id="wan-last-image"
                     )
                     negative_prompt_input = gr.Textbox(
@@ -677,9 +687,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                     quality_slider = gr.Slider(minimum=1, maximum=10, step=1, value=6, label="Video Quality")
                     seed_input = gr.Slider(label="Seed", minimum=0, maximum=MAX_SEED, step=1, value=42, interactive=True)
                     randomize_seed_checkbox = gr.Checkbox(label="Randomize seed", value=True, interactive=True)
-                    steps_slider = gr.Slider(minimum=1, maximum=30, step=1, value=6, label="Inference Steps")
-                    guidance_scale_input = gr.Slider(minimum=0.0, maximum=10.0, step=0.5, value=1, label="Guidance Scale -- high noise stage")
-                    guidance_scale_2_input = gr.Slider(minimum=0.0, maximum=10.0, step=0.5, value=1, label="Guidance Scale 2 -- low noise stage")
+                    steps_slider = gr.Slider(
+                        minimum=4, maximum=24, step=1, value=8, label="Inference Steps",
+                        info="8–10 steps locks facial identity and prevents drift on Lightning models."
+                    )
+                    guidance_scale_input = gr.Slider(
+                        minimum=1.0, maximum=7.0, step=0.25, value=2.0, label="Guidance Scale (High Noise)",
+                        info="Controls prompt adherence. Values 1.5–2.5 activate negative prompt face-preservation."
+                    )
+                    guidance_scale_2_input = gr.Slider(
+                        minimum=1.0, maximum=7.0, step=0.25, value=1.5, label="Guidance Scale 2 (Low Noise)",
+                        info="Stabilizes fine facial features and surface textures in later denoising steps."
+                    )
                     scheduler_dropdown = gr.Dropdown(label="Scheduler", choices=SCHEDULERS, value="UniPCMultistep")
                     flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
                     play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)

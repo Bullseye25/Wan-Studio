@@ -245,8 +245,10 @@ For your first run, execute these three steps from the menu:
 | Parameter | Recommended | Range | Description |
 | :--- | :---: | :---: | :--- |
 | **Motion Prompt** | Required | Text | Describes the action, lighting changes, camera motion, and physics. |
-| **Duration** | `3.5s` | `0.5s` – `80.0s` | Output duration (auto-clamped to valid model frame counts). |
-| **Inference Steps** | `6` – `12` | `4` – `30` | Flow Matching Lightning achieves strong results in 6–10 steps. |
+| **Duration** | `3.5s` | `1.0s` – `5.0s` | Native Wan 2.2 window (17 to 81 frames, $4k+1$ math) to prevent pixel degradation. |
+| **Inference Steps** | `8` | `4` – `24` | 8–10 steps locks facial identity and suppresses high-frequency drift on Lightning models. |
+| **Guidance Scale (High)**| `2.0` | `1.0` – `7.0` | Activates CFG to actively enforce negative prompt anti-morphing constraints. |
+| **Guidance Scale (Low)** | `1.5` | `1.0` – `7.0` | Stabilizes fine facial details and textures during late-stage denoising. |
 | **Flow Shift** | `3.0` | `0.5` – `15.0` | Flow Matching trajectory schedule modifier. |
 | **Scheduler** | `UniPCMultistep` | Dropdown | Sampling algorithm (`UniPC`, `FlowMatchEuler`, `SASolver`, etc.). |
 | **Fluidity (FPS)** | `32` or `64` | `16`, `32`, `64`, `128` | Output framerate enhanced via RIFE neural frame interpolation. |
