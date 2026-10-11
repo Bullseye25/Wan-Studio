@@ -85,12 +85,13 @@ def download_z_image_weights():
 
 @app.cls(
     image=z_image,
-    gpu="A10G",
+    gpu="L4",  # 24GB VRAM L4 is 27% cheaper than A10G and easily fits 6B Z-Image-Turbo in bf16
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=900,
     min_containers=0,
-    scaledown_window=60,
+    max_containers=1,
+    scaledown_window=15,
 )
 class ZImageTurboModel:
     @modal.method()

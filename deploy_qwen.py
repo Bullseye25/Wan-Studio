@@ -111,12 +111,13 @@ DEFAULT_NEGATIVE_PROMPT = (
 
 @app.cls(
     image=qwen_image,
-    gpu="A100-80GB",  # 20B parameters (~40GB in bf16) runs comfortably and rapidly on 80GB VRAM
+    gpu="L40S",  # 48GB VRAM + enable_model_cpu_offload() cuts GPU cost while keeping fast inference
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=1800,
     min_containers=0,
-    scaledown_window=60,
+    max_containers=1,
+    scaledown_window=15,
 )
 class QwenImageEditModel:
     @modal.method()

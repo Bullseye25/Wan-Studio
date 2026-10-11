@@ -161,14 +161,16 @@ def run_remote_inference(
                         video_path = str(local_path)
 
             try:
-                consume_stream(gen_kwargs)
+                with _wan_ping_lock:
+                    consume_stream(gen_kwargs)
             except Exception as stream_err:
                 if "unexpected keyword" in str(stream_err) and ("lora_repo_or_path" in str(stream_err) or "deflicker_frames" in str(stream_err)):
                     print("[local-backend] Remote container uses earlier signature without lora/deflicker. Falling back to base signature...")
                     gen_kwargs.pop("lora_repo_or_path", None)
                     gen_kwargs.pop("lora_scale", None)
                     gen_kwargs.pop("deflicker_frames", None)
-                    consume_stream(gen_kwargs)
+                    with _wan_ping_lock:
+                        consume_stream(gen_kwargs)
                 else:
                     raise stream_err
             break
@@ -262,19 +264,20 @@ def qwen_image_edit_remote(
             if attempt > 0:
                 model_instance = get_qwen_model(force_refresh=True)
 
-            raw_result = model_instance.generate.remote(
-                base_image_bytes=base_image_bytes,
-                ref_images_bytes=ref_images_bytes,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                seed=int(seed),
-                steps=int(steps),
-                true_cfg_scale=float(true_cfg_scale),
-                guidance_scale=float(guidance_scale),
-                num_images=int(num_images),
-                custom_width=int(custom_width),
-                custom_height=int(custom_height),
-            )
+            with _qwen_ping_lock:
+                raw_result = model_instance.generate.remote(
+                    base_image_bytes=base_image_bytes,
+                    ref_images_bytes=ref_images_bytes,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    seed=int(seed),
+                    steps=int(steps),
+                    true_cfg_scale=float(true_cfg_scale),
+                    guidance_scale=float(guidance_scale),
+                    num_images=int(num_images),
+                    custom_width=int(custom_width),
+                    custom_height=int(custom_height),
+                )
             result_bytes_list = raw_result if isinstance(raw_result, list) else [raw_result]
             break
         except Exception as e:
@@ -345,13 +348,14 @@ def generate_z_image_turbo_remote(
         try:
             if attempt > 0:
                 model_instance = get_z_image_model(force_refresh=True)
-            res = model_instance.generate.remote(
-                prompt=prompt,
-                height=int(height),
-                width=int(width),
-                num_inference_steps=int(steps),
-                seed=int(seed)
-            )
+            with _z_image_ping_lock:
+                res = model_instance.generate.remote(
+                    prompt=prompt,
+                    height=int(height),
+                    width=int(width),
+                    num_inference_steps=int(steps),
+                    seed=int(seed)
+                )
             break
         except Exception as e:
             if attempt < max_retries:
@@ -394,22 +398,31 @@ def generate_z_image_turbo_remote(
     return pil_img, str(file_path)
 
 
-# ─── Heartbeat & Automatic Tri-Model Keep-Warm State ─────────────────────────
+# ─── Cost-Optimized Heartbeat & On-Demand Keep-Warm State ────────────────────
+import threading
 
 last_frontend_heartbeat_time = time.time()
 last_wan_activity_time = time.time()
 last_qwen_activity_time = time.time()
 last_z_image_activity_time = time.time()
 
-# All three AI backends (Z-Image Turbo, Qwen Image Edit, Wan 2.2) start with
-# heartbeats ENABLED by default so they warm up and stay warm automatically
-# as soon as the frontend launches until the user closes the frontend.
-wan_heartbeat_enabled = True
-qwen_heartbeat_enabled = True
-z_image_heartbeat_enabled = True
+# Non-blocking locks prevent a background heartbeat ping from EVER overlapping
+# with an active generation or another in-flight cold-start ping (eliminates
+# duplicate container spin-ups on Modal).
+_wan_ping_lock = threading.Lock()
+_qwen_ping_lock = threading.Lock()
+_z_image_ping_lock = threading.Lock()
 
-# Keep warm continuously while frontend tab is open (browser sends gr.Timer tick every 25s)
-FRONTEND_HEARTBEAT_TIMEOUT = 65.0
+# COST SAVER: All three GPU heartbeats default to FALSE (On-Demand $0 Idle).
+# Containers spin up only when a phase actually runs and scale down to $0
+# within 15 seconds of finishing.
+wan_heartbeat_enabled = False
+qwen_heartbeat_enabled = False
+z_image_heartbeat_enabled = False
+
+FRONTEND_HEARTBEAT_TIMEOUT = 50.0
+# Auto-shutoff if a user manually toggles keep-warm ON and leaves it idle for >3 min
+KEEPALIVE_IDLE_TIMEOUT = 180.0
 
 
 def record_frontend_heartbeat():
@@ -435,42 +448,65 @@ def record_z_image_activity():
 def set_wan_heartbeat_state(enabled: bool):
     global wan_heartbeat_enabled
     wan_heartbeat_enabled = bool(enabled)
+    if wan_heartbeat_enabled:
+        record_wan_activity()
     print(f"[backend] Wan heartbeat state toggled: {wan_heartbeat_enabled}")
 
 
 def set_qwen_heartbeat_state(enabled: bool):
     global qwen_heartbeat_enabled
     qwen_heartbeat_enabled = bool(enabled)
+    if qwen_heartbeat_enabled:
+        record_qwen_activity()
     print(f"[backend] Qwen Image Edit heartbeat state toggled: {qwen_heartbeat_enabled}")
 
 
 def set_z_image_heartbeat_state(enabled: bool):
     global z_image_heartbeat_enabled
     z_image_heartbeat_enabled = bool(enabled)
+    if z_image_heartbeat_enabled:
+        record_z_image_activity()
     print(f"[backend] Z-Image Turbo heartbeat state toggled: {z_image_heartbeat_enabled}")
+
+
+def release_other_phase_heartbeats(active_phase: int):
+    """
+    Turns off heartbeats for GPU models not needed in `active_phase` so idle
+    containers scale down to $0 within 15s.
+    """
+    if active_phase != 2 and z_image_heartbeat_enabled:
+        set_z_image_heartbeat_state(False)
+    if active_phase != 3 and qwen_heartbeat_enabled:
+        set_qwen_heartbeat_state(False)
+    if active_phase != 4 and wan_heartbeat_enabled:
+        set_wan_heartbeat_state(False)
 
 
 def ping_all_active_backends():
     """
-    Pings all enabled Modal backends in parallel threads so Z-Image Turbo,
-    Qwen Image Edit, and Wan 2.2 stay warm while the frontend is running.
+    Pings only explicitly enabled Modal backends using non-blocking locks so
+    concurrent heartbeats NEVER queue up duplicate containers during cold start
+    or generation.
     """
-    import threading
-
-    def _ping(getter, label):
+    def _ping(getter, label, lock):
+        if not lock.acquire(blocking=False):
+            # Another ping or generation is already in flight on this model; skip!
+            return
         try:
             m = getter()
             m.heartbeat.remote()
         except Exception as e:
             print(f"[keepalive] {label} ping note: {e}")
+        finally:
+            lock.release()
 
     threads = []
     if z_image_heartbeat_enabled:
-        threads.append(threading.Thread(target=_ping, args=(get_z_image_model, "Z-Image Turbo"), daemon=True))
+        threads.append(threading.Thread(target=_ping, args=(get_z_image_model, "Z-Image Turbo", _z_image_ping_lock), daemon=True))
     if qwen_heartbeat_enabled:
-        threads.append(threading.Thread(target=_ping, args=(get_qwen_model, "Qwen Image Edit"), daemon=True))
+        threads.append(threading.Thread(target=_ping, args=(get_qwen_model, "Qwen Image Edit", _qwen_ping_lock), daemon=True))
     if wan_heartbeat_enabled:
-        threads.append(threading.Thread(target=_ping, args=(get_wan_model, "Wan 2.2"), daemon=True))
+        threads.append(threading.Thread(target=_ping, args=(get_wan_model, "Wan 2.2", _wan_ping_lock), daemon=True))
 
     for t in threads:
         t.start()
@@ -479,21 +515,30 @@ def ping_all_active_backends():
 
 def start_keepalive_thread():
     """
-    Spawns a background daemon thread that automatically pings Z-Image Turbo,
-    Qwen Image Edit, and Wan 2.2 every 25 seconds while the frontend is open.
-    When the user closes the frontend, heartbeats stop automatically and Modal
-    scales down the containers cleanly.
+    Spawns a background daemon thread that only pings models whose keep-warm
+    toggle is explicitly enabled AND within the 3-minute activity window.
     """
-    import threading
-
     def keepalive_worker():
-        time.sleep(2)
-        print("[keepalive] Auto-heartbeat worker started for Z-Image Turbo, Qwen Image Edit & Wan 2.2.")
+        time.sleep(5)
+        print("[keepalive] Cost-Saver Keep-Alive worker started (On-Demand mode: $0 idle cost by default).")
         while True:
             now = time.time()
             is_frontend_open = (now - last_frontend_heartbeat_time) < FRONTEND_HEARTBEAT_TIMEOUT
-            if is_frontend_open:
+
+            # Auto-disable any heartbeat that has been idle for > KEEPALIVE_IDLE_TIMEOUT (3 min)
+            if z_image_heartbeat_enabled and (now - last_z_image_activity_time) > KEEPALIVE_IDLE_TIMEOUT:
+                print("[keepalive] Auto-pausing Z-Image Turbo heartbeat after 3m idle to save GPU cost.")
+                set_z_image_heartbeat_state(False)
+            if qwen_heartbeat_enabled and (now - last_qwen_activity_time) > KEEPALIVE_IDLE_TIMEOUT:
+                print("[keepalive] Auto-pausing Qwen heartbeat after 3m idle to save GPU cost.")
+                set_qwen_heartbeat_state(False)
+            if wan_heartbeat_enabled and (now - last_wan_activity_time) > KEEPALIVE_IDLE_TIMEOUT:
+                print("[keepalive] Auto-pausing Wan 2.2 heartbeat after 3m idle to save GPU cost.")
+                set_wan_heartbeat_state(False)
+
+            if is_frontend_open and (z_image_heartbeat_enabled or qwen_heartbeat_enabled or wan_heartbeat_enabled):
                 ping_all_active_backends()
+
             time.sleep(25)
 
     t = threading.Thread(target=keepalive_worker, name="ModalKeepAliveThread")

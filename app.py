@@ -1176,15 +1176,15 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
     gr.Markdown("## 🎬 Wan 2.2 AI Filmmaking Studio", elem_classes="main-title")
     gr.Markdown(
-        "**Auto-Heartbeats Active:** `Z-Image Turbo` + `Qwen Image Edit` + `Wan 2.2` stay warm automatically while this UI is open   |   "
+        "**💰 GPU Cost-Saver Mode Active:** Models run strictly **On-Demand ($0 Idle)** with `max_containers=1` & 15s auto-scaledown   |   "
         "**3-Seed Consistency Engine** (`Z-Image Seed` · `Qwen Scene Seed` · `Wan Video Seed`)",
         elem_classes="subtitle"
     )
 
     with gr.Row():
-        z_image_hb_btn = gr.Button("💓 Z-Image Turbo Keep-Warm: Active", variant="primary", scale=1)
-        qwen_hb_btn = gr.Button("💓 Qwen Keep-Warm: Active", variant="primary", scale=1)
-        wan_hb_btn = gr.Button("💓 Wan 2.2 Keep-Warm: Active", variant="primary", scale=1)
+        z_image_hb_btn = gr.Button("💤 Z-Image Turbo Keep-Warm: Paused ($0 Idle)", variant="secondary", scale=1)
+        qwen_hb_btn = gr.Button("💤 Qwen Keep-Warm: Paused ($0 Idle)", variant="secondary", scale=1)
+        wan_hb_btn = gr.Button("💤 Wan 2.2 Keep-Warm: Paused ($0 Idle)", variant="secondary", scale=1)
         clear_outputs_btn = gr.Button("🗑️ Clear All Outputs", variant="stop", scale=1)
 
     with gr.Row(elem_classes="toolbar-row"):
@@ -1942,6 +1942,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
     # Phase 1 -> Phase 2 validation & navigation
     def _validate_phase1(title_edit, current_state):
+        import backend
+        backend.release_other_phase_heartbeats(2)
         if current_state and title_edit and str(title_edit).strip():
             current_state["title"] = str(title_edit).strip()
         return (
@@ -1962,11 +1964,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[studio_wizard_tabs],
     )
 
-    studio_phase2_next_btn.click(
-        fn=lambda: (
+    def _validate_phase2():
+        import backend
+        backend.release_other_phase_heartbeats(3)
+        return (
             gr.update(selected="phase3"),
             "### ✅ Phase 2 Validated — Now in **Phase 3: Scene Images**. Click **Generate All Scene Images**.",
-        ),
+        )
+
+    studio_phase2_next_btn.click(
+        fn=_validate_phase2,
         inputs=[],
         outputs=[studio_wizard_tabs, studio_status],
     )
@@ -1977,11 +1984,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[studio_wizard_tabs],
     )
 
-    studio_phase3_next_btn.click(
-        fn=lambda: (
+    def _validate_phase3():
+        import backend
+        backend.release_other_phase_heartbeats(4)
+        return (
             gr.update(selected="phase4"),
             "### ✅ Phase 3 Validated — Now in **Phase 4: Video Clips & Final Movie**. Click **Generate All 5s Video Clips**.",
-        ),
+        )
+
+    studio_phase3_next_btn.click(
+        fn=_validate_phase3,
         inputs=[],
         outputs=[studio_wizard_tabs, studio_status],
     )

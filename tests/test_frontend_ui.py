@@ -44,23 +44,23 @@ class TestGradioFrontendStructure(unittest.TestCase):
         self.assertEqual(app.studio_clip_seed_edit.value, w_seed)
 
     def test_auto_heartbeat_buttons_and_timer_configured(self):
-        """All 3 model heartbeat buttons should start in Active/primary state and the 25s timer should be active."""
-        self.assertIn("Active", app.z_image_hb_btn.value)
-        self.assertIn("Active", app.qwen_hb_btn.value)
-        self.assertIn("Active", app.wan_hb_btn.value)
+        """All 3 model heartbeat buttons should start in Paused ($0 Idle) Cost-Saver state."""
+        self.assertIn("Paused", app.z_image_hb_btn.value)
+        self.assertIn("Paused", app.qwen_hb_btn.value)
+        self.assertIn("Paused", app.wan_hb_btn.value)
 
-        self.assertEqual(app.z_image_hb_btn.variant, "primary")
-        self.assertEqual(app.qwen_hb_btn.variant, "primary")
-        self.assertEqual(app.wan_hb_btn.variant, "primary")
+        self.assertEqual(app.z_image_hb_btn.variant, "secondary")
+        self.assertEqual(app.qwen_hb_btn.variant, "secondary")
+        self.assertEqual(app.wan_hb_btn.variant, "secondary")
 
         self.assertIsInstance(app.heartbeat_timer, gr.Timer)
         self.assertEqual(app.heartbeat_timer.value, 25)
         self.assertTrue(app.heartbeat_timer.active)
 
-        # Backend flags should all be True on startup
-        self.assertTrue(backend.z_image_heartbeat_enabled)
-        self.assertTrue(backend.qwen_heartbeat_enabled)
-        self.assertTrue(backend.wan_heartbeat_enabled)
+        # Backend flags should all be False ($0 idle cost) on startup
+        self.assertFalse(backend.z_image_heartbeat_enabled)
+        self.assertFalse(backend.qwen_heartbeat_enabled)
+        self.assertFalse(backend.wan_heartbeat_enabled)
 
     def test_registered_event_functions_in_demo_graph(self):
         """Verify key frontend handlers are bound into app.demo.fns."""
@@ -407,35 +407,43 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
 
 
 class TestFrontendHeartbeatAsyncButtons(unittest.TestCase):
-    """Tests the async heartbeat toggle callbacks and client heartbeat timer handler."""
+    """Tests the async heartbeat toggle callbacks, phase release, and client heartbeat timer handler."""
 
     def tearDown(self):
-        # Restore all 3 heartbeats to True (default active state)
-        backend.set_z_image_heartbeat_state(True)
-        backend.set_qwen_heartbeat_state(True)
-        backend.set_wan_heartbeat_state(True)
+        # Restore all 3 heartbeats to False (Cost-Saver $0 Idle default)
+        backend.set_z_image_heartbeat_state(False)
+        backend.set_qwen_heartbeat_state(False)
+        backend.set_wan_heartbeat_state(False)
 
     def test_async_heartbeat_toggle_buttons(self):
         async def _run():
-            backend.set_z_image_heartbeat_state(True)
-            res_paused = await app.toggle_z_image_heartbeat()
-            self.assertFalse(backend.z_image_heartbeat_enabled)
-            self.assertIn("Paused", res_paused["value"])
-            self.assertEqual(res_paused["variant"], "secondary")
-
+            backend.set_z_image_heartbeat_state(False)
             res_active = await app.toggle_z_image_heartbeat()
             self.assertTrue(backend.z_image_heartbeat_enabled)
             self.assertIn("Active", res_active["value"])
             self.assertEqual(res_active["variant"], "primary")
 
-            # Also verify Wan and Qwen toggles
-            res_wan = await app.toggle_wan_heartbeat()
-            self.assertFalse(backend.wan_heartbeat_enabled)
-            self.assertIn("Paused", res_wan["value"])
+            res_paused = await app.toggle_z_image_heartbeat()
+            self.assertFalse(backend.z_image_heartbeat_enabled)
+            self.assertIn("Paused", res_paused["value"])
+            self.assertEqual(res_paused["variant"], "secondary")
 
+            # Also verify Wan and Qwen toggles
+            backend.set_wan_heartbeat_state(False)
+            res_wan = await app.toggle_wan_heartbeat()
+            self.assertTrue(backend.wan_heartbeat_enabled)
+            self.assertIn("Active", res_wan["value"])
+
+            backend.set_qwen_heartbeat_state(False)
             res_qwen = await app.toggle_qwen_heartbeat()
+            self.assertTrue(backend.qwen_heartbeat_enabled)
+            self.assertIn("Active", res_qwen["value"])
+
+            # Verify phase transition releases earlier phase heartbeats
+            backend.release_other_phase_heartbeats(4)
+            self.assertFalse(backend.z_image_heartbeat_enabled)
             self.assertFalse(backend.qwen_heartbeat_enabled)
-            self.assertIn("Paused", res_qwen["value"])
+            self.assertTrue(backend.wan_heartbeat_enabled)
 
             # Client heartbeat timer tick
             before = backend.last_frontend_heartbeat_time

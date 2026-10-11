@@ -96,7 +96,8 @@ def download_all_weights():
     secrets=secrets,
     timeout=1800,
     min_containers=0,
-    scaledown_window=60,
+    max_containers=1,
+    scaledown_window=15,
 )
 class WanModel:
     @modal.method()
