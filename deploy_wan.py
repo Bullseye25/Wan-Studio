@@ -348,11 +348,12 @@ class WanModel:
         ph = ((H - 1) // tmp + 1) * tmp
         pw = ((W - 1) // tmp + 1) * tmp
         padding = (0, pw - W, 0, ph - H)
+        rife_dtype = next(self.rife_model.flownet.parameters()).dtype if hasattr(self.rife_model, "flownet") else torch.float32
 
         def to_tensor(frame_np):
             t = torch.from_numpy(frame_np).to(device)
             t = t.permute(2, 0, 1).unsqueeze(0)
-            return F.pad(t, padding).half()
+            return F.pad(t, padding).to(rife_dtype)
 
         def from_tensor(tensor):
             t = tensor[0, :, :H, :W]
