@@ -97,7 +97,6 @@ def run_remote_inference(
             if attempt > 0:
                 model_instance = get_wan_model(force_refresh=True)
 
-            # Call the remote generator method
             gen_kwargs = {
                 "image_bytes": image_bytes,
                 "last_image_bytes": last_image_bytes,
@@ -116,42 +115,43 @@ def run_remote_inference(
                 "lora_scale": float(lora_scale),
                 "deflicker_frames": bool(deflicker_frames)
             }
+
+            def consume_stream(kwargs_to_use):
+                nonlocal video_path
+                generator = model_instance.generate.remote_gen(**kwargs_to_use)
+                for event in generator:
+                    etype = event.get("type")
+                    if etype == "progress":
+                        step = event["step"]
+                        total = event["total_steps"]
+                        pct = float(step) / float(total)
+                        if progress:
+                            progress(pct, desc=f"Generating frames (Step {step}/{total})...")
+                    elif etype == "status":
+                        if progress:
+                            progress(0.95, desc=event["message"])
+                    elif etype == "error":
+                        raise RuntimeError(f"Remote execution failed: {event['message']}\n{event['traceback']}")
+                    elif etype == "output":
+                        local_dir = pathlib.Path(__file__).parent / "outputs"
+                        local_dir.mkdir(parents=True, exist_ok=True)
+                        local_path = local_dir / event["filename"]
+                        print(f"[local-backend] Writing output video: {local_path} ({len(event['video_bytes'])} bytes)")
+                        with open(local_path, "wb") as f_out:
+                            f_out.write(event["video_bytes"])
+                        video_path = str(local_path)
+
             try:
-                generator = model_instance.generate.remote_gen(**gen_kwargs)
-            except (TypeError, Exception) as te:
-                if "unexpected keyword" in str(te) or "TypeError" in type(te).__name__:
-                    # Fallback for earlier deployed container versions without optional lora/deflicker args
+                consume_stream(gen_kwargs)
+            except Exception as stream_err:
+                if "unexpected keyword" in str(stream_err) and ("lora_repo_or_path" in str(stream_err) or "deflicker_frames" in str(stream_err)):
+                    print("[local-backend] Remote container uses earlier signature without lora/deflicker. Falling back to base signature...")
                     gen_kwargs.pop("lora_repo_or_path", None)
                     gen_kwargs.pop("lora_scale", None)
                     gen_kwargs.pop("deflicker_frames", None)
-                    generator = model_instance.generate.remote_gen(**gen_kwargs)
+                    consume_stream(gen_kwargs)
                 else:
-                    raise te
-
-            for event in generator:
-                etype = event.get("type")
-                if etype == "progress":
-                    step = event["step"]
-                    total = event["total_steps"]
-                    pct = float(step) / float(total)
-                    if progress:
-                        progress(pct, desc=f"Generating frames (Step {step}/{total})...")
-                elif etype == "status":
-                    if progress:
-                        progress(0.95, desc=event["message"])
-                elif etype == "error":
-                    raise RuntimeError(f"Remote execution failed: {event['message']}\n{event['traceback']}")
-                elif etype == "output":
-                    # Create local output folder in current workspace directory and write result
-                    local_dir = pathlib.Path(__file__).parent / "outputs"
-                    local_dir.mkdir(parents=True, exist_ok=True)
-                    local_path = local_dir / event["filename"]
-                    
-                    print(f"[local-backend] Writing output video: {local_path} ({len(event['video_bytes'])} bytes)")
-                    with open(local_path, "wb") as f_out:
-                        f_out.write(event["video_bytes"])
-                    
-                    video_path = str(local_path)
+                    raise stream_err
             break
 
         except Exception as e:
