@@ -98,24 +98,35 @@ def run_remote_inference(
                 model_instance = get_wan_model(force_refresh=True)
 
             # Call the remote generator method
-            generator = model_instance.generate.remote_gen(
-                image_bytes=image_bytes,
-                last_image_bytes=last_image_bytes,
-                prompt=prompt,
-                steps=int(steps),
-                negative_prompt=negative_prompt,
-                num_frames=int(num_frames),
-                guidance_scale=float(guidance_scale),
-                guidance_scale_2=float(guidance_scale_2),
-                seed=int(current_seed),
-                scheduler_name=scheduler_name,
-                flow_shift=float(flow_shift),
-                frame_multiplier=int(frame_multiplier),
-                quality=int(quality),
-                lora_repo_or_path=str(lora_repo_or_path or ""),
-                lora_scale=float(lora_scale),
-                deflicker_frames=bool(deflicker_frames)
-            )
+            gen_kwargs = {
+                "image_bytes": image_bytes,
+                "last_image_bytes": last_image_bytes,
+                "prompt": prompt,
+                "steps": int(steps),
+                "negative_prompt": negative_prompt,
+                "num_frames": int(num_frames),
+                "guidance_scale": float(guidance_scale),
+                "guidance_scale_2": float(guidance_scale_2),
+                "seed": int(current_seed),
+                "scheduler_name": scheduler_name,
+                "flow_shift": float(flow_shift),
+                "frame_multiplier": int(frame_multiplier),
+                "quality": int(quality),
+                "lora_repo_or_path": str(lora_repo_or_path or ""),
+                "lora_scale": float(lora_scale),
+                "deflicker_frames": bool(deflicker_frames)
+            }
+            try:
+                generator = model_instance.generate.remote_gen(**gen_kwargs)
+            except (TypeError, Exception) as te:
+                if "unexpected keyword" in str(te) or "TypeError" in type(te).__name__:
+                    # Fallback for earlier deployed container versions without optional lora/deflicker args
+                    gen_kwargs.pop("lora_repo_or_path", None)
+                    gen_kwargs.pop("lora_scale", None)
+                    gen_kwargs.pop("deflicker_frames", None)
+                    generator = model_instance.generate.remote_gen(**gen_kwargs)
+                else:
+                    raise te
 
             for event in generator:
                 etype = event.get("type")
