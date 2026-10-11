@@ -469,17 +469,28 @@ def set_z_image_heartbeat_state(enabled: bool):
     print(f"[backend] Z-Image Turbo heartbeat state toggled: {z_image_heartbeat_enabled}")
 
 
-def release_other_phase_heartbeats(active_phase: int):
+def activate_studio_phase(active_phase: int, trigger_warmup: bool = True):
     """
-    Turns off heartbeats for GPU models not needed in `active_phase` so idle
-    containers scale down to $0 within 15s.
+    Phase-Driven Single-GPU Lifecycle:
+      - Phase 1 (Story):      All 3 GPUs OFF ($0.00/hr — uses Ollama Cloud only)
+      - Phase 2 (Characters): ONLY Z-Image Turbo (L4) ON; Qwen & Wan OFF
+      - Phase 3 (Scenes):     ONLY Qwen Image Edit (L40S) ON; Z-Image & Wan OFF
+      - Phase 4 (Videos):     ONLY Wan 2.2 (A100) ON; Z-Image & Qwen OFF
     """
-    if active_phase != 2 and z_image_heartbeat_enabled:
-        set_z_image_heartbeat_state(False)
-    if active_phase != 3 and qwen_heartbeat_enabled:
-        set_qwen_heartbeat_state(False)
-    if active_phase != 4 and wan_heartbeat_enabled:
-        set_wan_heartbeat_state(False)
+    set_z_image_heartbeat_state(active_phase == 2)
+    set_qwen_heartbeat_state(active_phase == 3)
+    set_wan_heartbeat_state(active_phase == 4)
+
+    if trigger_warmup and active_phase in (2, 3, 4):
+        ping_all_active_backends()
+
+
+def release_other_phase_heartbeats(active_phase: int, trigger_warmup: bool = False):
+    """
+    Activates only the GPU needed for `active_phase` and releases
+    heartbeats for all other phases so idle containers scale down to $0 within 15s.
+    """
+    activate_studio_phase(active_phase, trigger_warmup=trigger_warmup)
 
 
 def ping_all_active_backends():

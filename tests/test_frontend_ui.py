@@ -252,14 +252,45 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         }
 
     def tearDown(self):
+        backend.activate_studio_phase(1, trigger_warmup=False)
         self.temp_dir.cleanup()
 
-    def test_phase1_validation_updates_title_and_switches_tab(self):
+    @patch("backend.ping_all_active_backends")
+    def test_phase1_validation_updates_title_and_switches_tab(self, mock_ping):
         state = {"title": "Old Title", "characters": [], "scenes": []}
-        tab_update, status, updated_state = app._validate_phase1("New Edited Title", state)
+        tab_update, status, updated_state, z_btn, q_btn, w_btn = app._validate_phase1("New Edited Title", state)
         self.assertEqual(updated_state["title"], "New Edited Title")
         self.assertEqual(tab_update["selected"], "phase2")
         self.assertIn("Phase 1 Validated", status)
+        # Moving to Phase 2 fires up ONLY Z-Image Turbo (L4) and turns OFF Qwen & Wan
+        self.assertTrue(backend.z_image_heartbeat_enabled)
+        self.assertFalse(backend.qwen_heartbeat_enabled)
+        self.assertFalse(backend.wan_heartbeat_enabled)
+        self.assertIn("Active", z_btn["value"])
+        self.assertIn("Paused", q_btn["value"])
+        self.assertIn("Paused", w_btn["value"])
+
+        # Moving to Phase 3 turns OFF Z-Image and fires up ONLY Qwen Image Edit (L40S)
+        tab3, status3, z_btn3, q_btn3, w_btn3 = app._validate_phase2()
+        self.assertEqual(tab3["selected"], "phase3")
+        self.assertIn("Phase 2 Validated", status3)
+        self.assertFalse(backend.z_image_heartbeat_enabled)
+        self.assertTrue(backend.qwen_heartbeat_enabled)
+        self.assertFalse(backend.wan_heartbeat_enabled)
+        self.assertIn("Paused", z_btn3["value"])
+        self.assertIn("Active", q_btn3["value"])
+        self.assertIn("Paused", w_btn3["value"])
+
+        # Moving to Phase 4 turns OFF Qwen and fires up ONLY Wan 2.2 (A100)
+        tab4, status4, z_btn4, q_btn4, w_btn4 = app._validate_phase3()
+        self.assertEqual(tab4["selected"], "phase4")
+        self.assertIn("Phase 3 Validated", status4)
+        self.assertFalse(backend.z_image_heartbeat_enabled)
+        self.assertFalse(backend.qwen_heartbeat_enabled)
+        self.assertTrue(backend.wan_heartbeat_enabled)
+        self.assertIn("Paused", z_btn4["value"])
+        self.assertIn("Paused", q_btn4["value"])
+        self.assertIn("Active", w_btn4["value"])
 
     def test_phase2_load_save_and_gallery_select_character(self):
         # Empty state guard

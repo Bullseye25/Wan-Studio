@@ -1265,7 +1265,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             # ══════════════════════════════════════════════════════════════════
             # PHASE 1: STORY & SCREENPLAY
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("1️⃣ Phase 1: Story & Screenplay", id="phase1"):
+            with gr.TabItem("1️⃣ Phase 1: Story & Screenplay", id="phase1") as phase1_tab:
                 with gr.Row():
                     with gr.Column(scale=1):
                         studio_prompt = gr.Textbox(
@@ -1317,7 +1317,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             # ══════════════════════════════════════════════════════════════════
             # PHASE 2: CHARACTER STUDIO (Z-IMAGE TURBO)
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2"):
+            with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2") as phase2_tab:
                 with gr.Row():
                     studio_step2_btn = gr.Button(
                         "🎨 Generate All Characters (Using Locked Z-Image Seed)",
@@ -1379,7 +1379,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             # ══════════════════════════════════════════════════════════════════
             # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF)
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Multi-Ref)", id="phase3"):
+            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Multi-Ref)", id="phase3") as phase3_tab:
                 with gr.Row():
                     studio_step3_btn = gr.Button(
                         "🖼️ Generate All Scene Images (Using Locked Qwen Seed + Character Refs)",
@@ -1444,7 +1444,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             # ══════════════════════════════════════════════════════════════════
             # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2)
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2)", id="phase4"):
+            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2)", id="phase4") as phase4_tab:
                 with gr.Row():
                     studio_step_director_btn = gr.Button(
                         "🎬 Step 4A: Run Gemma Vision Director on All Scenes",
@@ -1940,69 +1940,102 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
+    def _hb_button_updates():
+        import backend
+        z_btn = (
+            gr.update(value="💓 Z-Image Turbo Keep-Warm: Active (Phase 2)", variant="primary")
+            if backend.z_image_heartbeat_enabled
+            else gr.update(value="💤 Z-Image Turbo Keep-Warm: Paused ($0 Idle)", variant="secondary")
+        )
+        q_btn = (
+            gr.update(value="💓 Qwen Keep-Warm: Active (Phase 3)", variant="primary")
+            if backend.qwen_heartbeat_enabled
+            else gr.update(value="💤 Qwen Keep-Warm: Paused ($0 Idle)", variant="secondary")
+        )
+        w_btn = (
+            gr.update(value="💓 Wan 2.2 Keep-Warm: Active (Phase 4)", variant="primary")
+            if backend.wan_heartbeat_enabled
+            else gr.update(value="💤 Wan 2.2 Keep-Warm: Paused ($0 Idle)", variant="secondary")
+        )
+        return z_btn, q_btn, w_btn
+
+    def _switch_to_phase_gpu(phase_num: int):
+        import backend
+        backend.activate_studio_phase(phase_num, trigger_warmup=True)
+        return _hb_button_updates()
+
     # Phase 1 -> Phase 2 validation & navigation
     def _validate_phase1(title_edit, current_state):
         import backend
-        backend.release_other_phase_heartbeats(2)
+        backend.activate_studio_phase(2, trigger_warmup=True)
         if current_state and title_edit and str(title_edit).strip():
             current_state["title"] = str(title_edit).strip()
         return (
             gr.update(selected="phase2"),
-            "### ✅ Phase 1 Validated — Now in **Phase 2: Character Studio**. Click **Generate All Characters**.",
+            "### ✅ Phase 1 Validated — Now in **Phase 2: Character Studio** (🔥 Z-Image Turbo GPU warming up; Qwen & Wan paused at $0).",
             current_state,
+            *_hb_button_updates(),
         )
 
     studio_phase1_next_btn.click(
         fn=_validate_phase1,
         inputs=[studio_story_title_edit, studio_pipeline_state],
-        outputs=[studio_wizard_tabs, studio_status, studio_pipeline_state],
+        outputs=[studio_wizard_tabs, studio_status, studio_pipeline_state, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
 
     studio_phase2_back_btn.click(
-        fn=lambda: gr.update(selected="phase1"),
+        fn=lambda: (gr.update(selected="phase1"), *_switch_to_phase_gpu(1)),
         inputs=[],
-        outputs=[studio_wizard_tabs],
+        outputs=[studio_wizard_tabs, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
 
     def _validate_phase2():
         import backend
-        backend.release_other_phase_heartbeats(3)
+        backend.activate_studio_phase(3, trigger_warmup=True)
         return (
             gr.update(selected="phase3"),
-            "### ✅ Phase 2 Validated — Now in **Phase 3: Scene Images**. Click **Generate All Scene Images**.",
+            "### ✅ Phase 2 Validated — Now in **Phase 3: Scene Images** (🔥 Qwen GPU warming up; Z-Image & Wan paused at $0).",
+            *_hb_button_updates(),
         )
 
     studio_phase2_next_btn.click(
         fn=_validate_phase2,
         inputs=[],
-        outputs=[studio_wizard_tabs, studio_status],
+        outputs=[studio_wizard_tabs, studio_status, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
 
     studio_phase3_back_btn.click(
-        fn=lambda: gr.update(selected="phase2"),
+        fn=lambda: (gr.update(selected="phase2"), *_switch_to_phase_gpu(2)),
         inputs=[],
-        outputs=[studio_wizard_tabs],
+        outputs=[studio_wizard_tabs, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
 
     def _validate_phase3():
         import backend
-        backend.release_other_phase_heartbeats(4)
+        backend.activate_studio_phase(4, trigger_warmup=True)
         return (
             gr.update(selected="phase4"),
-            "### ✅ Phase 3 Validated — Now in **Phase 4: Video Clips & Final Movie**. Click **Generate All 5s Video Clips**.",
+            "### ✅ Phase 3 Validated — Now in **Phase 4: Video Clips & Final Movie** (🔥 Wan 2.2 GPU warming up; Z-Image & Qwen paused at $0).",
+            *_hb_button_updates(),
         )
 
     studio_phase3_next_btn.click(
         fn=_validate_phase3,
         inputs=[],
-        outputs=[studio_wizard_tabs, studio_status],
+        outputs=[studio_wizard_tabs, studio_status, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
 
     studio_phase4_back_btn.click(
-        fn=lambda: gr.update(selected="phase3"),
+        fn=lambda: (gr.update(selected="phase3"), *_switch_to_phase_gpu(3)),
         inputs=[],
-        outputs=[studio_wizard_tabs],
+        outputs=[studio_wizard_tabs, z_image_hb_btn, qwen_hb_btn, wan_hb_btn],
     )
+
+    # Also switch active GPU automatically if user clicks any Phase Tab directly
+    phase1_tab.select(fn=lambda: _switch_to_phase_gpu(1), inputs=[], outputs=[z_image_hb_btn, qwen_hb_btn, wan_hb_btn])
+    phase2_tab.select(fn=lambda: _switch_to_phase_gpu(2), inputs=[], outputs=[z_image_hb_btn, qwen_hb_btn, wan_hb_btn])
+    phase3_tab.select(fn=lambda: _switch_to_phase_gpu(3), inputs=[], outputs=[z_image_hb_btn, qwen_hb_btn, wan_hb_btn])
+    phase4_tab.select(fn=lambda: _switch_to_phase_gpu(4), inputs=[], outputs=[z_image_hb_btn, qwen_hb_btn, wan_hb_btn])
 
     # Phase 2: Generate All Characters & Individual Character Inspector
     def _ui_step2(seed, api_key, model, current_state, selected_char, progress=gr.Progress(track_tqdm=True)):
