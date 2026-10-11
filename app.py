@@ -240,6 +240,121 @@ def run_qwen_generate(
     return pil_images, seeds_str, first_img
 
 
+# ── AI Video Director & Prompt Reasoning ──────────────────────────────────────
+
+def generate_director_prompt(
+    base_prompt: str,
+    direction_style: str,
+    camera_movement: str,
+    motion_intensity: int,
+    duration_seconds: float,
+):
+    """
+    Synthesizes a production-grade, temporally-staged prompt tailored for Wan 2.2 DiT.
+    Decomposes the generation into invariant anchors and multi-phase timelines to eliminate
+    facial morphing, pixel tearing, and temporal drift.
+    """
+    clean_base = base_prompt.strip() if base_prompt else "cinematic natural motion"
+    clean_base = clean_base.replace("make this image come alive, ", "").replace("cinematic motion, ", "")
+
+    intensity_desc = {
+        1: "subtle, micro-movements only, whisper-quiet motion",
+        2: "gentle, controlled, organic natural motion",
+        3: "moderate, expressive, fluid cinematic motion",
+        4: "energetic, pronounced dynamic motion",
+        5: "high-energy, rapid, dramatic motion",
+    }.get(int(motion_intensity), "gentle, controlled, organic natural motion")
+
+    dur = float(duration_seconds)
+    p1_end = round(dur * 0.35, 1)
+    p2_end = round(dur * 0.8, 1)
+
+    if "Portrait & Identity Lock" in direction_style:
+        invariants = (
+            "[Subject Invariant Anchors]: strictly preserve source subject's facial identity, exact bone structure, "
+            "eye shape, nose geometry, jawline, and skin texture without alteration or morphing throughout."
+        )
+        timeline = (
+            f"[Timeline Stages]: "
+            f"Phase 1 (0.0s–{p1_end}s): natural rhythmic breathing, steady eye contact, locked head pose; "
+            f"Phase 2 ({p1_end}s–{p2_end}s): subtle 5-degree head tilt, soft natural smile, subtle hair flutter ({intensity_desc}); "
+            f"Phase 3 ({p2_end}s–{dur}s): smooth return to resting pose, serene expression, invariant facial features."
+        )
+        rec_guidance = 2.25
+        rec_steps = 10
+    elif "Expressive Head Turn" in direction_style:
+        invariants = (
+            "[Subject Invariant Anchors]: consistent facial structure, identical facial keypoints and eyes, "
+            "photorealistic human face, zero facial warping."
+        )
+        timeline = (
+            f"[Timeline Stages]: "
+            f"Phase 1 (0.0s–{p1_end}s): subject begins looking forward with gentle expression; "
+            f"Phase 2 ({p1_end}s–{p2_end}s): smooth continuous head rotation towards the side, natural blinking ({intensity_desc}); "
+            f"Phase 3 ({p2_end}s–{dur}s): settling at 3/4 profile angle, calm steady gaze, locked facial proportions."
+        )
+        rec_guidance = 2.0
+        rec_steps = 9
+    elif "Cinematic Camera Orbit" in direction_style:
+        invariants = (
+            "[Spatial & Subject Invariants]: main subject pose stabilized, solid 3D depth, "
+            "coherent environment geometry, static subject features."
+        )
+        timeline = (
+            f"[Timeline Stages]: "
+            f"Phase 1 (0.0s–{p1_end}s): smooth camera arc initiation, parallax effect across background; "
+            f"Phase 2 ({p1_end}s–{p2_end}s): steady continuous orbital rotation, maintaining perfect focus ({intensity_desc}); "
+            f"Phase 3 ({p2_end}s–{dur}s): gentle deceleration, stable cinematic framing."
+        )
+        rec_guidance = 2.0
+        rec_steps = 8
+    elif "Micro-Motion Natural" in direction_style:
+        invariants = (
+            "[Scene Invariants]: photorealistic fidelity, unchanged character anatomy and facial features, "
+            "no structural shifting or morphing."
+        )
+        timeline = (
+            f"[Timeline Stages]: "
+            f"Phase 1 (0.0s–{p1_end}s): subtle ambient breeze, gentle fabric ripple; "
+            f"Phase 2 ({p1_end}s–{p2_end}s): soft hair strands moving naturally, calm breathing ({intensity_desc}); "
+            f"Phase 3 ({p2_end}s–{dur}s): steady resting pose, smooth continuous atmosphere."
+        )
+        rec_guidance = 1.75
+        rec_steps = 8
+    else:  # Dynamic Action
+        invariants = (
+            "[Kinematic Invariants]: cohesive physical trajectory, stable silhouette, "
+            "zero frame tearing, sharp motion vectors."
+        )
+        timeline = (
+            f"[Timeline Stages]: "
+            f"Phase 1 (0.0s–{p1_end}s): initial acceleration with realistic inertia; "
+            f"Phase 2 ({p1_end}s–{p2_end}s): fluid kinematic motion through the frame ({intensity_desc}); "
+            f"Phase 3 ({p2_end}s–{dur}s): continuous momentum, clean temporal consistency."
+        )
+        rec_guidance = 2.0
+        rec_steps = 8
+
+    camera_clause = f"[Camera Trajectory]: {camera_movement}, fixed focal length, 4k ultra-detailed, photorealistic cinematic lighting."
+
+    director_prompt = f"{clean_base}, {invariants} {timeline} {camera_clause}"
+
+    director_negative = (
+        "face morphing, changing face, altered facial features, changing identity, inconsistent face, "
+        "shifting features, melting face, face distortion, facial transformation, mutating face, "
+        "asymmetrical eyes, cross-eyed, wandering gaze, sudden smile distortion, "
+        "temporal flickering, pixel noise, pixel degradation, digital artifacts, warping, tearing, "
+        "blurry, low quality, worst quality, bad anatomy, deformed"
+    )
+
+    try:
+        gr.Info("🪄 AI Director Prompt Synthesized! Locked invariant anchors and temporal phases.")
+    except Exception:
+        pass
+
+    return director_prompt, director_negative, rec_guidance, rec_steps
+
+
 # ── Video Generation ──────────────────────────────────────────────────────────
 
 def generate_video(
@@ -259,6 +374,9 @@ def generate_video(
     frame_multiplier=16,
     safe_mode=False,
     video_component=True,
+    lora_repo_or_path="",
+    lora_scale=0.8,
+    deflicker_frames=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     if input_image is None:
@@ -288,6 +406,9 @@ def generate_video(
         quality=quality,
         duration_seconds=duration_seconds,
         safe_mode=safe_mode,
+        lora_repo_or_path=lora_repo_or_path,
+        lora_scale=lora_scale,
+        deflicker_frames=deflicker_frames,
         progress=progress
     )
 
@@ -332,6 +453,10 @@ def route_qwen_to_ref2(selected_img, gallery=None):
 
 
 def route_qwen_to_video(selected_img, gallery=None):
+    return extract_selected_image(selected_img, gallery)
+
+
+def route_qwen_to_video_last(selected_img, gallery=None):
     return extract_selected_image(selected_img, gallery)
 
 
@@ -411,7 +536,15 @@ body, .gradio-container {
     margin-bottom: 8px;
 }
 
-#hidden-timestamp {
+.director-panel {
+    background: linear-gradient(145deg, rgba(168,85,247,0.12), rgba(99,102,241,0.08));
+    border: 1px solid rgba(168,85,247,0.35);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px !important;
+}
+
+#hidden-timestamp, #hidden-timestamp-last {
     opacity: 0; height: 0px; width: 0px;
     margin: 0; padding: 0;
     overflow: hidden; position: absolute; pointer-events: none;
@@ -637,10 +770,17 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                     use_as_ref1_btn = gr.Button("🔗 Set as Ref 1", variant="secondary", scale=1)
                     use_as_ref2_btn = gr.Button("🔗 Set as Ref 2", variant="secondary", scale=1)
 
-                use_qwen_as_video_btn = gr.Button(
-                    "🎥 Send to Wan 2.2 (Video Input)",
-                    variant="secondary"
-                )
+                with gr.Row():
+                    use_qwen_as_video_btn = gr.Button(
+                        "🎥 Send to Wan 2.2 (First Frame)",
+                        variant="secondary",
+                        scale=1
+                    )
+                    use_qwen_as_video_last_btn = gr.Button(
+                        "📌 Send to Wan 2.2 (Last Frame)",
+                        variant="secondary",
+                        scale=1
+                    )
 
     # ── Tool 2: Wan 2.2 Video Generator ───────────────────────────────────────
     with gr.Accordion("🎥 Tool 2 — Wan 2.2 · High-Motion Video Generator", open=True, elem_classes="tool-accordion wan-panel") as wan_accordion:
@@ -649,17 +789,58 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
             "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.\n\n"
             "💡 **Facial Consistency & Stability Tip:** To prevent the subject's face from altering after 3–4 seconds, "
             "keep duration within **3.0s – 5.0s**, leave Guidance Scale at **1.5 – 2.5** so the negative prompt is actively enforced, "
-            "and include *'preserve facial features, consistent facial identity'* in your motion prompt.",
+            "and use the **AI Video Director** below or provide a **Last Frame** to anchor facial identity.",
             elem_classes="step-hint"
         )
 
         with gr.Row():
             with gr.Column(scale=1):
                 input_image_component = gr.Image(
-                    type="pil", label="Input Image for Video",
+                    type="pil", label="Input Image for Video (First Frame)",
                     sources=["upload", "clipboard"], elem_id="wan-input-image"
                 )
-                prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v)
+
+                # ── AI Video Director & Prompt Reasoning Assistant ──
+                with gr.Accordion("🪄 AI Video Director & Prompt Reasoning (Zero-Drift Assistant)", open=False, elem_classes="director-panel"):
+                    gr.Markdown(
+                        "**The AI Director decomposes your prompt into a structured temporal script.** "
+                        "Diffusion Transformers (DiT) lock facial identity and prevent pixel degradation when guided by invariant anchors and multi-phase timelines.",
+                        elem_classes="step-hint"
+                    )
+                    with gr.Row():
+                        director_style = gr.Dropdown(
+                            label="Direction Focus / Style",
+                            choices=[
+                                "👤 Portrait & Identity Lock (Prevents face drift & morphing)",
+                                "✨ Expressive Head Turn & Smile (Gradual head turn, locked identity)",
+                                "🎬 Cinematic Camera Orbit (Locked subject, camera trajectory)",
+                                "🌬️ Micro-Motion Natural (Subtle breathing, wind, hair sway)",
+                                "🚀 Dynamic Action & Flow (Steady kinematics, no pixel tears)"
+                            ],
+                            value="👤 Portrait & Identity Lock (Prevents face drift & morphing)",
+                            scale=2
+                        )
+                        director_camera = gr.Dropdown(
+                            label="Camera Movement",
+                            choices=[
+                                "Static Tripod Shot (Highest facial stability)",
+                                "Slow Cinematic Push-In / Dolly",
+                                "Gentle Orbital Tracking",
+                                "Smooth Horizontal Pan",
+                                "Subtle Handheld Drift"
+                            ],
+                            value="Static Tripod Shot (Highest facial stability)",
+                            scale=1
+                        )
+                    with gr.Row():
+                        director_intensity = gr.Slider(
+                            minimum=1, maximum=5, step=1, value=2,
+                            label="Motion Intensity (1=Subtle, 5=Dynamic)",
+                            scale=1
+                        )
+                        director_apply_btn = gr.Button("✨ Synthesize Temporally-Anchored Prompt", variant="primary", scale=2)
+
+                prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v, lines=3)
                 duration_seconds_input = gr.Slider(
                     minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=DEFAULT_DURATION,
                     label="Duration (seconds)",
@@ -699,6 +880,23 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                         minimum=1.0, maximum=7.0, step=0.25, value=1.5, label="Guidance Scale 2 (Low Noise)",
                         info="Stabilizes fine facial features and surface textures in later denoising steps."
                     )
+                    with gr.Row():
+                        lora_repo_or_path_input = gr.Textbox(
+                            label="LoRA Model (Hugging Face ID or path)",
+                            value="",
+                            placeholder="e.g. user/wan2.2-face-consistency (optional)",
+                            scale=2
+                        )
+                        lora_scale_slider = gr.Slider(
+                            minimum=0.0, maximum=1.5, step=0.05, value=0.8,
+                            label="LoRA Scale / Weight",
+                            scale=1
+                        )
+                    deflicker_checkbox = gr.Checkbox(
+                        label="✨ Temporal Face & Texture Deflicker",
+                        value=True,
+                        info="Applies edge-preserving temporal filtering to eliminate pixel micro-jitter and lock facial features across frames before RIFE."
+                    )
                     scheduler_dropdown = gr.Dropdown(label="Scheduler", choices=SCHEDULERS, value="UniPCMultistep")
                     flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
                     play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)
@@ -712,7 +910,9 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                 )
                 with gr.Row():
                     grab_frame_btn = gr.Button("📸 Use Current Frame as Input", variant="secondary")
-                    timestamp_box = gr.Number(value=0, label="Timestamp", visible=True, elem_id="hidden-timestamp")
+                    grab_last_frame_btn = gr.Button("📌 Use Current Frame as Last Frame", variant="secondary")
+                    timestamp_box = gr.Number(value=0, label="Timestamp", visible=False, elem_id="hidden-timestamp")
+                    timestamp_last_box = gr.Number(value=0, label="Timestamp Last", visible=False, elem_id="hidden-timestamp-last")
                 file_output = gr.File(label="Download Video")
 
     # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
@@ -792,6 +992,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         outputs=[input_image_component],
     )
 
+    use_qwen_as_video_last_btn.click(
+        fn=route_qwen_to_video_last,
+        inputs=[qwen_selected_image, qwen_output_gallery],
+        outputs=[last_image_component],
+    )
+
+    director_apply_btn.click(
+        fn=generate_director_prompt,
+        inputs=[prompt_input, director_style, director_camera, director_intensity, duration_seconds_input],
+        outputs=[prompt_input, negative_prompt_input, guidance_scale_input, steps_slider],
+    )
+
     # ── Events: Wan 2.2 Video ─────────────────────────────────────────────────
 
     ui_inputs = [
@@ -800,6 +1012,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox,
         quality_slider, scheduler_dropdown, flow_shift_slider, frame_multi,
         safe_mode_checkbox, play_result_video,
+        lora_repo_or_path_input, lora_scale_slider, deflicker_checkbox
     ]
 
     generate_button.click(
@@ -816,6 +1029,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         fn=extract_frame,
         inputs=[video_output, timestamp_box],
         outputs=[input_image_component],
+    )
+
+    grab_last_frame_btn.click(
+        fn=None, inputs=None, outputs=[timestamp_last_box], js=get_timestamp_js
+    )
+
+    timestamp_last_box.change(
+        fn=extract_frame,
+        inputs=[video_output, timestamp_last_box],
+        outputs=[last_image_component],
     )
 
     # ── Heartbeat Toggles ────────────────────────────────────────────────────

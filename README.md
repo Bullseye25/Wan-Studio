@@ -107,10 +107,13 @@ flowchart TD
 ### 🎥 Tool 2 — Wan 2.2 Image-to-Video Lightning
 - **A100-80GB Acceleration**: Executes dual 14B transformers on 80GB VRAM to handle large temporal latents without OOM.
 - **Flow Matching Lightning**: Utilizes high-efficiency Flow Matching checkpoints (`WAMU_v2_WAN2.2_I2V_LIGHTNING`) for rapid sampling.
+- **AI Video Director & Prompt Reasoning**: Integrated temporal prompt synthesizer that generates invariant subject/face anchors, multi-phase motion timelines, and camera constraints to eliminate facial morphing and temporal drift.
+- **Dual-Keyframe Conditioning**: 1-click First Frame + Last Frame routing from Tool 1 and video scrubber to anchor characters at both temporal boundaries.
+- **LoRA Adapter Support**: Direct Hugging Face LoRA model ID or local path loading with adjustable scale (`0.0`–`1.5`) onto Wan 2.2 DiT layers.
+- **Edge-Preserving Temporal Deflicker**: Pre-interpolation temporal filter that removes micro-flickering and pixel noise spikes without blurring edges.
 - **RIFE Neural Frame Interpolation**: Integrated Practical-RIFE v4.26 neural flow estimator providing 2×, 4×, and 8× temporal upsampling (16 FPS $\rightarrow$ 32, 64, or 128 FPS).
 - **Multi-Scheduler Engine**: Switch between 7 distinct sampling algorithms including `UniPCMultistep`, `FlowMatchEulerDiscrete`, `SASolver`, and `DEISMultistep`.
-- **First & Last Frame Guidance**: Define both beginning and terminal keyframes to steer complex motion trajectories.
-- **Scrub & Extract**: Click on any frame in the generated video directly in the browser and send it straight back to Tool 1 or Tool 2 for iterative workflows.
+- **Scrub & Extract**: Click on any frame in the generated video directly in the browser and send it straight back to Tool 1 or Tool 2 (as First Frame or Last Frame).
 
 ### 🛡️ Smart Cost-Guard Keep-Alive System
 - **Zero Passive GPU Billing**: Modal containers automatically spin down to 0 replicas when idle.
@@ -253,12 +256,15 @@ For your first run, execute these three steps from the menu:
 | **Scheduler** | `UniPCMultistep` | Dropdown | Sampling algorithm (`UniPC`, `FlowMatchEuler`, `SASolver`, etc.). |
 | **Fluidity (FPS)** | `32` or `64` | `16`, `32`, `64`, `128` | Output framerate enhanced via RIFE neural frame interpolation. |
 | **Last Frame** | Optional | Image | Terminal keyframe image to guide motion towards a specific end pose. |
+| **LoRA Model** | Optional | Text | Hugging Face repo ID or path for character or motion consistency. |
+| **LoRA Scale** | `0.8` | `0.0` – `1.5` | Adapter weight applied to DiT cross-attention layers. |
+| **Temporal Deflicker** | `Enabled` | Checkbox | Edge-preserving temporal filter to prevent pixel micro-jitter. |
 
 ---
 
 ## 🧪 Testing & Verification
 
-The repository includes a comprehensive 27-test automated verification suite covering unit math, API contract validation, and full end-to-end simulation.
+The repository includes a comprehensive 31-test automated verification suite covering unit math, API contract validation, AI Director prompt reasoning, and full end-to-end simulation.
 
 To run the test suite:
 ```bash
@@ -266,7 +272,7 @@ python -m unittest discover tests
 ```
 
 ### Test Suite Breakdown:
-- **`tests/test_suite.py`**: Validates aspect ratio clamping, frame math (16 FPS grid calculations), local output cleaning, and cost-guard activity timestamps.
+- **`tests/test_suite.py`**: Validates aspect ratio clamping, frame math ($4k+1$ stride calculations), AI Video Director temporal prompt synthesis, edge-preserving deflicker smoothing, and activity timestamps.
 - **`tests/test_backend_contract.py`**: Ensures local RPC signatures exactly match Modal cloud interfaces, verifies image serialization, and guards against unexpected parameter drifts.
 - **`tests/test_e2e_pipeline.py`**: Tests the complete end-to-end `Picture -> Qwen Edit -> Pass to Wan -> Animate Video` data flow using mocked GPU responses.
 

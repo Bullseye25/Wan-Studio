@@ -156,7 +156,10 @@ class WanModel:
         scheduler_name: str,
         flow_shift: float,
         frame_multiplier: int,
-        quality: int
+        quality: int,
+        lora_repo_or_path: str = "",
+        lora_scale: float = 0.8,
+        deflicker_frames: bool = True,
     ):
         import io
         import copy
@@ -201,6 +204,31 @@ class WanModel:
             else:
                 config['flow_shift'] = flow_shift
             self.pipe.scheduler = scheduler_class.from_config(config)
+
+        # 2b. Optional LoRA loading
+        lora_loaded = False
+        if lora_repo_or_path and lora_repo_or_path.strip():
+            target_lora = lora_repo_or_path.strip()
+            print(f"[Remote] Loading LoRA: {target_lora} (scale: {lora_scale})...")
+            try:
+                if hasattr(self.pipe, "unload_lora_weights"):
+                    try:
+                        self.pipe.unload_lora_weights()
+                    except Exception:
+                        pass
+                self.pipe.load_lora_weights(
+                    target_lora,
+                    adapter_name="wan_lora",
+                    cache_dir="/root/.cache/huggingface"
+                )
+                if hasattr(self.pipe, "set_adapters"):
+                    self.pipe.set_adapters(["wan_lora"], adapter_weights=[float(lora_scale)])
+                elif hasattr(self.pipe, "fuse_lora"):
+                    self.pipe.fuse_lora(lora_scale=float(lora_scale))
+                lora_loaded = True
+                print(f"[Remote] Successfully loaded LoRA: {target_lora}")
+            except Exception as e:
+                print(f"[Remote] Warning: Failed to load LoRA '{target_lora}': {e}. Continuing with base weights.")
 
         # 3. Setup Async pipeline run with queue
         import gc
@@ -262,9 +290,21 @@ class WanModel:
         # Restore original scheduler
         self.pipe.scheduler = self.original_scheduler
 
+        # Clean up LoRA weights if loaded
+        if lora_loaded and hasattr(self.pipe, "unload_lora_weights"):
+            try:
+                self.pipe.unload_lora_weights()
+            except Exception:
+                pass
+
         if raw_frames_np is None:
             yield {"type": "error", "message": "Pipeline did not produce frames", "traceback": ""}
             return
+
+        # 3.5. Deflicker / Temporal Consistency Filter
+        if deflicker_frames and raw_frames_np is not None:
+            yield {"type": "status", "message": "Applying edge-preserving temporal deflickering..."}
+            raw_frames_np = self.deflicker_temporal_smoothing(raw_frames_np, strength=0.25)
 
         # 4. Interpolate using RIFE
         frame_factor = frame_multiplier // 16 # FIXED_FPS is 16
@@ -352,5 +392,33 @@ class WanModel:
         del I0, I1
         torch.cuda.empty_cache()
         return output_frames
+
+    def deflicker_temporal_smoothing(self, frames_np, strength=0.25):
+        """
+        Edge-preserving temporal filtering across consecutive frames.
+        Calculates inter-frame luminance and suppresses high-frequency latent flickering
+        and pixel noise spikes while preserving sharp structural edges before RIFE.
+        """
+        import numpy as np
+        T, H, W, C = frames_np.shape
+        if T <= 2:
+            return frames_np
+
+        smoothed = np.empty_like(frames_np)
+        smoothed[0] = frames_np[0]
+
+        for t in range(1, T - 1):
+            prev_f = frames_np[t - 1]
+            curr_f = frames_np[t]
+            next_f = frames_np[t + 1]
+
+            temporal_avg = 0.5 * curr_f + 0.25 * prev_f + 0.25 * next_f
+            diff = np.abs(curr_f - temporal_avg)
+            # Edge mask: smooth low-contrast micro-flickering, preserve sharp boundaries
+            mask = np.clip(1.0 - (diff * 4.0), 0.0, 1.0)
+            smoothed[t] = (1.0 - strength * mask) * curr_f + (strength * mask) * temporal_avg
+
+        smoothed[T - 1] = frames_np[T - 1]
+        return smoothed
 
 

@@ -49,6 +49,9 @@ def run_remote_inference(
     quality,
     duration_seconds,
     safe_mode=False,
+    lora_repo_or_path="",
+    lora_scale=0.8,
+    deflicker_frames=True,
     progress=None
 ):
     """
@@ -108,7 +111,10 @@ def run_remote_inference(
                 scheduler_name=scheduler_name,
                 flow_shift=float(flow_shift),
                 frame_multiplier=int(frame_multiplier),
-                quality=int(quality)
+                quality=int(quality),
+                lora_repo_or_path=str(lora_repo_or_path or ""),
+                lora_scale=float(lora_scale),
+                deflicker_frames=bool(deflicker_frames)
             )
 
             for event in generator:

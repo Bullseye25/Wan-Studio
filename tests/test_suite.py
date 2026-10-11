@@ -23,6 +23,7 @@ from app import (
     MIN_FRAMES_MODEL,
     MAX_FRAMES_MODEL,
 )
+import app
 import backend
 
 
@@ -191,7 +192,74 @@ class TestImageTransferRoutes(unittest.TestCase):
         self.assertEqual(route_qwen_to_ref1(test_img), test_img)
         self.assertEqual(route_qwen_to_ref2(test_img), test_img)
         self.assertEqual(route_qwen_to_video(test_img), test_img)
+        self.assertEqual(app.route_qwen_to_video_last(test_img), test_img)
+
+
+class TestDirectorPromptReasoning(unittest.TestCase):
+    def test_portrait_identity_lock_director_prompt(self):
+        """AI Director should generate invariant anchors, 3 timeline phases, and recommended guidance."""
+        prompt, neg, guidance, steps = app.generate_director_prompt(
+            base_prompt="young woman smiling gently",
+            direction_style="👤 Portrait & Identity Lock (Prevents face drift & morphing)",
+            camera_movement="Static Tripod Shot (Highest facial stability)",
+            motion_intensity=2,
+            duration_seconds=3.5,
+        )
+        self.assertIn("[Subject Invariant Anchors]", prompt)
+        self.assertIn("Phase 1", prompt)
+        self.assertIn("Phase 2", prompt)
+        self.assertIn("Phase 3", prompt)
+        self.assertIn("Static Tripod Shot", prompt)
+        self.assertIn("face morphing", neg)
+        self.assertIn("altered facial features", neg)
+        self.assertGreaterEqual(guidance, 2.0)
+        self.assertGreaterEqual(steps, 8)
+
+    def test_expressive_head_turn_director_prompt(self):
+        """Expressive head turn should include staged rotation and profile settling."""
+        prompt, neg, guidance, steps = app.generate_director_prompt(
+            base_prompt="man in jacket",
+            direction_style="✨ Expressive Head Turn & Smile (Gradual head turn, locked identity)",
+            camera_movement="Slow Cinematic Push-In / Dolly",
+            motion_intensity=3,
+            duration_seconds=4.0,
+        )
+        self.assertIn("head rotation", prompt)
+        self.assertIn("Slow Cinematic Push-In", prompt)
+        self.assertIn("temporal flickering", neg)
+
+    def test_cinematic_orbit_director_prompt(self):
+        """Cinematic camera orbit should stabilize subject while driving orbital camera."""
+        prompt, neg, guidance, steps = app.generate_director_prompt(
+            base_prompt="sports car on cliff",
+            direction_style="🎬 Cinematic Camera Orbit (Locked subject, camera trajectory)",
+            camera_movement="Gentle Orbital Tracking",
+            motion_intensity=2,
+            duration_seconds=3.5,
+        )
+        self.assertIn("Gentle Orbital Tracking", prompt)
+        self.assertIn("orbital rotation", prompt)
+
+
+class TestDeflickerTemporalSmoothing(unittest.TestCase):
+    def test_deflicker_smoothing_shape_and_bounds(self):
+        """Deflicker should maintain shape, value range, and anchor endpoint frames."""
+        import deploy_wan
+        model = deploy_wan.WanModel()
+        
+        # Create synthetic 5-frame sequence with a single-frame noise spike at t=2
+        np.random.seed(42)
+        frames = np.ones((5, 32, 32, 3), dtype=np.float32) * 0.5
+        frames[2] += 0.3  # Sudden spike
+        
+        smoothed = model.deflicker_temporal_smoothing(frames, strength=0.25)
+        self.assertEqual(smoothed.shape, frames.shape)
+        np.testing.assert_array_equal(smoothed[0], frames[0])
+        np.testing.assert_array_equal(smoothed[-1], frames[-1])
+        # Frame 2 spike should be reduced
+        self.assertLess(smoothed[2].mean(), frames[2].mean())
 
 
 if __name__ == "__main__":
     unittest.main()
+
