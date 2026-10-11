@@ -10,9 +10,15 @@ from PIL import Image
 
 # Import remote inference helpers
 from backend import (
-    run_remote_inference, qwen_image_edit_remote,
+    run_remote_inference, qwen_image_edit_remote, generate_z_image_turbo_remote,
     start_keepalive_thread, record_frontend_heartbeat, set_wan_heartbeat_state,
     set_qwen_heartbeat_state
+)
+from studio_pipeline import (
+    StudioPipeline,
+    ASPECT_RATIO_PRESETS,
+    DEFAULT_OLLAMA_API_KEY,
+    DEFAULT_OLLAMA_MODEL,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -511,6 +517,15 @@ body, .gradio-container {
     margin-bottom: 16px !important;
 }
 
+.studio-panel {
+    background: linear-gradient(145deg, rgba(236,72,153,0.12), rgba(168,85,247,0.08));
+    border: 1px solid rgba(236,72,153,0.35);
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 0 30px rgba(236,72,153,0.1);
+    margin-bottom: 16px !important;
+}
+
 .tool-accordion {
     border-radius: 14px !important;
     margin-bottom: 16px !important;
@@ -675,7 +690,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
     gr.Markdown("## 🎨 Wan 2.2 & Qwen Image Studio", elem_classes="main-title")
     gr.Markdown(
         "**Tool 1 🖼️** — Qwen Image Edit Rapid AIO   |   "
-        "**Tool 2 🎥** — Wan 2.2 Video Generator",
+        "**Tool 2 🎥** — Wan 2.2 Video Generator   |   "
+        "**Tool 3 🎬** — Studio Automated Director",
         elem_classes="subtitle"
     )
 
@@ -915,17 +931,123 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
                     timestamp_last_box = gr.Number(value=0, label="Timestamp Last", visible=False, elem_id="hidden-timestamp-last")
                 file_output = gr.File(label="Download Video")
 
+    # ── Tool 3: Studio Multi-Agent Automated Story & Video Production Studio ────
+    with gr.Accordion("🎬 Tool 3 — Studio Automated Director (Story ➔ Z-Image Turbo ➔ Qwen Multi-Ref ➔ Wan 2.2)", open=True, elem_classes="tool-accordion studio-panel") as studio_accordion:
+        gr.Markdown("### 🎬 Studio Automated Director · End-to-End Multi-Agent Video Pipeline", elem_classes="section-header")
+        gr.Markdown(
+            "1. **Story Architect (Gemma 4: 31B)** generates a structured 30s screenplay and extracts character visual details.\n"
+            "2. **Character Generator (Z-Image Turbo)** synthesizes portraits using an **identical locked seed** for maximum consistency.\n"
+            "3. **Scene Synthesizer (Qwen Image Edit)** transfers character faces, hair, and clothes as multi-references across all scenes.\n"
+            "4. **Scene Animator (Wan 2.2)** animates clips adhering to 4k+1 frame math and CFG 2.0 stability.\n"
+            "5. **Film Assembly (FFmpeg)** concatenates all clips into a seamless final 30-second movie!",
+            elem_classes="step-hint"
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                studio_prompt = gr.Textbox(
+                    label="Story Premise / Idea",
+                    value="Two best friends, Barnaby the fluffy brown bear and Pippin the white rabbit, discover a basket of sweet wild berries in an enchanted forest meadow and learn that sharing brings true happiness.",
+                    placeholder="Describe your story premise or thematic concept...",
+                    lines=3,
+                )
+                with gr.Row():
+                    studio_art_style = gr.Dropdown(
+                        label="Art Style",
+                        choices=[
+                            "2D vibrant cartoon animation",
+                            "Cyberpunk anime aesthetic",
+                            "3D Pixar / Disney animation style",
+                            "Photorealistic cinematic",
+                            "Watercolor children's book illustration"
+                        ],
+                        value="2D vibrant cartoon animation",
+                        scale=1
+                    )
+                    studio_aspect_ratio = gr.Dropdown(
+                        label="Aspect Ratio / Format",
+                        choices=list(ASPECT_RATIO_PRESETS.keys()),
+                        value="9:16 Vertical (Shorts/Reels)",
+                        scale=1
+                    )
+                with gr.Row():
+                    studio_seed = gr.Slider(
+                        minimum=0, maximum=MAX_SEED, step=1, value=42,
+                        label="Character Locked Seed (Ensures Identical Faces)",
+                        scale=2
+                    )
+                    studio_num_scenes = gr.Slider(
+                        minimum=3, maximum=6, step=1, value=5,
+                        label="Scenes Count",
+                        scale=1
+                    )
+                    studio_total_duration = gr.Slider(
+                        minimum=15.0, maximum=30.0, step=2.5, value=30.0,
+                        label="Total Duration (s)",
+                        scale=1
+                    )
+
+                with gr.Accordion("⚙️ AI Model & API Configuration", open=False):
+                    with gr.Row():
+                        studio_ollama_key = gr.Textbox(
+                            label="Ollama Cloud API Key",
+                            value=DEFAULT_OLLAMA_API_KEY,
+                            type="password",
+                            scale=2
+                        )
+                        studio_ollama_model = gr.Textbox(
+                            label="Ollama Model",
+                            value=DEFAULT_OLLAMA_MODEL,
+                            scale=1
+                        )
+
+                studio_run_full_btn = gr.Button("🚀 Run Full Automated 30s Pipeline", variant="primary", size="lg")
+
+                with gr.Accordion("🛠️ Step-by-Step Production Controls", open=False):
+                    gr.Markdown("Inspect or execute each production stage individually:", elem_classes="step-hint")
+                    with gr.Row():
+                        studio_step1_btn = gr.Button("1️⃣ Story & Character Extraction", variant="secondary")
+                        studio_step2_btn = gr.Button("2️⃣ Z-Image Turbo Portraits", variant="secondary")
+                    with gr.Row():
+                        studio_step3_btn = gr.Button("3️⃣ Qwen Scene Keyframes", variant="secondary")
+                        studio_step4_btn = gr.Button("4️⃣ Animate & Stitch Wan 2.2", variant="secondary")
+
+            with gr.Column(scale=1):
+                studio_status = gr.Markdown("### 🟢 Pipeline Ready\nEnter a prompt and click **Run Full Automated 30s Pipeline**.")
+                studio_final_video = gr.Video(label="🎬 Final Assembled 30-Second Movie", autoplay=True, interactive=False)
+
+                with gr.Accordion("👤 Character Reference Portraits (Z-Image Turbo)", open=True):
+                    studio_char_gallery = gr.Gallery(
+                        label="Consistent Character References (Locked Seed)",
+                        columns=[2, 3],
+                        height=200,
+                        object_fit="contain",
+                        preview=True
+                    )
+
+                with gr.Accordion("🖼️ Synthesized Scene Keyframes (Qwen Multi-Reference)", open=True):
+                    studio_scenes_gallery = gr.Gallery(
+                        label="Scene Frames with Anchored Identity",
+                        columns=[2, 3],
+                        height=200,
+                        object_fit="contain",
+                        preview=True
+                    )
+
+                with gr.Accordion("📝 Screenplay & Character JSON Data", open=False):
+                    studio_json_display = gr.JSON(label="Gemma 4: 31B Screenplay Data")
+
     # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
     expand_all_btn.click(
-        fn=lambda: (gr.update(open=True), gr.update(open=True)),
+        fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True)),
         inputs=[],
-        outputs=[qwen_accordion, wan_accordion],
+        outputs=[qwen_accordion, wan_accordion, studio_accordion],
     )
 
     collapse_all_btn.click(
-        fn=lambda: (gr.update(open=False), gr.update(open=False)),
+        fn=lambda: (gr.update(open=False), gr.update(open=False), gr.update(open=False)),
         inputs=[],
-        outputs=[qwen_accordion, wan_accordion],
+        outputs=[qwen_accordion, wan_accordion, studio_accordion],
     )
 
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
@@ -1039,6 +1161,225 @@ with gr.Blocks(title="Wan 2.2 & Qwen Image Studio") as demo:
         fn=extract_frame,
         inputs=[video_output, timestamp_last_box],
         outputs=[last_image_component],
+    )
+
+    # ── Events: Studio Multi-Agent Automated Pipeline ─────────────────────────
+
+    studio_pipeline_state = gr.State(value={})
+
+    def studio_run_full(
+        prompt, art_style, aspect_ratio, seed, num_scenes, duration, api_key, model,
+        progress=gr.Progress(track_tqdm=True)
+    ):
+        pipeline = StudioPipeline(api_key=api_key, model=model)
+
+        def progress_callback(pct, msg):
+            progress(pct, desc=msg)
+
+        try:
+            story_data = pipeline.run_full_pipeline(
+                user_prompt=prompt,
+                shared_seed=int(seed),
+                num_scenes=int(num_scenes),
+                target_duration=float(duration),
+                aspect_ratio=aspect_ratio,
+                art_style=art_style,
+                progress_cb=progress_callback,
+            )
+
+            char_items = [
+                (c["portrait_path"], f"{c.get('name')} (Seed: {c.get('portrait_seed')})")
+                for c in story_data.get("characters", [])
+                if "portrait_path" in c
+            ]
+            scene_items = [
+                (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')}")
+                for s in story_data.get("scenes", [])
+                if "keyframe_path" in s
+            ]
+            final_video = story_data.get("final_movie_path")
+
+            clean_json = {
+                "title": story_data.get("title"),
+                "art_style": story_data.get("art_style"),
+                "theme": story_data.get("theme"),
+                "characters": [
+                    {k: v for k, v in c.items() if k not in ["portrait_pil", "portrait_path"]}
+                    for c in story_data.get("characters", [])
+                ],
+                "scenes": [
+                    {k: v for k, v in s.items() if k not in ["keyframe_pil"]}
+                    for s in story_data.get("scenes", [])
+                ],
+                "final_movie_path": final_video,
+            }
+
+            status_msg = (
+                f"### 🎬 Production Complete!\n\n"
+                f"- **Screenplay:** '{story_data.get('title')}'\n"
+                f"- **Characters Synthesized:** {len(char_items)} (Z-Image Turbo, locked seed {seed})\n"
+                f"- **Scene Keyframes:** {len(scene_items)} (Qwen Multi-Reference Transfer)\n"
+                f"- **Final 30s Movie:** `{pathlib.Path(final_video).name if final_video else 'N/A'}`"
+            )
+            return final_video, char_items, scene_items, clean_json, status_msg, story_data
+        except Exception as e:
+            err_msg = f"### ❌ Studio Production Error\n`{str(e)}`"
+            return None, [], [], {}, err_msg, {}
+
+    def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, progress=gr.Progress(track_tqdm=True)):
+        pipeline = StudioPipeline(api_key=api_key, model=model)
+
+        def progress_callback(pct, msg):
+            progress(pct, desc=msg)
+
+        try:
+            story_data = pipeline.generate_story_and_characters(
+                prompt=prompt,
+                num_scenes=int(num_scenes),
+                target_duration=float(duration),
+                art_style=art_style,
+                progress_cb=progress_callback,
+            )
+            clean_json = {
+                "title": story_data.get("title"),
+                "art_style": story_data.get("art_style"),
+                "theme": story_data.get("theme"),
+                "characters": story_data.get("characters", []),
+                "scenes": story_data.get("scenes", []),
+            }
+            status_msg = (
+                f"### 📝 Step 1 Complete: Screenplay & Characters Generated\n"
+                f"Extracted {len(story_data.get('characters', []))} character(s) and {len(story_data.get('scenes', []))} scene(s)."
+            )
+            return clean_json, status_msg, story_data
+        except Exception as e:
+            return {}, f"### ❌ Step 1 Error\n`{str(e)}`", {}
+
+    def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
+        if not current_state or "characters" not in current_state:
+            return [], "### ⚠️ Please run Step 1 (Story & Characters) first before generating character portraits.", current_state
+        pipeline = StudioPipeline(api_key=api_key, model=model)
+
+        def progress_callback(pct, msg):
+            progress(pct, desc=msg)
+
+        try:
+            chars = pipeline.generate_character_portraits(
+                characters=current_state["characters"],
+                shared_seed=int(seed),
+                progress_cb=progress_callback,
+            )
+            current_state["characters"] = chars
+            char_items = [
+                (c["portrait_path"], f"{c.get('name')} (Seed: {c.get('portrait_seed')})")
+                for c in chars
+                if "portrait_path" in c
+            ]
+            status_msg = (
+                f"### 👤 Step 2 Complete: {len(chars)} Character Portraits Synthesized\n"
+                f"All characters locked to seed `{seed}`."
+            )
+            return char_items, status_msg, current_state
+        except Exception as e:
+            return [], f"### ❌ Step 2 Error\n`{str(e)}`", current_state
+
+    def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
+        if not current_state or "characters" not in current_state or "scenes" not in current_state:
+            return [], "### ⚠️ Please run Step 1 & Step 2 first before generating scene keyframes.", current_state
+        pipeline = StudioPipeline(api_key=api_key, model=model)
+
+        def progress_callback(pct, msg):
+            progress(pct, desc=msg)
+
+        try:
+            scenes = pipeline.generate_scene_keyframes(
+                scenes=current_state["scenes"],
+                characters=current_state["characters"],
+                aspect_ratio=aspect_ratio,
+                shared_seed=int(seed),
+                progress_cb=progress_callback,
+            )
+            current_state["scenes"] = scenes
+            scene_items = [
+                (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')}")
+                for s in scenes
+                if "keyframe_path" in s
+            ]
+            status_msg = (
+                f"### 🖼️ Step 3 Complete: {len(scenes)} Scene Keyframes Synthesized\n"
+                f"Character identities locked using multi-reference transfer."
+            )
+            return scene_items, status_msg, current_state
+        except Exception as e:
+            return [], f"### ❌ Step 3 Error\n`{str(e)}`", current_state
+
+    def studio_run_step4(aspect_ratio, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
+        if not current_state or "scenes" not in current_state:
+            return None, "### ⚠️ Please run Step 3 (Scene Keyframes) first before animating and stitching.", current_state
+        pipeline = StudioPipeline(api_key=api_key, model=model)
+
+        def progress_callback(pct, msg):
+            progress(pct, desc=msg)
+
+        try:
+            clips = pipeline.generate_scene_videos(
+                scenes=current_state["scenes"],
+                aspect_ratio=aspect_ratio,
+                progress_cb=progress_callback,
+            )
+            current_state["clip_paths"] = clips
+            final_movie = pipeline.stitch_clips(
+                clip_paths=clips,
+                movie_title=current_state.get("title", "Studio_Movie"),
+                progress_cb=progress_callback,
+            )
+            current_state["final_movie_path"] = final_movie
+            status_msg = (
+                f"### 🎬 Step 4 Complete: Movie Stitched Successfully!\n"
+                f"Final file: `{pathlib.Path(final_movie).name}`."
+            )
+            return final_movie, status_msg, current_state
+        except Exception as e:
+            return None, f"### ❌ Step 4 Error\n`{str(e)}`", current_state
+
+    studio_run_full_btn.click(
+        fn=studio_run_full,
+        inputs=[
+            studio_prompt, studio_art_style, studio_aspect_ratio,
+            studio_seed, studio_num_scenes, studio_total_duration,
+            studio_ollama_key, studio_ollama_model
+        ],
+        outputs=[
+            studio_final_video, studio_char_gallery, studio_scenes_gallery,
+            studio_json_display, studio_status, studio_pipeline_state
+        ]
+    )
+
+    studio_step1_btn.click(
+        fn=studio_run_step1,
+        inputs=[
+            studio_prompt, studio_art_style, studio_num_scenes,
+            studio_total_duration, studio_ollama_key, studio_ollama_model
+        ],
+        outputs=[studio_json_display, studio_status, studio_pipeline_state]
+    )
+
+    studio_step2_btn.click(
+        fn=studio_run_step2,
+        inputs=[studio_seed, studio_ollama_key, studio_ollama_model, studio_pipeline_state],
+        outputs=[studio_char_gallery, studio_status, studio_pipeline_state]
+    )
+
+    studio_step3_btn.click(
+        fn=studio_run_step3,
+        inputs=[studio_aspect_ratio, studio_seed, studio_ollama_key, studio_ollama_model, studio_pipeline_state],
+        outputs=[studio_scenes_gallery, studio_status, studio_pipeline_state]
+    )
+
+    studio_step4_btn.click(
+        fn=studio_run_step4,
+        inputs=[studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state],
+        outputs=[studio_final_video, studio_status, studio_pipeline_state]
     )
 
     # ── Heartbeat Toggles ────────────────────────────────────────────────────

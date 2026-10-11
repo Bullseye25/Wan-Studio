@@ -8,13 +8,15 @@ import time
 # Global cached model references to avoid redundant gRPC metadata lookups
 _wan_model_instance = None
 _qwen_model_instance = None
+_z_image_model_instance = None
 
 
 def reset_cached_models():
     """Resets cached model instances (useful for testing and fresh reconnects)."""
-    global _wan_model_instance, _qwen_model_instance
+    global _wan_model_instance, _qwen_model_instance, _z_image_model_instance
     _wan_model_instance = None
     _qwen_model_instance = None
+    _z_image_model_instance = None
 
 
 def get_wan_model(force_refresh: bool = False):
@@ -31,6 +33,23 @@ def get_qwen_model(force_refresh: bool = False):
         model_cls = modal.Cls.from_name("qwen-image-backend", "QwenImageEditModel")
         _qwen_model_instance = model_cls()
     return _qwen_model_instance
+
+
+def get_z_image_model(force_refresh: bool = False):
+    global _z_image_model_instance
+    if _z_image_model_instance is None or force_refresh:
+        for app_name, cls_name in [("adaab-z-image-turbo", "ZImageTurboModel"), ("soda-z-image-turbo", "ZImageTurboModel")]:
+            try:
+                model_cls = modal.Cls.from_name(app_name, cls_name)
+                _z_image_model_instance = model_cls()
+                break
+            except Exception:
+                continue
+        if _z_image_model_instance is None:
+            # Fallback direct lookup
+            model_cls = modal.Cls.from_name("adaab-z-image-turbo", "ZImageTurboModel")
+            _z_image_model_instance = model_cls()
+    return _z_image_model_instance
 
 
 def run_remote_inference(
@@ -285,6 +304,92 @@ def qwen_image_edit_remote(
     record_qwen_activity()
 
     return result_bytes_list
+
+
+def generate_z_image_turbo_remote(
+    prompt: str,
+    seed: int = 42,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 9,
+    save_dir: str = None,
+    filename_prefix: str = "char"
+):
+    """
+    Invokes Z-Image Turbo on Modal (adaab-z-image-turbo / soda-z-image-turbo) to synthesize
+    consistent, high-fidelity character reference portraits with locked seed control.
+    Returns (PIL.Image.Image, local_file_path).
+    """
+    import io
+    import time
+    import base64
+    from PIL import Image
+
+    max_retries = 2
+    model_instance = None
+    for attempt in range(max_retries + 1):
+        try:
+            model_instance = get_z_image_model(force_refresh=(attempt > 0))
+            break
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError(
+                f"Could not connect to Z-Image Turbo backend on Modal. Error: {e}"
+            )
+
+    print(f"[local-backend] Calling Z-Image Turbo (seed={seed}, steps={steps}, prompt='{prompt[:60]}...')...")
+    res = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                model_instance = get_z_image_model(force_refresh=True)
+            res = model_instance.generate.remote(
+                prompt=prompt,
+                height=int(height),
+                width=int(width),
+                num_inference_steps=int(steps),
+                seed=int(seed)
+            )
+            break
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"[local-backend] Transient error on Z-Image Turbo ({e}), retrying...")
+                time.sleep(1.5)
+                continue
+            raise e
+
+    # Extract image bytes
+    if isinstance(res, dict) and "image_base64" in res:
+        b64_data = res["image_base64"]
+        if "," in b64_data:
+            b64_data = b64_data.split(",", 1)[1]
+        img_bytes = base64.b64decode(b64_data)
+    elif isinstance(res, (bytes, bytearray)):
+        img_bytes = bytes(res)
+    elif hasattr(res, "save"):
+        buf = io.BytesIO()
+        res.save(buf, format="PNG")
+        img_bytes = buf.getvalue()
+    else:
+        raise ValueError(f"Unexpected response type from Z-Image Turbo: {type(res)}")
+
+    pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+    # Determine local destination
+    if save_dir is None:
+        target_dir = pathlib.Path(__file__).parent / "outputs" / "studio" / "characters"
+    else:
+        target_dir = pathlib.Path(save_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = int(time.time())
+    file_path = target_dir / f"{filename_prefix}_{seed}_{timestamp}.png"
+    pil_img.save(file_path, format="PNG")
+    print(f"[local-backend] Saved Z-Image Turbo portrait to: {file_path}")
+
+    return pil_img, str(file_path)
 
 
 # ─── Heartbeat & Cost-Effective Keep-Alive State ─────────────────────────────
