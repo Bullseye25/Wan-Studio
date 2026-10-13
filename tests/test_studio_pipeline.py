@@ -1225,6 +1225,41 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertIn("Modify the characters in Image 1 into their dynamic ending pose at t=5.0s", directed)
         self.assertIn("Heroes ready their weapons in combat stance", directed)
 
+    def test_cinematography_vault_blueprint_retrieval(self):
+        """Verifies semantic & rule-based retrieval of lens optics, rigs, and reactive physics."""
+        from cinematography_vault import retrieve_cinematography_blueprint, format_period_sequenced_wan_prompt
+
+        # Test forest environment & Steadicam matching
+        bp_forest = retrieve_cinematography_blueprint(
+            scenario="Knight rides horse through the pine forest grove",
+            camera_movement="Steadicam tracking",
+            art_style="Cinematic",
+        )
+        self.assertEqual(bp_forest["lens"], "35mm wide-angle cinema lens")
+        self.assertIn("Leaves rustle", bp_forest["reactive_physics"])
+
+        # Test magic and orbital tracking matching
+        bp_magic = retrieve_cinematography_blueprint(
+            scenario="Mage casts glowing spell in ancient stone room",
+            camera_movement="orbital tracking shot",
+        )
+        self.assertEqual(bp_magic["lens"], "85mm telephoto portrait lens")
+        self.assertIn("Luminous energy", bp_magic["reactive_physics"])
+
+        # Test format_period_sequenced_wan_prompt
+        prompt = format_period_sequenced_wan_prompt(
+            camera_directive="Slow push-in on 50mm lens",
+            timeline_steps=["Hero draws sword", "Hero steps forward", "Hero settles in stance"],
+            environment_physics="Pine needles scatter underfoot",
+            identity_anchors="Hero silver armor",
+            art_style="2D Anime",
+        )
+        self.assertIn("Slow push-in on 50mm lens.", prompt)
+        self.assertIn("Hero draws sword.", prompt)
+        self.assertIn("Pine needles scatter underfoot.", prompt)
+        self.assertIn("Hero silver armor", prompt)
+        self.assertIn("Rigid background geometry", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

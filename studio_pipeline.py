@@ -34,6 +34,7 @@ from backend import (
     run_remote_inference,
     DEFAULT_NEGATIVE_PROMPT,
 )
+from cinematography_vault import retrieve_cinematography_blueprint
 
 # ── Defaults & Constants ──────────────────────────────────────────────────────
 
@@ -1267,21 +1268,29 @@ class StudioPipeline:
         b64_start = self._keyframe_b64(scene) if include_image else None
         b64_end = self._last_keyframe_b64(scene) if include_image else None
         has_both_frames = bool(b64_start and b64_end)
+        blueprint = retrieve_cinematography_blueprint(
+            scenario=scene.get("scenario", ""),
+            camera_movement=scene.get("camera_movement", ""),
+            art_style=story_meta.get("art_style", ""),
+        )
 
         system = (
-            "You are the animation director for a First-Last-Frame image-to-video model (Wan 2.2). "
+            "You are the expert animation director for a First-Last-Frame image-to-video model (Wan 2.2). "
             + (
                 f"You receive BOTH the FIRST FRAME (t=0.0s) and the LAST FRAME (t={duration:.1f}s) of a single "
                 f"continuous {duration:.1f}-second shot and must plan the exact motion bridge between them.\n"
                 if has_both_frames
                 else f"You receive the FIRST FRAME of a single continuous {duration:.1f}-second shot and must plan how it moves.\n"
             )
-            + "Rules for good Wan 2.2 results:\n"
+            + "Cinematography rules for world-class Wan 2.2 results:\n"
             "- One clear, physically plausible action per shot; motion must start from the First Frame pose and "
             "arrive naturally at the Last Frame pose.\n"
             "- Describe concrete body/face motion (e.g. 'raises left paw and offers the berry'), not abstract emotions.\n"
             "- Never introduce new characters or objects that are not in the frames; never cut or change location.\n"
-            "- Prefer ONE camera move; static or slow moves keep faces stable. Fast action needs higher intensity.\n"
+            "- Lens & Camera Rig: Choose appropriate lens optics (e.g. 35mm wide for travel, 50mm for dialogue, 85mm for closeups) and camera rig (Steadicam tracking, slow push-in, orbital arc, locked tripod).\n"
+            "- Period Sequencing: Formulate the 3-phase timeline as clear chronological steps separated by periods (.) so Wan sequences actions over time rather than pooling them simultaneously.\n"
+            "- Reactive Physics: Ground the character with environmental reactions (e.g. dust puffs underfoot, foliage swaying, dynamic light sweeps).\n"
+            "- Delta-Only Prompting: Focus strictly on the physical vector of change; do not repeat static appearance details already present in the frame.\n"
             "Output ONLY valid JSON, no markdown:\n"
             "{\n"
             '  "shot_type": "e.g. medium two-shot / close-up / wide establishing",\n'
@@ -1312,6 +1321,7 @@ class StudioPipeline:
             f"{end_prompt_note}"
             f"Draft motion from writer: {scene.get('wan_motion_prompt', '')}\n"
             f"Draft camera: {scene.get('camera_movement', '')}\n"
+            f"Cinematography Blueprint: lens={blueprint['lens']}; suggested_rig={blueprint['camera_movement_directive']}; physics={blueprint['reactive_physics']}\n"
             f"Previous beat: {prev_beat}\nNext beat: {next_beat}\n"
             f"Cast in frame:\n{cast_desc}\n"
             + (
@@ -1346,6 +1356,7 @@ class StudioPipeline:
         """
         Validates/clamps the Director's JSON and compiles it into the exact Wan 2.2 prompt,
         negative prompt and sampler parameters. Works with an empty dict (deterministic fallback).
+        Integrates the Cinematography Knowledge Vault for period sequencing and reactive physics.
         """
         story_meta = story_meta or {}
         raw = raw if isinstance(raw, dict) else {}
@@ -1377,11 +1388,20 @@ class StudioPipeline:
         while len(timeline) < 3:
             timeline.append(defaults[len(timeline)])
 
+        blueprint = retrieve_cinematography_blueprint(
+            scenario=action or scene.get("scenario", ""),
+            camera_movement=camera,
+            art_style=story_meta.get("art_style", ""),
+        )
+
         p1, p2 = round(duration * 0.3, 1), round(duration * 0.8, 1)
+        t0 = timeline[0].strip().rstrip(".")
+        t1 = timeline[1].strip().rstrip(".")
+        t2 = timeline[2].strip().rstrip(".")
         phases = (
-            f"Phase 1 (0.0s-{p1}s): {timeline[0]}; "
-            f"Phase 2 ({p1}s-{p2}s): {timeline[1]}; "
-            f"Phase 3 ({p2}s-{duration:.1f}s): {timeline[2]}."
+            f"Phase 1 (0.0s-{p1}s): {t0}. "
+            f"Phase 2 ({p1}s-{p2}s): {t1}. "
+            f"Phase 3 ({p2}s-{duration:.1f}s): {t2}."
         )
 
         cast_names = ", ".join(c.get("name", "") for c in cast if c.get("name"))
@@ -1391,7 +1411,10 @@ class StudioPipeline:
                 else "subjects keep identical appearance"),
             220,
         )
-        env = _trim(raw.get("environment_motion") or "subtle ambient motion in the background", 140)
+        env = _trim(raw.get("environment_motion") or "", 140)
+        if not env or env == "subtle ambient motion in the background":
+            env = blueprint.get("reactive_physics", "subtle ambient motion in the background")
+
         core = _trim(raw.get("wan_prompt") or scene.get("wan_motion_prompt") or action, 300)
         style = _trim(story_meta.get("art_style") or "", 80)
 
@@ -1412,6 +1435,8 @@ class StudioPipeline:
             "timeline": timeline,
             "environment_motion": env,
             "identity_anchors": anchors,
+            "lens": blueprint.get("lens", "50mm prime cinema lens"),
+            "reactive_physics": blueprint.get("reactive_physics", ""),
             "wan_prompt": wan_prompt,
             "negative_prompt": negative,
             "guidance_scale": cfg,
