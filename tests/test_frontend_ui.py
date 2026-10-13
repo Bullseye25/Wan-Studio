@@ -256,6 +256,23 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         backend.activate_studio_phase(1, trigger_warmup=False)
         self.temp_dir.cleanup()
 
+    @patch("app.studio_run_step1")
+    def test_ui_step1_unpacks_and_updates_all_fields(self, mock_step1):
+        mock_step1.return_value = (
+            {"title": "Starry Rescue", "scenes": self.sample_state["scenes"], "characters": self.sample_state["characters"]},
+            "Step 1 Complete",
+            self.sample_state,
+        )
+        ui_step1_fn = None
+        for fn_obj in app.demo.fns.values():
+            if getattr(fn_obj, "fn", None) and fn_obj.fn.__name__ == "_ui_step1":
+                ui_step1_fn = fn_obj.fn
+                break
+        self.assertIsNotNone(ui_step1_fn)
+        res = ui_step1_fn("Prompt", "2D cartoon", 1, 3.5, "key", "model", 111, 222, 333)
+        self.assertEqual(len(res), 30)
+        self.assertEqual(res[3], "Starry Rescue")
+
     @patch("backend.ping_all_active_backends")
     def test_phase1_validation_updates_title_and_switches_tab(self, mock_ping):
         state = {"title": "Old Title", "characters": [], "scenes": []}

@@ -2166,9 +2166,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img = studio_load_character_fields(
             first_char, state, default_seed=z_seed
         )
-        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
-            first_scene, state, default_seed=q_seed
-        )
+        (
+            s_title, s_scen, s_qprompt, s_cids, s_seed, s_img,
+            s_qendprompt, s_end_img, s_end_seed, s_delta,
+        ) = studio_load_scene_fields_dual(first_scene, state, default_seed=q_seed)
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(
             first_scene, state, default_seed=w_seed
         )
@@ -2180,7 +2181,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             gr.update(choices=char_opts, value=first_char),
             c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img,
             gr.update(choices=scene_opts, value=first_scene),
-            s_title, s_scen, s_qprompt, s_qendprompt, s_cids, s_seed, s_img, s_end_img,
+            s_title, s_scen, s_qprompt, s_qendprompt, s_cids, s_seed, s_img, s_end_img, s_end_seed, s_delta,
             gr.update(choices=scene_opts, value=first_scene),
             v_mot, v_cam, v_wprompt, v_seed, v_vid,
         )
@@ -2203,6 +2204,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
             studio_scene_end_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
             studio_scene_preview, studio_scene_end_preview,
+            studio_scene_end_seed_edit, studio_scene_delta_badge,
             studio_clip_selector,
             studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
             studio_clip_seed_edit, studio_clip_preview,
