@@ -318,9 +318,8 @@ class StudioPipeline:
             "Extract exact character visual details (face, hair, clothing, signature traits) so every image model "
             "renders them identically. Keep character designs fixed across all scenes.\n"
             "For every scene, write BOTH:\n"
-            "- `qwen_scene_prompt`: The STARTING keyframe composition & character poses at t=0.0s.\n"
-            "- `qwen_end_scene_prompt`: The ENDING keyframe pose & expression at t=5.0s in the EXACT SAME environment, "
-            "lighting, and camera framing after completing the shot's action.\n"
+            "- `qwen_scene_prompt`: The STARTING keyframe composition & character poses at t=0.0s (e.g., character begins walking or standing).\n"
+            "- `qwen_end_scene_prompt`: A DISTINCT, VISIBLY DIFFERENT ENDING keyframe pose at t=5.0s (e.g., character has stopped, drawn weapon, raised staff to cast glowing magic, knelt down, turned around, or reached destination). MUST have a clear physical action and limb position delta from the start frame—never the same pose repeated!\n"
             "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
             "{\n"
             '  "title": "Short Film Title",\n'
@@ -346,7 +345,7 @@ class StudioPipeline:
             f'      "duration_seconds": {scene_duration},\n'
             '      "scenario": "Story beat: what happens in this single shot",\n'
             '      "qwen_scene_prompt": "FIRST FRAME (t=0s) prompt: environment, composition, character poses at the START of the shot",\n'
-            '      "qwen_end_scene_prompt": "LAST FRAME (t=5s) prompt: same environment and lighting, character poses/expressions at the END of the shot",\n'
+            '      "qwen_end_scene_prompt": "LAST FRAME (t=5s) prompt: same environment and lighting, but VISIBLY ADVANCED character poses/actions/expressions at the END of the shot",\n'
             '      "wan_motion_prompt": "Draft motion description bridging the first frame to the last frame",\n'
             '      "camera_movement": "e.g. Slow Cinematic Push-In / Static Tripod Shot",\n'
             '      "character_ids": ["char_1"]\n'
@@ -447,10 +446,10 @@ class StudioPipeline:
             s.setdefault("title", f"Scene {i+1}")
             s.setdefault("scenario", s.get("qwen_scene_prompt", ""))
             s.setdefault("qwen_scene_prompt", s.get("scenario", prompt))
-            if not s.get("qwen_end_scene_prompt"):
-                motion_beat = s.get("wan_motion_prompt") or s.get("scenario") or "completing the shot action"
+            if not s.get("qwen_end_scene_prompt") or s.get("qwen_end_scene_prompt") == s.get("qwen_scene_prompt"):
+                motion_beat = s.get("wan_motion_prompt") or s.get("scenario") or "completing the dramatic action"
                 s["qwen_end_scene_prompt"] = (
-                    f"{s['qwen_scene_prompt']}. Ending pose at the end of the 5-second shot after: {motion_beat}"
+                    f"Characters have completed the action: {motion_beat}. Distinct new ending pose, altered arm/body stance, focused expression. Visible physical progression from start frame."
                 )
             ids = s.get("character_ids")
             if isinstance(ids, str):
@@ -603,11 +602,15 @@ class StudioPipeline:
         which_frame: str = "both",
         end_seed: Optional[int] = None,
         color_match_end: bool = True,
+        story_meta: Optional[Dict[str, Any]] = None,
+        art_style: str = "",
+        direct_end_frame: bool = True,
     ) -> Dict[str, Any]:
         """
         Generates the Starting Frame (t=0s) and/or Ending Frame (t=5s) for a scene using Qwen Image Edit.
         - Start Frame (`keyframe_pil` / `keyframe_path`): Conditioned on character reference portraits + `qwen_scene_prompt`.
-        - End Frame (`last_keyframe_pil` / `last_keyframe_path`): Anchor-chained onto the Start Frame as `base_image`
+        - End Frame (`last_keyframe_pil` / `last_keyframe_path`): Directed by Gemma 4: 31B Vision on the Start Frame
+          for an explicit, high-delta pose progression, then anchor-chained onto the Start Frame as `base_image`
           plus character reference portraits + `qwen_end_scene_prompt`, then normalized in CIE-Lab space via
           `match_color_histogram_lab` so background, lighting, and character identity remain 100% locked.
         """
@@ -698,14 +701,28 @@ class StudioPipeline:
             scene_entry["keyframe_path"] = str(keyframe_path)
             scene_entry["keyframe_seed"] = use_seed
 
-        # ── 2. Generate Ending Frame (t = 5.0s, Anchor-Chained on Start Frame) ─
+        # ── 2. Generate Ending Frame (t = 5.0s, Directed & Anchor-Chained on Start Frame) ─
         if should_gen_end and which in ("both", "end"):
-            end_raw = (
-                scene.get("qwen_end_scene_prompt")
-                or scene.get("wan_motion_prompt")
-                or f"{scene_prompt}, characters in the final pose at the end of the 5-second shot"
-            )
-            scene_entry.setdefault("qwen_end_scene_prompt", end_raw)
+            end_raw = scene.get("qwen_end_scene_prompt")
+            # If direct_end_frame is True or end_raw is missing / redundant, consult Gemma Director
+            if (direct_end_frame or not end_raw or end_raw == scene_prompt) and keyframe_pil is not None:
+                directed_end = self.direct_scene_end_frame_with_gemma(
+                    scene=scene_entry,
+                    keyframe_pil=keyframe_pil,
+                    characters=characters,
+                    story_meta=story_meta,
+                    art_style=art_style,
+                )
+                if directed_end:
+                    end_raw = directed_end
+            if not end_raw:
+                motion_beat = scene.get("wan_motion_prompt") or scene.get("scenario") or "dynamic action completion"
+                end_raw = (
+                    f"Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: "
+                    f"Characters have completed the action: {motion_beat}. Altered arm, hand, and body stance into dynamic final pose, "
+                    f"focused expression. Keep background environment, lighting, and outfits identical to Image 1, but visibly advance their body pose."
+                )
+            scene_entry["qwen_end_scene_prompt"] = end_raw
 
             # Anchor on Start Frame (`keyframe_pil`) as Image 1 + up to 2 character portraits as Image 2/3
             char_refs_for_end = [rc["portrait_pil"] for rc in ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)]]
@@ -713,13 +730,20 @@ class StudioPipeline:
                 f"{rc.get('name', 'character')} matches character sheet in image {i+2}"
                 for i, rc in enumerate(ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)])
             )
-            end_refined_prompt = (
-                f"Image 1 is the exact starting frame of this shot. Keep the EXACT same background environment, "
-                f"camera framing, lighting, and character outfits/faces from Image 1, and transition the "
-                f"character pose and expression to the ending state at the end of the 5-second shot: {end_raw}. "
-                + (f"{char_ref_mapping}. " if char_ref_mapping else "")
-                + "Full-frame cinematic composition, identical background and character identity, 4k"
-            )
+            if "Image 1" in end_raw:
+                end_refined_prompt = (
+                    f"{end_raw}. "
+                    + (f"{char_ref_mapping}. " if char_ref_mapping else "")
+                    + "Full-frame cinematic composition, identical background and character identity, 4k"
+                )
+            else:
+                end_refined_prompt = (
+                    f"Image 1 is the starting frame of this 5-second animated shot. Modify the characters in Image 1 "
+                    f"into their dynamic ending pose at t=5.0s: {end_raw}. "
+                    + (f"{char_ref_mapping}. " if char_ref_mapping else "")
+                    + "Keep the exact same background environment, trees, path, lighting, and character outfits from Image 1, "
+                    f"but visibly advance their physical body stance and action into the final pose. 4k"
+                )
 
             print(f"[StudioPipeline] Generating Qwen END keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_end_seed})...")
             end_results = qwen_image_edit_remote(
@@ -729,7 +753,7 @@ class StudioPipeline:
                 negative_prompt=DEFAULT_NEGATIVE_PROMPT,
                 seed=use_end_seed,
                 steps=20,
-                true_cfg_scale=4.0,
+                true_cfg_scale=5.0,
                 guidance_scale=1.0,
                 num_images=1,
                 custom_width=qwen_w,
@@ -749,6 +773,95 @@ class StudioPipeline:
             scene_entry["last_keyframe_seed"] = use_end_seed
 
         return scene_entry
+
+    def direct_scene_end_frame_with_gemma(
+        self,
+        scene: Dict[str, Any],
+        keyframe_pil: Image.Image,
+        characters: List[Dict[str, Any]],
+        story_meta: Optional[Dict[str, Any]] = None,
+        art_style: str = "",
+        use_vision: bool = True,
+    ) -> Optional[str]:
+        """
+        Consults Gemma 4: 31B Vision Director to inspect the generated START keyframe (t=0.0s)
+        and command an explicit, high-delta, dynamic ENDING pose (t=5.0s) for Qwen Image Edit.
+        Guarantees that the end frame has a visible, cinematic action progression instead of
+        being stagnant or identical to the starting frame.
+        """
+        scene_num = scene.get("scene_number", 1)
+        title = scene.get("title", "")
+        scenario = scene.get("scenario") or scene.get("qwen_scene_prompt", "")
+        wan_motion = scene.get("wan_motion_prompt", "")
+        char_map = {c.get("id"): c for c in (characters or [])}
+        cast = [char_map[cid] for cid in scene.get("character_ids", []) if cid in char_map]
+        if not cast and characters:
+            cast = characters[:2]
+        cast_desc = ", ".join(f"{c.get('name', 'Hero')} ({c.get('clothing', '')})" for c in cast) or "characters in image"
+
+        system_prompt = (
+            "You are an expert Animation Director directing the KEYFRAME POSE PROGRESSION of a 5-second continuous animated shot.\n"
+            "You are inspecting Image 1: the STARTING KEYFRAME (t = 0.0s) of this shot.\n"
+            "Your critical task is to direct the character(s) into their dynamic, visibly distinct ENDING POSE (t = 5.0s).\n\n"
+            "CRITICAL DIRECTORIAL RULES:\n"
+            "1. DO NOT keep the characters in the same static stance or walking pose. The audience must see a clear, visible physical action completion!\n"
+            "2. Describe specific physical changes: arms, hands, legs, head angle, weapons, props, and facial expressions "
+            "(e.g. stepping forward into a deep combat stance, drawing or raising weapon/shield, casting glowing magic with raised staff, "
+            "kneeling to touch or examine an object, turning around to face camera, pointing ahead, reacting with surprise).\n"
+            "3. The background environment, trees, path, lighting, and character outfits/colors must remain identical to Image 1, "
+            "but the character body poses, limbs, and actions MUST visibly advance.\n"
+            "4. Output ONLY valid JSON in this schema:\n"
+            "{\n"
+            '  "action_summary": "1-sentence summary of the action that occurred over 5 seconds",\n'
+            '  "qwen_end_frame_prompt": "Imperative edit prompt for Qwen Image Edit: \'Modify the character(s) in Image 1 into their dynamic ending pose at t=5.0s: [exact physical action, new arm and leg positions]. Keep the exact same background environment, lighting, art style, and outfits from Image 1, but visibly advance their body pose into this new action.\'"\n'
+            "}"
+        )
+
+        user_text = (
+            f"Shot {scene_num}: '{title}' | Style: {art_style}\n"
+            f"Scenario / Shot Action: {scenario}\n"
+            f"Intended 5s Motion: {wan_motion}\n"
+            f"Characters in Shot: {cast_desc}\n"
+            f"Analyze Image 1 (the start frame) and direct the exact ending pose at t=5.0s with a clear, visible action delta."
+        )
+
+        b64_start = None
+        if use_vision and keyframe_pil is not None:
+            try:
+                img_thumb = keyframe_pil.copy()
+                img_thumb.thumbnail((768, 768))
+                buf = io.BytesIO()
+                img_thumb.convert("RGB").save(buf, format="JPEG", quality=85)
+                b64_start = base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception as e:
+                print(f"[StudioPipeline] Failed to encode start keyframe thumbnail for Gemma Vision: {e}")
+
+        content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
+        if b64_start:
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_start}"}})
+
+        try:
+            raw_text = self._chat_completion(
+                [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
+                max_tokens=600,
+                temperature=0.5,
+                max_retries=1,
+            )
+            parsed = self._parse_json_safely(raw_text)
+            end_prompt = parsed.get("qwen_end_frame_prompt")
+            if end_prompt and len(end_prompt.strip()) > 20:
+                print(f"[StudioPipeline] Gemma Director directed Scene {scene_num} End Frame: '{end_prompt[:60]}...'")
+                return end_prompt.strip()
+        except Exception as e:
+            print(f"[StudioPipeline] Gemma Director end frame direction note for scene {scene_num}: {e}")
+
+        # Fallback if Vision/LLM fails: deterministic high-delta prompt
+        motion_beat = wan_motion or scenario or "dynamic action completion"
+        return (
+            f"Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: "
+            f"Characters have completed the action: {motion_beat}. Altered arm, hand, and body stance into dynamic final pose, "
+            f"focused expression. Keep background environment, lighting, and outfits identical to Image 1, but visibly advance their body pose."
+        )
 
     def verify_scene_frames_with_vlm(
         self,
@@ -849,6 +962,7 @@ class StudioPipeline:
         chain_previous_end_frame: bool = False,
         auto_qa_retry: bool = False,
         art_style: str = "",
+        direct_end_frame: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -856,6 +970,8 @@ class StudioPipeline:
         Uses the SAME LOCKED SEED (`shared_seed` / `qwen_seed`) across all scenes so lighting,
         palette, and rendering grain stay consistent, while transferring character faces and
         outfits via multi-reference conditioning.
+        If `direct_end_frame=True`, Gemma 4: 31B Vision inspects the Start Frame (t=0.0s) and
+        directs a high-delta dynamic action progression for the End Frame (t=5.0s).
         If `chain_previous_end_frame=True`, Scene N+1's Start Frame is directly chained from
         Scene N's End Frame for seamless zero-degradation shot extensions.
         """
@@ -896,6 +1012,8 @@ class StudioPipeline:
                     generate_end_frame=True,
                     which_frame="end",
                     end_seed=locked_qwen_seed,
+                    art_style=art_style,
+                    direct_end_frame=direct_end_frame,
                 )
             else:
                 scene_entry = self._synthesize_single_scene_frame(
@@ -906,6 +1024,8 @@ class StudioPipeline:
                     generate_end_frame=generate_end_frame,
                     which_frame="both",
                     end_seed=locked_qwen_seed,
+                    art_style=art_style,
+                    direct_end_frame=direct_end_frame,
                 )
 
             if auto_qa_retry:
@@ -928,6 +1048,8 @@ class StudioPipeline:
                         generate_end_frame=generate_end_frame,
                         which_frame="both",
                         end_seed=retry_seed,
+                        art_style=art_style,
+                        direct_end_frame=direct_end_frame,
                     )
                     self.verify_scene_frames_with_vlm(scene_entry, characters, art_style=art_style)
 
@@ -951,6 +1073,7 @@ class StudioPipeline:
         end_seed: Optional[int] = None,
         which_frame: str = "both",
         generate_end_frame: Optional[bool] = None,
+        direct_end_frame: bool = False,
         auto_qa_retry: bool = False,
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         progress_cb: Optional[Callable[[float, str], None]] = None,
@@ -996,6 +1119,8 @@ class StudioPipeline:
             generate_end_frame=generate_end_frame,
             which_frame=which_frame,
             end_seed=use_end_seed,
+            art_style=story_data.get("art_style", ""),
+            direct_end_frame=direct_end_frame,
         )
 
         if auto_qa_retry:
@@ -1018,6 +1143,8 @@ class StudioPipeline:
                     generate_end_frame=generate_end_frame,
                     which_frame=which_frame,
                     end_seed=retry_seed,
+                    art_style=story_data.get("art_style", ""),
+                    direct_end_frame=direct_end_frame,
                 )
                 self.verify_scene_frames_with_vlm(
                     updated_scene,

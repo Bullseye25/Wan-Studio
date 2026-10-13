@@ -82,6 +82,7 @@ class TestGradioFrontendStructure(unittest.TestCase):
             "_on_scene_gallery_select",
             "studio_load_scene_fields",
             "studio_save_scene_text_edits",
+            "studio_direct_single_scene_end_frame",
             "studio_redo_single_scene",
             "_ui_director",
             "_ui_step4",
@@ -402,6 +403,25 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         self.assertIn("PASSED", status_qa)
         self.assertIn("9/10", status_qa)
         self.assertEqual(state_qa["scenes"][0]["qa_report"]["score"], 9)
+
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_phase3_direct_single_scene_end_frame_ui_handler(self, mock_chat):
+        # Empty state guard
+        empty_res = app.studio_direct_single_scene_end_frame(None, "dummy_key", "gemma4:31b", {})
+        self.assertEqual(empty_res[0], "")
+        self.assertIn("generate scene keyframes first", empty_res[2])
+
+        # Active scene test with start keyframe present
+        mock_chat.return_value = json.dumps({
+            "action_summary": "Luna lifts the fallen star skyward",
+            "qwen_end_frame_prompt": "Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: Luna holds the glowing star aloft with both hands, looking up in wonder.",
+        })
+        directed_p, json_out, status, new_state = app.studio_direct_single_scene_end_frame(
+            "Scene 1: The Discovery", "dummy_key", "gemma4:31b", self.sample_state
+        )
+        self.assertIn("Modify the characters in Image 1", directed_p)
+        self.assertIn("Gemma Director Directed Scene #1 End Frame Pose", status)
+        self.assertEqual(new_state["scenes"][0]["qwen_end_scene_prompt"], directed_p)
 
     @patch.object(StudioPipeline, "_chat_completion")
     def test_phase4_load_and_redirect_single_clip(self, mock_chat):

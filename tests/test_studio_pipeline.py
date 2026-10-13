@@ -510,6 +510,10 @@ class TestStudioPipeline(unittest.TestCase):
                 }],
             }),
             json.dumps({
+                "action_summary": "Barnaby extends his paw with the berry",
+                "qwen_end_frame_prompt": "Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: Barnaby extends his paw offering the berry with a warm smile.",
+            }),
+            json.dumps({
                 "shot_type": "medium shot",
                 "camera_movement": "slow push-in",
                 "motion_intensity": 2,
@@ -683,6 +687,10 @@ class TestStudioPipeline(unittest.TestCase):
                 "art_style": "2D cartoon",
                 "characters": [{"id": "char_1", "name": "Pippin", "face": "bunny face"}],
                 "scenes": [{"scene_number": 1, "title": "Hop", "duration_seconds": 3.5, "character_ids": ["char_1"]}],
+            }),
+            json.dumps({
+                "action_summary": "Pippin finishes the cheerful hop",
+                "qwen_end_frame_prompt": "Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: Pippin lands from the cheerful hop with arms outstretched.",
             }),
             json.dumps({
                 "shot_type": "wide shot",
@@ -957,6 +965,7 @@ class TestStudioPipeline(unittest.TestCase):
             shared_seed=500,
             generate_end_frame=True,
             auto_qa_retry=True,
+            direct_end_frame=False,
         )
 
         # Initial attempt (2 Qwen calls with seed 500) + 1 retry (2 Qwen calls with seed 501) = 4 Qwen calls
@@ -1111,7 +1120,7 @@ class TestStudioPipeline(unittest.TestCase):
         img_s1_end = Image.new("RGB", (100, 100), color="cyan")
         img_s2_end = Image.new("RGB", (100, 100), color="magenta")
 
-        def side_effect(scene, characters, aspect_ratio, seed, generate_end_frame=True, which_frame="both", end_seed=None):
+        def side_effect(scene, characters, aspect_ratio, seed, generate_end_frame=True, which_frame="both", end_seed=None, **kwargs):
             num = scene.get("scene_number", 1)
             entry = dict(scene)
             if num == 1:
@@ -1147,6 +1156,74 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertEqual(chained[1]["last_keyframe_pil"], img_s2_end)
         # Only 2 synthesis calls were made (Scene 1 both + Scene 2 end), saving 50% on Scene 2
         self.assertEqual(mock_synth.call_count, 2)
+
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_direct_scene_end_frame_with_gemma_vision(self, mock_chat):
+        """Verifies Gemma 4: 31B Vision inspects start frame and generates high-delta end pose command."""
+        expected_prompt = (
+            "Modify the characters in Image 1 into their dynamic ending pose at t=5.0s: "
+            "Knight drops to one knee and holds shield forward defensively; Mage raises crystal staff radiating bright azure light. "
+            "Keep the exact same background environment, trees, path, lighting, and character outfits from Image 1."
+        )
+        mock_chat.return_value = json.dumps({
+            "action_summary": "Knight defends while mage casts spell",
+            "qwen_end_frame_prompt": expected_prompt,
+        })
+
+        kf = Image.new("RGB", (256, 256), color="forestgreen")
+        scene = {
+            "scene_number": 1,
+            "title": "Encounter",
+            "scenario": "Knight and Mage explore the forest path",
+            "wan_motion_prompt": "Knight raises shield, mage casts spell",
+            "character_ids": ["c1", "c2"],
+        }
+        chars = [
+            {"id": "c1", "name": "Knight", "clothing": "Silver armor"},
+            {"id": "c2", "name": "Mage", "clothing": "Blue robes"},
+        ]
+
+        directed = self.pipeline.direct_scene_end_frame_with_gemma(
+            scene=scene,
+            keyframe_pil=kf,
+            characters=chars,
+            art_style="Cinematic Anime",
+            use_vision=True,
+        )
+
+        self.assertEqual(directed, expected_prompt)
+        # Verify vision payload with base64 data URL was sent
+        sent_messages = mock_chat.call_args[0][0]
+        user_content = sent_messages[1]["content"]
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(user_content[1]["type"], "image_url")
+        self.assertTrue(user_content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_direct_scene_end_frame_with_gemma_fallback(self, mock_chat):
+        """Verifies fallback produces a deterministic high-delta prompt if Gemma LLM call raises."""
+        mock_chat.side_effect = RuntimeError("Ollama Vision timeout")
+        kf = Image.new("RGB", (256, 256), color="red")
+        scene = {
+            "scene_number": 2,
+            "title": "Confrontation",
+            "scenario": "Heroes face the shadowy guardian",
+            "wan_motion_prompt": "Heroes ready their weapons in combat stance",
+            "character_ids": ["c1"],
+        }
+        chars = [{"id": "c1", "name": "Knight", "clothing": "Armor"}]
+
+        directed = self.pipeline.direct_scene_end_frame_with_gemma(
+            scene=scene,
+            keyframe_pil=kf,
+            characters=chars,
+            art_style="Cinematic Anime",
+            use_vision=True,
+        )
+
+        self.assertIsNotNone(directed)
+        self.assertIn("Modify the characters in Image 1 into their dynamic ending pose at t=5.0s", directed)
+        self.assertIn("Heroes ready their weapons in combat stance", directed)
 
 
 if __name__ == "__main__":

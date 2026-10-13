@@ -1024,6 +1024,46 @@ def studio_verify_scene_qa(choice_label, api_key, model, current_state):
     return StudioPipeline.serializable(current_state), status, current_state
 
 
+def studio_direct_single_scene_end_frame(choice_label, api_key, model, current_state):
+    scenes = list((current_state or {}).get("scenes", []))
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return "", StudioPipeline.serializable(current_state or {}), "### ⚠️ Please generate scene keyframes first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    scene = dict(scenes[idx])
+
+    keyframe_pil = scene.get("keyframe_pil")
+    if keyframe_pil is None and scene.get("keyframe_path") and os.path.exists(scene["keyframe_path"]):
+        try:
+            keyframe_pil = Image.open(scene["keyframe_path"]).convert("RGB")
+        except Exception:
+            keyframe_pil = None
+    if keyframe_pil is None:
+        return scene.get("qwen_end_scene_prompt", ""), StudioPipeline.serializable(current_state), "### ⚠️ Please generate the Start Frame (0.0s) first so Gemma Director can inspect it.", current_state
+
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    directed_prompt = pipeline.direct_scene_end_frame_with_gemma(
+        scene=scene,
+        keyframe_pil=keyframe_pil,
+        characters=current_state.get("characters", []),
+        story_meta=current_state.get("metadata", {}),
+        art_style=current_state.get("art_style", ""),
+        use_vision=True,
+    )
+    if directed_prompt:
+        scene["qwen_end_scene_prompt"] = directed_prompt
+        scenes[idx] = scene
+        current_state["scenes"] = scenes
+        status = (
+            f"### 🎬 Gemma Director Directed Scene #{idx+1} End Frame Pose:\n"
+            f"> {directed_prompt}\n\n"
+            f"Prompt updated in the editor! Click **'🔄 Redo Selected Scene Frame(s)'** with mode='end' to generate the updated frame."
+        )
+        return directed_prompt, StudioPipeline.serializable(current_state), status, current_state
+    else:
+        return scene.get("qwen_end_scene_prompt", ""), StudioPipeline.serializable(current_state), "### ⚠️ Could not direct end frame.", current_state
+
+
 def studio_load_clip_fields(choice_label, current_state, default_seed=42):
     scenes = (current_state or {}).get("scenes", [])
     choices = _scene_choices(current_state)
@@ -1212,6 +1252,7 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
 def studio_run_step3(
     aspect_ratio, seed, api_key, model, current_state,
     generate_end_frame=True, auto_qa_retry=False, chain_previous_end_frame=False,
+    direct_end_frame=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     if not current_state or "scenes" not in current_state or not any(
@@ -1229,13 +1270,15 @@ def studio_run_step3(
             chain_previous_end_frame=bool(chain_previous_end_frame),
             auto_qa_retry=bool(auto_qa_retry),
             art_style=current_state.get("art_style", ""),
+            direct_end_frame=bool(direct_end_frame),
             progress_cb=_studio_progress(progress),
         )
         current_state["scenes"] = scenes
         _, scene_items = _studio_gallery_items(current_state)
         chain_note = " with Seamless Shot Chaining enabled" if chain_previous_end_frame else ""
+        direct_note = " (Gemma Vision End Frame Director active)" if direct_end_frame else ""
         return scene_items, (
-            f"### 🖼️ Step 3 Complete: {len(scenes)} Scenes ({len(scene_items)} Start & End Keyframes){chain_note}\n"
+            f"### 🖼️ Step 3 Complete: {len(scenes)} Scenes ({len(scene_items)} Start & End Keyframes){chain_note}{direct_note}\n"
             f"All Start & End frames generated with locked Qwen seed `{int(seed)}`, character multi-references, and CIE-Lab color matching. "
             f"Select any scene on the right to edit its Start/End prompts or redo individually, or click **Next ➔ Phase 4**."
         ), current_state
@@ -1535,6 +1578,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                     )
 
                 with gr.Row():
+                    studio_scene_direct_end_chk = gr.Checkbox(
+                        label="🎬 Auto-Direct Last Frame with Gemma Vision (Ensures High-Delta Dynamic Pose at 5.0s)",
+                        value=True,
+                        info="Gemma 4: 31B Vision inspects the Start Frame (0.0s) and directs an explicit limb, weapon, and stance progression at 5.0s.",
+                    )
                     studio_scene_qa_chk = gr.Checkbox(
                         label="🔍 Auto-Verify & Self-Correct Scenes with Gemma 4: 31B Vision QA Critic (Scores 1-10, retries once if < 7)",
                         value=False,
@@ -1607,6 +1655,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                             )
                         with gr.Row():
                             studio_scene_save_btn = gr.Button("💾 Save Scene Description Only", variant="secondary")
+                            studio_scene_direct_end_btn = gr.Button("🎬 Direct End Frame with Gemma Vision", variant="secondary")
                             studio_scene_qa_btn = gr.Button("🔍 Inspect Scene with Gemma Vision QA Critic", variant="secondary")
                             studio_scene_redo_btn = gr.Button(
                                 "🔄 Redo Selected Scene Frame(s) (Qwen Multi-Ref)",
@@ -2299,11 +2348,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     )
 
     # Phase 3: Generate All Scene Images (First + Last Frames) & Individual Scene Inspector
-    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, auto_qa_chk=False, chain_chk=False, progress=gr.Progress(track_tqdm=True)):
+    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, auto_qa_chk=False, chain_chk=False, direct_end_chk=True, progress=gr.Progress(track_tqdm=True)):
         scene_items, status, state = studio_run_step3(
             aspect_ratio, q_seed, api_key, model, current_state,
             auto_qa_retry=bool(auto_qa_chk),
             chain_previous_end_frame=bool(chain_chk),
+            direct_end_frame=bool(direct_end_chk),
             progress=progress,
         )
         s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
@@ -2316,7 +2366,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_aspect_ratio, studio_qwen_seed, studio_ollama_key,
             studio_ollama_model, studio_pipeline_state, studio_scene_selector,
-            studio_scene_qa_chk, studio_scene_chain_chk,
+            studio_scene_qa_chk, studio_scene_chain_chk, studio_scene_direct_end_chk,
         ],
         outputs=[
             studio_scenes_gallery, studio_status, studio_pipeline_state,
@@ -2374,6 +2424,14 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_end_prompt_edit,
         ],
         outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_scene_direct_end_btn.click(
+        fn=studio_direct_single_scene_end_frame,
+        inputs=[
+            studio_scene_selector, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+        ],
+        outputs=[studio_scene_end_prompt_edit, studio_json_display, studio_status, studio_pipeline_state],
     )
 
     studio_scene_qa_btn.click(
