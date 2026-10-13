@@ -165,6 +165,57 @@ def match_color_histogram_lab(
     return Image.fromarray(matched_rgb)
 
 
+def restore_extracted_video_frame(
+    frame_input: Any,
+    reference_pil: Optional[Image.Image] = None,
+    sharpen_strength: float = 0.35,
+    color_match_strength: float = 0.75,
+) -> Image.Image:
+    """
+    Restores high-frequency detail and eliminates compression drift on frames extracted
+    from generated videos before extending clips in Wan 2.2:
+    1. Bilateral edge-preserving filtering eliminates H.264 macroblock compression artifacts.
+    2. Edge-preserving unsharp masking restores micro-contrast lost during 3D-VAE decoding.
+    3. CIE-Lab luminance/chrominance matching normalizes exposure and tone against clean reference image.
+    """
+    import numpy as np
+    import cv2
+
+    if frame_input is None:
+        return None
+
+    if isinstance(frame_input, Image.Image):
+        rgb_arr = np.array(frame_input.convert("RGB"), dtype=np.uint8)
+    elif isinstance(frame_input, np.ndarray):
+        rgb_arr = np.array(frame_input, dtype=np.uint8)
+    elif isinstance(frame_input, str) and os.path.exists(frame_input):
+        rgb_arr = np.array(Image.open(frame_input).convert("RGB"), dtype=np.uint8)
+    else:
+        return frame_input
+
+    # 1. Bilateral edge-preserving filter (deblock mosquito noise without blurring edges)
+    bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+    deblocked = cv2.bilateralFilter(bgr, d=5, sigmaColor=25, sigmaSpace=25)
+
+    # 2. Edge-preserving unsharp masking (recover micro-contrast on eyes, hair, edges)
+    strength = float(_clamp(sharpen_strength, 0.0, 1.0, 0.35))
+    if strength > 0.0:
+        blurred = cv2.GaussianBlur(deblocked, (0, 0), sigmaX=1.5)
+        sharpened = cv2.addWeighted(deblocked, 1.0 + strength, blurred, -strength, 0)
+        sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+    else:
+        sharpened = deblocked
+
+    restored_rgb = cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB)
+    restored_pil = Image.fromarray(restored_rgb)
+
+    # 3. Normalization back to clean reference image (if provided)
+    if reference_pil is not None:
+        restored_pil = match_color_histogram_lab(restored_pil, reference_pil, strength=color_match_strength)
+
+    return restored_pil
+
+
 class StudioPipeline:
     """
     Automated Multi-Agent Video Production Studio Coordinator.
@@ -795,6 +846,7 @@ class StudioPipeline:
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         shared_seed: int = 42,
         generate_end_frame: Optional[bool] = None,
+        chain_previous_end_frame: bool = False,
         auto_qa_retry: bool = False,
         art_style: str = "",
         progress_cb: Optional[Callable[[float, str], None]] = None,
@@ -804,6 +856,8 @@ class StudioPipeline:
         Uses the SAME LOCKED SEED (`shared_seed` / `qwen_seed`) across all scenes so lighting,
         palette, and rendering grain stay consistent, while transferring character faces and
         outfits via multi-reference conditioning.
+        If `chain_previous_end_frame=True`, Scene N+1's Start Frame is directly chained from
+        Scene N's End Frame for seamless zero-degradation shot extensions.
         """
         total = len(scenes)
         updated_scenes = []
@@ -820,15 +874,39 @@ class StudioPipeline:
                     f"Synthesizing scene {idx+1}/{total} Start & End frames: '{title}' via Qwen Multi-Ref (Seed {locked_qwen_seed})...",
                 )
 
-            scene_entry = self._synthesize_single_scene_frame(
-                scene=scene,
-                characters=characters,
-                aspect_ratio=aspect_ratio,
-                seed=locked_qwen_seed,
-                generate_end_frame=generate_end_frame,
-                which_frame="both",
-                end_seed=locked_qwen_seed,
-            )
+            # Seamless Continuous Shot Chaining (Scene N End Frame -> Scene N+1 Start Frame)
+            if chain_previous_end_frame and idx > 0 and (updated_scenes[idx - 1].get("last_keyframe_pil") is not None or updated_scenes[idx - 1].get("last_keyframe_path") is not None):
+                prev_last_pil = updated_scenes[idx - 1].get("last_keyframe_pil")
+                prev_last_path = updated_scenes[idx - 1].get("last_keyframe_path")
+                if prev_last_pil is None and prev_last_path and os.path.exists(prev_last_path):
+                    try:
+                        prev_last_pil = Image.open(prev_last_path).convert("RGB")
+                    except Exception:
+                        pass
+                prev_last_seed = updated_scenes[idx - 1].get("last_keyframe_seed", locked_qwen_seed)
+                scene["keyframe_pil"] = prev_last_pil
+                scene["keyframe_path"] = prev_last_path
+                scene["keyframe_seed"] = prev_last_seed
+                print(f"[StudioPipeline] [Chain] Scene {scene_num} chained seamlessly from Scene {idx} End Frame (Zero-Degradation Extension).")
+                scene_entry = self._synthesize_single_scene_frame(
+                    scene=scene,
+                    characters=characters,
+                    aspect_ratio=aspect_ratio,
+                    seed=locked_qwen_seed,
+                    generate_end_frame=True,
+                    which_frame="end",
+                    end_seed=locked_qwen_seed,
+                )
+            else:
+                scene_entry = self._synthesize_single_scene_frame(
+                    scene=scene,
+                    characters=characters,
+                    aspect_ratio=aspect_ratio,
+                    seed=locked_qwen_seed,
+                    generate_end_frame=generate_end_frame,
+                    which_frame="both",
+                    end_seed=locked_qwen_seed,
+                )
 
             if auto_qa_retry:
                 qa = self.verify_scene_frames_with_vlm(scene_entry, characters, art_style=art_style)
@@ -1217,6 +1295,72 @@ class StudioPipeline:
             "num_frames": frames_for_duration(duration),
         }
 
+    @staticmethod
+    def apply_anti_noise_and_rotation_guard(
+        plan_or_wan_kwargs: Dict[str, Any],
+        duration_seconds: float = 5.0,
+        has_last_frame: bool = False,
+        anti_noise_guard: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Anti-Degradation, Anti-Noise, and Rotation Identity Guard:
+        1. Protects long (>= 4.5s / 73-81 frames) clips from dissolving into late-frame noise:
+           - Automatically raises FlowShift to 4.5 to keep global temporal structure locked.
+           - Sets inference steps to at least 10 on long clips to clean up high-frequency grain.
+           - Clamps guidance scale <= 2.0 to prevent CFG latent norm explosion.
+        2. Rotation Identity Lock:
+           - Injects explicit rotational geometric anchors into prompt and negative prompt
+             when head or body turns/rotations are detected so the face doesn't morph.
+        """
+        if not anti_noise_guard or not isinstance(plan_or_wan_kwargs, dict):
+            return plan_or_wan_kwargs
+
+        updated = dict(plan_or_wan_kwargs)
+        dur = float(duration_seconds)
+
+        # ── 1. Anti-Noise Guard for 4.5s – 5.0s clips ───────────────────────
+        if dur >= 4.5:
+            current_steps = int(updated.get("steps", 8))
+            if current_steps < 10:
+                updated["steps"] = 10
+            current_flow_shift = float(updated.get("flow_shift", 3.0))
+            if current_flow_shift < 4.5:
+                updated["flow_shift"] = 4.5
+            current_cfg = float(updated.get("guidance_scale", 2.0))
+            if current_cfg > 2.0:
+                updated["guidance_scale"] = 2.0
+            current_cfg2 = float(updated.get("guidance_scale_2", 1.5))
+            if current_cfg2 > 1.5:
+                updated["guidance_scale_2"] = 1.5
+
+        # ── 2. Rotation Identity Lock ─────────────────────────────────────────
+        text_to_check = (
+            str(updated.get("wan_prompt", ""))
+            + " " + str(updated.get("prompt", ""))
+            + " " + str(updated.get("subject_action", ""))
+            + " " + str(updated.get("camera_movement", ""))
+        ).lower()
+
+        rotation_keywords = ("turn", "rotate", "spin", "orbit", "profile", "look back", "turnaround", "around", "360", "180")
+        if any(kw in text_to_check for kw in rotation_keywords):
+            prompt_key = "wan_prompt" if "wan_prompt" in updated else "prompt"
+            if prompt_key in updated:
+                existing_prompt = updated[prompt_key]
+                if "[Rotation Identity Lock]" not in existing_prompt:
+                    updated[prompt_key] = (
+                        existing_prompt.rstrip()
+                        + " [Rotation Identity Lock]: smooth controlled head rotation, maintain identical facial proportions, eye geometry, nose bridge, hairstyle, and outfit across turn, clean seamless transition into final pose."
+                    )
+            neg_key = "negative_prompt"
+            existing_neg = updated.get(neg_key, DEFAULT_NEGATIVE_PROMPT)
+            if "identity loss during rotation" not in existing_neg:
+                updated[neg_key] = (
+                    existing_neg.rstrip()
+                    + ", identity loss during rotation, changing face after turn, face morphing, dissolving into noise, late-frame static breakdown, pixel grain"
+                )
+
+        return updated
+
     def direct_single_scene_animation(
         self,
         story_data: Dict[str, Any],
@@ -1272,6 +1416,7 @@ class StudioPipeline:
         story_meta: Optional[Dict[str, Any]] = None,
         use_last_frame: bool = True,
         enable_rife_2x: bool = False,
+        anti_noise_guard: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> str:
         """
@@ -1279,6 +1424,7 @@ class StudioPipeline:
         When `use_last_frame=True` and the scene has a `last_keyframe_pil` / `last_keyframe_path`,
         both the Start Frame (`resized_image`) and CIE-Lab color-matched End Frame (`processed_last_image`)
         are passed to Wan 2.2 for First-Last-Frame (FLF2V) animation.
+        If `anti_noise_guard=True`, stabilizes late-frame CFG and applies rotational geometric locks.
         """
         dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
         wan_w, wan_h = dims["wan_w"], dims["wan_h"]
@@ -1314,6 +1460,14 @@ class StudioPipeline:
         num_frames = frames_for_duration(duration_sec)
         use_seed = int(seed)
         frame_mult = (WAN_FPS * 2) if enable_rife_2x else WAN_DEFAULTS["frame_multiplier"]
+
+        if anti_noise_guard:
+            plan = self.apply_anti_noise_and_rotation_guard(
+                plan,
+                duration_seconds=duration_sec,
+                has_last_frame=(resized_last_frame is not None),
+                anti_noise_guard=True,
+            )
 
         mode_str = "FLF2V (First+Last Frame)" if resized_last_frame is not None else "I2V (First Frame)"
         print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
@@ -1356,6 +1510,7 @@ class StudioPipeline:
         base_seed: int = 42,
         use_last_frame: bool = True,
         enable_rife_2x: bool = False,
+        anti_noise_guard: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[str]:
         """
@@ -1388,6 +1543,7 @@ class StudioPipeline:
                 seed=locked_wan_seed,
                 use_last_frame=use_last_frame,
                 enable_rife_2x=enable_rife_2x,
+                anti_noise_guard=anti_noise_guard,
             )
             clip_paths.append(clip_dest)
 
@@ -1407,6 +1563,7 @@ class StudioPipeline:
         use_vision: bool = True,
         use_last_frame: bool = True,
         enable_rife_2x: bool = False,
+        anti_noise_guard: bool = True,
         auto_stitch: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
@@ -1439,7 +1596,6 @@ class StudioPipeline:
             existing_dir = dict(target.get("director") or {})
             custom_wan_prompt = (updated_fields or {}).get("wan_prompt")
             if updated_fields and any(k in updated_fields for k in ("wan_motion_prompt", "camera_movement", "scenario")):
-                # Recompile director plan incorporating user's updated motion description / camera
                 raw_override = dict(existing_dir)
                 if "wan_motion_prompt" in updated_fields and updated_fields["wan_motion_prompt"]:
                     raw_override["wan_prompt"] = updated_fields["wan_motion_prompt"]
@@ -1472,6 +1628,7 @@ class StudioPipeline:
             story_meta=story_data,
             use_last_frame=use_last_frame,
             enable_rife_2x=enable_rife_2x,
+            anti_noise_guard=anti_noise_guard,
             progress_cb=progress_cb,
         )
         scenes[scene_index] = target
@@ -1567,6 +1724,10 @@ class StudioPipeline:
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         art_style: str = "2D vibrant cartoon animation",
         use_vision_director: bool = True,
+        use_last_frame: bool = True,
+        enable_rife_2x: bool = True,
+        chain_previous_end_frame: bool = False,
+        anti_noise_guard: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -1611,6 +1772,8 @@ class StudioPipeline:
             characters=characters,
             aspect_ratio=aspect_ratio,
             shared_seed=seed_qwen,
+            generate_end_frame=use_last_frame,
+            chain_previous_end_frame=chain_previous_end_frame,
             progress_cb=progress_cb,
         )
 
@@ -1627,6 +1790,9 @@ class StudioPipeline:
             scenes=scenes,
             aspect_ratio=aspect_ratio,
             base_seed=seed_wan,
+            use_last_frame=use_last_frame,
+            enable_rife_2x=enable_rife_2x,
+            anti_noise_guard=anti_noise_guard,
             progress_cb=progress_cb,
         )
 

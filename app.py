@@ -20,6 +20,7 @@ from studio_pipeline import (
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_MODEL,
     generate_three_studio_seeds,
+    restore_extracted_video_frame,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ function() {
 """
 
 
-def extract_frame(video_path, timestamp):
+def extract_frame(video_path, timestamp, reference_path=None, restore=True):
     if not video_path:
         return None
     cap = cv2.VideoCapture(video_path)
@@ -94,13 +95,24 @@ def extract_frame(video_path, timestamp):
     fps = cap.get(cv2.CAP_PROP_FPS)
     target_frame_num = int(float(timestamp) * fps)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if target_frame_num >= total_frames:
+    if total_frames > 0 and target_frame_num >= total_frames:
         target_frame_num = total_frames - 1
     cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_num)
     ret, frame = cap.read()
     cap.release()
     if ret:
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if restore:
+            ref_pil = None
+            if reference_path and isinstance(reference_path, str) and os.path.exists(reference_path):
+                try:
+                    ref_pil = Image.open(reference_path).convert("RGB")
+                except Exception:
+                    ref_pil = None
+            elif isinstance(reference_path, Image.Image):
+                ref_pil = reference_path
+            return restore_extracted_video_frame(rgb_frame, reference_pil=ref_pil)
+        return rgb_frame
     return None
 
 
@@ -384,6 +396,7 @@ def generate_video(
     lora_repo_or_path="",
     lora_scale=0.8,
     deflicker_frames=True,
+    anti_noise_guard=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     if input_image is None:
@@ -396,6 +409,27 @@ def generate_video(
     processed_last_image = None
     if last_image:
         processed_last_image = resize_and_crop_to_match(last_image, resized_image)
+
+    if anti_noise_guard:
+        guard_cfg = StudioPipeline.apply_anti_noise_and_rotation_guard(
+            {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "steps": steps,
+                "flow_shift": flow_shift,
+                "guidance_scale": guidance_scale,
+                "guidance_scale_2": guidance_scale_2,
+            },
+            duration_seconds=duration_seconds,
+            has_last_frame=(processed_last_image is not None),
+            anti_noise_guard=True,
+        )
+        prompt = guard_cfg.get("prompt", prompt)
+        negative_prompt = guard_cfg.get("negative_prompt", negative_prompt)
+        steps = guard_cfg.get("steps", steps)
+        flow_shift = guard_cfg.get("flow_shift", flow_shift)
+        guidance_scale = guard_cfg.get("guidance_scale", guidance_scale)
+        guidance_scale_2 = guard_cfg.get("guidance_scale_2", guidance_scale_2)
 
     video_path, task_name = run_remote_inference(
         resized_image=resized_image,
@@ -706,19 +740,21 @@ def _studio_progress(progress):
 
 def _studio_gallery_items(story_data):
     chars = [
-        (c["portrait_path"], f"{c.get('name')} (Seed: {c.get('portrait_seed')})")
-        for c in (story_data or {}).get("characters", []) if c.get("portrait_path")
+        (c.get("portrait_path") or c.get("portrait_pil"), f"{c.get('name')} (Seed: {c.get('portrait_seed')})")
+        for c in (story_data or {}).get("characters", []) if (c.get("portrait_path") or c.get("portrait_pil"))
     ]
     scenes = []
     for s in (story_data or {}).get("scenes", []):
-        if s.get("keyframe_path"):
+        kf = s.get("keyframe_path") or s.get("keyframe_pil")
+        if kf:
             scenes.append(
-                (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} (Seed: {s.get('keyframe_seed', '')})")
+                (kf, f"Scene {s.get('scene_number')}: {s.get('title')} (Seed: {s.get('keyframe_seed', '')})")
             )
-        if s.get("last_keyframe_path"):
+        last_kf = s.get("last_keyframe_path") or s.get("last_keyframe_pil")
+        if last_kf:
             end_seed = s.get("last_keyframe_seed", s.get("keyframe_seed", ""))
             scenes.append(
-                (s["last_keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} — End Frame (Seed: {end_seed})")
+                (last_kf, f"Scene {s.get('scene_number')}: {s.get('title')} — End Frame (Seed: {end_seed})")
             )
     return chars, scenes
 
@@ -729,7 +765,7 @@ def _gallery_index_to_scene_index(gallery_idx: int, story_data: dict) -> int:
         return 0
     cursor = 0
     for idx, s in enumerate(scenes):
-        count = (1 if s.get("keyframe_path") else 0) + (1 if s.get("last_keyframe_path") else 0)
+        count = (1 if (s.get("keyframe_path") or s.get("keyframe_pil")) else 0) + (1 if (s.get("last_keyframe_path") or s.get("last_keyframe_pil")) else 0)
         if count > 0:
             if gallery_idx < cursor + count:
                 return idx
@@ -1039,7 +1075,7 @@ def studio_redirect_single_clip(
 def studio_redo_single_clip(
     choice_label, motion_desc, camera_move, compiled_wan_prompt, clip_seed,
     re_run_director, use_vision, aspect_ratio, api_key, model, current_state,
-    use_last_frame=True, enable_rife_2x=False,
+    use_last_frame=True, enable_rife_2x=False, anti_noise_guard=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
@@ -1063,6 +1099,7 @@ def studio_redo_single_clip(
             use_vision=bool(use_vision),
             use_last_frame=bool(use_last_frame),
             enable_rife_2x=bool(enable_rife_2x),
+            anti_noise_guard=bool(anti_noise_guard),
             auto_stitch=True,
             progress_cb=_studio_progress(progress),
         )
@@ -1174,7 +1211,7 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
 
 def studio_run_step3(
     aspect_ratio, seed, api_key, model, current_state,
-    generate_end_frame=True, auto_qa_retry=False,
+    generate_end_frame=True, auto_qa_retry=False, chain_previous_end_frame=False,
     progress=gr.Progress(track_tqdm=True),
 ):
     if not current_state or "scenes" not in current_state or not any(
@@ -1189,14 +1226,16 @@ def studio_run_step3(
             aspect_ratio=aspect_ratio,
             shared_seed=int(seed),
             generate_end_frame=bool(generate_end_frame),
+            chain_previous_end_frame=bool(chain_previous_end_frame),
             auto_qa_retry=bool(auto_qa_retry),
             art_style=current_state.get("art_style", ""),
             progress_cb=_studio_progress(progress),
         )
         current_state["scenes"] = scenes
         _, scene_items = _studio_gallery_items(current_state)
+        chain_note = " with Seamless Shot Chaining enabled" if chain_previous_end_frame else ""
         return scene_items, (
-            f"### 🖼️ Step 3 Complete: {len(scenes)} Scenes ({len(scene_items)} Start & End Keyframes)\n"
+            f"### 🖼️ Step 3 Complete: {len(scenes)} Scenes ({len(scene_items)} Start & End Keyframes){chain_note}\n"
             f"All Start & End frames generated with locked Qwen seed `{int(seed)}`, character multi-references, and CIE-Lab color matching. "
             f"Select any scene on the right to edit its Start/End prompts or redo individually, or click **Next ➔ Phase 4**."
         ), current_state
@@ -1228,7 +1267,7 @@ def studio_run_director(api_key, model, use_vision, current_state, progress=gr.P
 
 def studio_run_step4(
     aspect_ratio, seed, api_key, model, use_vision, current_state,
-    use_last_frame=True, enable_rife_2x=False,
+    use_last_frame=True, enable_rife_2x=False, anti_noise_guard=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
@@ -1250,6 +1289,7 @@ def studio_run_step4(
             base_seed=int(seed),
             use_last_frame=bool(use_last_frame),
             enable_rife_2x=bool(enable_rife_2x),
+            anti_noise_guard=bool(anti_noise_guard),
             progress_cb=cb,
         )
         current_state["clip_paths"] = clips
@@ -1260,8 +1300,9 @@ def studio_run_step4(
         current_state["manifest_path"] = pipeline.save_manifest(current_state)
         flf_mode = "First+Last Frame (FLF2V)" if use_last_frame else "First Frame Only (I2V)"
         fps_str = "32fps RIFE 2x" if enable_rife_2x else "16fps Native"
+        guard_str = " | Anti-Noise & Rotation Guard: ON" if anti_noise_guard else ""
         return final_movie, (
-            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`, Mode: `{flf_mode}`, `{fps_str}`)\n"
+            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`, Mode: `{flf_mode}`, `{fps_str}`{guard_str})\n"
             f"Final file: `{pathlib.Path(final_movie).name}`"
             + _studio_director_summary(scenes)
         ), current_state
@@ -1498,6 +1539,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                         label="🔍 Auto-Verify & Self-Correct Scenes with Gemma 4: 31B Vision QA Critic (Scores 1-10, retries once if < 7)",
                         value=False,
                     )
+                    studio_scene_chain_chk = gr.Checkbox(
+                        label="🔗 Seamless Continuous Shot Chaining (Scene N End Frame ➔ Scene N+1 Start Frame — Zero Degradation)",
+                        value=False,
+                        info="Reuses previous scene's clean Qwen end frame as the next scene's start frame to guarantee 100% visual continuity and cut generation time.",
+                    )
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1593,6 +1639,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                     studio_rife_2x_chk = gr.Checkbox(
                         label="✨ Enable 32fps RIFE 2x Smooth Motion Interpolation (16fps ➔ 32fps)",
                         value=True,
+                    )
+                    studio_anti_noise_chk = gr.Checkbox(
+                        label="🛡️ Anti-Noise & Rotation Identity Guard (5s Noise Clamp & Turn Lock)",
+                        value=True,
+                        info="Clamps CFG <= 2.0 and sets FlowShift 4.5 on long clips to stop noise dissolution; locks facial identity during rotations.",
                     )
 
                 with gr.Row():
@@ -1861,6 +1912,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                         value=True,
                         info="Applies edge-preserving temporal filtering to eliminate pixel micro-jitter and lock facial features across frames before RIFE."
                     )
+                    anti_noise_checkbox = gr.Checkbox(
+                        label="🛡️ Anti-Noise & Rotation Identity Guard (5s Stabilization)",
+                        value=True,
+                        info="Stabilizes long clips (>= 4.5s) with FlowShift 4.5 & steps >= 10, clamps CFG <= 2.0 to prevent latent blowups, and locks facial proportions during head/body turns."
+                    )
                     scheduler_dropdown = gr.Dropdown(label="Scheduler", choices=SCHEDULERS, value="UniPCMultistep")
                     flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
                     play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)
@@ -1976,7 +2032,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox,
         quality_slider, scheduler_dropdown, flow_shift_slider, frame_multi,
         safe_mode_checkbox, play_result_video,
-        lora_repo_or_path_input, lora_scale_slider, deflicker_checkbox
+        lora_repo_or_path_input, lora_scale_slider, deflicker_checkbox,
+        anti_noise_checkbox,
     ]
 
     generate_button.click(
@@ -2242,10 +2299,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     )
 
     # Phase 3: Generate All Scene Images (First + Last Frames) & Individual Scene Inspector
-    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, auto_qa_chk=False, progress=gr.Progress(track_tqdm=True)):
+    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, auto_qa_chk=False, chain_chk=False, progress=gr.Progress(track_tqdm=True)):
         scene_items, status, state = studio_run_step3(
             aspect_ratio, q_seed, api_key, model, current_state,
             auto_qa_retry=bool(auto_qa_chk),
+            chain_previous_end_frame=bool(chain_chk),
             progress=progress,
         )
         s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
@@ -2258,7 +2316,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_aspect_ratio, studio_qwen_seed, studio_ollama_key,
             studio_ollama_model, studio_pipeline_state, studio_scene_selector,
-            studio_scene_qa_chk,
+            studio_scene_qa_chk, studio_scene_chain_chk,
         ],
         outputs=[
             studio_scenes_gallery, studio_status, studio_pipeline_state,
@@ -2364,13 +2422,14 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
     def _ui_step4(
         aspect_ratio, w_seed, api_key, model, use_vision, current_state, selected_clip,
-        use_last_frame=True, enable_rife_2x=True,
+        use_last_frame=True, enable_rife_2x=True, anti_noise_guard=True,
         progress=gr.Progress(track_tqdm=True),
     ):
         final_vid, status, state = studio_run_step4(
             aspect_ratio, w_seed, api_key, model, use_vision, current_state,
             use_last_frame=bool(use_last_frame),
             enable_rife_2x=bool(enable_rife_2x),
+            anti_noise_guard=bool(anti_noise_guard),
             progress=progress,
         )
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
@@ -2381,7 +2440,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_aspect_ratio, studio_wan_seed, studio_ollama_key,
             studio_ollama_model, studio_use_vision, studio_pipeline_state, studio_clip_selector,
-            studio_use_last_frame_chk, studio_rife_2x_chk,
+            studio_use_last_frame_chk, studio_rife_2x_chk, studio_anti_noise_chk,
         ],
         outputs=[
             studio_final_video, studio_status, studio_pipeline_state,
@@ -2418,7 +2477,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_clip_wan_prompt_edit, studio_clip_seed_edit,
             studio_clip_rerundir_chk, studio_use_vision, studio_aspect_ratio,
             studio_ollama_key, studio_ollama_model, studio_pipeline_state,
-            studio_use_last_frame_chk, studio_rife_2x_chk,
+            studio_use_last_frame_chk, studio_rife_2x_chk, studio_anti_noise_chk,
         ],
         outputs=[
             studio_clip_preview, studio_final_video, studio_json_display,

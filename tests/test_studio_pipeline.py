@@ -16,6 +16,7 @@ from studio_pipeline import (
     frames_for_duration,
     plan_scene_count,
     WAN_DEFAULTS,
+    restore_extracted_video_frame,
 )
 import app
 
@@ -1035,6 +1036,117 @@ class TestStudioPipeline(unittest.TestCase):
         wan_kwargs_i2v = mock_wan.call_args[1]
         self.assertIsNone(wan_kwargs_i2v["processed_last_image"])
         self.assertEqual(wan_kwargs_i2v["frame_multiplier"], 16)
+
+    def test_restore_extracted_video_frame(self):
+        """Verifies restore_extracted_video_frame edge deblocking, sharpening, and color matching."""
+        # 1. Null handling
+        self.assertIsNone(restore_extracted_video_frame(None))
+
+        # 2. Synthetic frame restoration
+        arr = np.zeros((100, 100, 3), dtype=np.uint8)
+        arr[25:75, 25:75] = [200, 50, 50]
+        img = Image.fromarray(arr)
+
+        restored = restore_extracted_video_frame(img, sharpen_strength=0.5)
+        self.assertIsInstance(restored, Image.Image)
+        self.assertEqual(restored.size, (100, 100))
+
+        # 3. Restoration with reference image color histogram matching
+        ref_arr = np.full((100, 100, 3), [50, 200, 50], dtype=np.uint8)
+        ref_img = Image.fromarray(ref_arr)
+        restored_with_ref = restore_extracted_video_frame(img, reference_pil=ref_img, color_match_strength=0.8)
+        self.assertIsInstance(restored_with_ref, Image.Image)
+        res_arr = np.array(restored_with_ref)
+        # Green channel should have shifted towards reference
+        self.assertGreater(res_arr[50, 50, 1], arr[50, 50, 1])
+
+    def test_anti_noise_and_rotation_guard(self):
+        """Verifies anti-noise parameter clamping for long clips and rotation identity anchors."""
+        # 1. Long clip (>= 4.5s) without rotation: steps clamped >= 10, flow_shift >= 4.5, CFG <= 2.0
+        cfg_long = {
+            "prompt": "Barnaby walks gently forward",
+            "negative_prompt": "blurry, low quality",
+            "steps": 6,
+            "flow_shift": 3.0,
+            "guidance_scale": 3.5,
+            "guidance_scale_2": 2.5,
+        }
+        guarded_long = StudioPipeline.apply_anti_noise_and_rotation_guard(
+            cfg_long, duration_seconds=5.0, anti_noise_guard=True
+        )
+        self.assertEqual(guarded_long["steps"], 10)
+        self.assertEqual(guarded_long["flow_shift"], 4.5)
+        self.assertEqual(guarded_long["guidance_scale"], 2.0)
+        self.assertEqual(guarded_long["guidance_scale_2"], 1.5)
+        self.assertNotIn("[Rotation Identity Lock]", guarded_long["prompt"])
+
+        # 2. Rotation prompt: injects geometric anchor and negative prompt suppression
+        cfg_turn = {
+            "prompt": "Luna turns around to face the camera",
+            "negative_prompt": "blurry",
+            "steps": 8,
+            "flow_shift": 3.0,
+            "guidance_scale": 1.8,
+            "guidance_scale_2": 1.4,
+        }
+        guarded_turn = StudioPipeline.apply_anti_noise_and_rotation_guard(
+            cfg_turn, duration_seconds=3.0, anti_noise_guard=True
+        )
+        self.assertIn("[Rotation Identity Lock]", guarded_turn["prompt"])
+        self.assertIn("identity loss during rotation", guarded_turn["negative_prompt"])
+        # For 3.0s, steps and flow_shift remain untouched if below 4.5s
+        self.assertEqual(guarded_turn["steps"], 8)
+        self.assertEqual(guarded_turn["flow_shift"], 3.0)
+
+        # 3. Guard disabled: returns config unchanged
+        unchanged = StudioPipeline.apply_anti_noise_and_rotation_guard(
+            cfg_long, duration_seconds=5.0, anti_noise_guard=False
+        )
+        self.assertEqual(unchanged["steps"], 6)
+
+    @patch.object(StudioPipeline, "_synthesize_single_scene_frame")
+    def test_seamless_shot_chaining_scene_keyframes(self, mock_synth):
+        """Verifies chain_previous_end_frame reuses previous scene end frame without extra generation."""
+        img_s1_start = Image.new("RGB", (100, 100), color="blue")
+        img_s1_end = Image.new("RGB", (100, 100), color="cyan")
+        img_s2_end = Image.new("RGB", (100, 100), color="magenta")
+
+        def side_effect(scene, characters, aspect_ratio, seed, generate_end_frame=True, which_frame="both", end_seed=None):
+            num = scene.get("scene_number", 1)
+            entry = dict(scene)
+            if num == 1:
+                entry["keyframe_pil"] = img_s1_start
+                entry["last_keyframe_pil"] = img_s1_end
+                entry["last_keyframe_path"] = "scene_1_end.jpg"
+            elif num == 2:
+                # When chaining, only 'end' frame should be synthesized
+                self.assertEqual(which_frame, "end")
+                entry["last_keyframe_pil"] = img_s2_end
+                entry["last_keyframe_path"] = "scene_2_end.jpg"
+            return entry
+
+        mock_synth.side_effect = side_effect
+
+        scenes = [
+            {"scene_number": 1, "title": "Scene 1", "scenario": "Intro", "duration_seconds": 5.0, "character_ids": ["c1"]},
+            {"scene_number": 2, "title": "Scene 2", "scenario": "Next action", "duration_seconds": 5.0, "character_ids": ["c1"]},
+        ]
+        chars = [{"id": "c1", "name": "Barnaby", "face": "bear"}]
+
+        chained = self.pipeline.generate_scene_keyframes(
+            scenes=scenes,
+            characters=chars,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            generate_end_frame=True,
+            chain_previous_end_frame=True,
+        )
+
+        self.assertEqual(len(chained), 2)
+        # Scene 2's start frame must exactly be Scene 1's end frame
+        self.assertEqual(chained[1]["keyframe_pil"], img_s1_end)
+        self.assertEqual(chained[1]["last_keyframe_pil"], img_s2_end)
+        # Only 2 synthesis calls were made (Scene 1 both + Scene 2 end), saving 50% on Scene 2
+        self.assertEqual(mock_synth.call_count, 2)
 
 
 if __name__ == "__main__":

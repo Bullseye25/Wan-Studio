@@ -527,5 +527,53 @@ class TestFrontendHeartbeatAsyncButtons(unittest.TestCase):
         asyncio.run(_run())
 
 
+class TestSafeguardsAndAntiNoiseFrontend(unittest.TestCase):
+    """Tests the frontend integration of Frame Restoration, Shot Chaining, and Anti-Noise/Rotation Guards."""
+
+    def test_extract_frame_with_restoration(self):
+        """extract_frame returns None on bad input, and supports reference_path and restore kwargs."""
+        self.assertIsNone(app.extract_frame(None, 0.0))
+        self.assertIsNone(app.extract_frame("non_existent_file.mp4", 1.0))
+
+    @patch.object(StudioPipeline, "generate_scene_keyframes")
+    def test_studio_run_step3_with_chaining(self, mock_gen_kf):
+        mock_gen_kf.return_value = [
+            {"scene_number": 1, "title": "S1", "keyframe_pil": Image.new("RGB", (10, 10))},
+            {"scene_number": 2, "title": "S2", "keyframe_pil": Image.new("RGB", (10, 10))},
+        ]
+        sample_state = {
+            "characters": [{"id": "c1", "name": "Barnaby", "portrait_pil": Image.new("RGB", (10, 10))}],
+            "scenes": [{"scene_number": 1}, {"scene_number": 2}],
+        }
+        gallery, status, state = app.studio_run_step3(
+            "9:16 Vertical (Shorts/Reels)", 42, "dummy_key", "gemma4:31b", sample_state,
+            chain_previous_end_frame=True,
+        )
+        self.assertEqual(len(gallery), 2)
+        self.assertIn("Seamless Shot Chaining enabled", status)
+        self.assertTrue(mock_gen_kf.call_args[1]["chain_previous_end_frame"])
+
+    @patch.object(StudioPipeline, "generate_scene_videos")
+    @patch.object(StudioPipeline, "stitch_clips")
+    def test_studio_run_step4_with_anti_noise_guard(self, mock_stitch, mock_gen_vid):
+        mock_gen_vid.return_value = ["clip1.mp4", "clip2.mp4"]
+        mock_stitch.return_value = "final_movie.mp4"
+        sample_state = {
+            "title": "Test Movie",
+            "characters": [{"id": "c1"}],
+            "scenes": [
+                {"scene_number": 1, "keyframe_pil": Image.new("RGB", (10, 10)), "director": {"camera_movement": "pan"}},
+                {"scene_number": 2, "keyframe_pil": Image.new("RGB", (10, 10)), "director": {"camera_movement": "tilt"}},
+            ],
+        }
+        movie, status, state = app.studio_run_step4(
+            "9:16 Vertical (Shorts/Reels)", 42, "dummy_key", "gemma4:31b", True, sample_state,
+            anti_noise_guard=True,
+        )
+        self.assertEqual(movie, "final_movie.mp4")
+        self.assertIn("Anti-Noise & Rotation Guard: ON", status)
+        self.assertTrue(mock_gen_vid.call_args[1]["anti_noise_guard"])
+
+
 if __name__ == "__main__":
     unittest.main()
