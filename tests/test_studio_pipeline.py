@@ -749,13 +749,15 @@ class TestStudioPipeline(unittest.TestCase):
             self.assertEqual(state["characters"][0]["portrait_seed"], 102)
             self.assertEqual(state["characters"][0]["clothing"], "blue vest")
 
-            # Phase 3: Generate All Scene Images
+            # Phase 3: Generate All Scene Images (Dual-Keyframe: Start + End Frame per scene)
             step3_res = app.studio_run_step3(
                 "9:16 Vertical (Shorts/Reels)", 201, "dummy_key", "gemma4:31b", state
             )
             scene_gallery, status3, state = step3_res[0], step3_res[1], step3_res[2]
             self.assertIn("Step 3 Complete", status3)
-            self.assertEqual(len(scene_gallery), 1)
+            self.assertEqual(len(scene_gallery), 2)
+            self.assertIsNotNone(state["scenes"][0].get("keyframe_path"))
+            self.assertIsNotNone(state["scenes"][0].get("last_keyframe_path"))
 
             # Phase 3 Individual Redo: Redo Scene #1 with new seed 202
             redo_scene_res = app.studio_redo_single_scene(
@@ -773,6 +775,7 @@ class TestStudioPipeline(unittest.TestCase):
             scene_gallery, scene_preview, _, status_redo_scene, state = redo_scene_res
             self.assertIn("Keyframe Redo Complete", status_redo_scene)
             self.assertEqual(state["scenes"][0]["keyframe_seed"], 202)
+            self.assertEqual(state["scenes"][0]["last_keyframe_seed"], 202)
 
             # Phase 4: Generate All Video Clips & Final Movie
             step4_res = app.studio_run_step4(
@@ -802,6 +805,238 @@ class TestStudioPipeline(unittest.TestCase):
             self.assertEqual(state["scenes"][0]["video_seed"], 302)
             self.assertTrue(os.path.exists(final_video2))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Test 11: Dual-Keyframe (First + Last Frame) Anchor-Chained Synthesis & Selective Redo
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @patch("studio_pipeline.qwen_image_edit_remote")
+    def test_dual_keyframe_anchor_chained_generation_and_selective_redo(self, mock_qwen):
+        """End Frame must use Start Frame as base_image + character portraits as ref_images."""
+        start_buf = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(120, 160, 200)).save(start_buf, format="JPEG")
+        end_buf = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(180, 110, 90)).save(end_buf, format="JPEG")
+        mock_qwen.side_effect = [
+            [start_buf.getvalue()],
+            [end_buf.getvalue()],
+            [end_buf.getvalue()],
+            [start_buf.getvalue()],
+        ]
+
+        p1 = Image.new("RGB", (256, 256), color="red")
+        chars = [{"id": "char_1", "name": "Barnaby", "face": "round bear face", "clothing": "red bowtie", "portrait_pil": p1}]
+        scenes = [{
+            "scene_number": 1,
+            "title": "Wave",
+            "scenario": "Barnaby waves hello",
+            "qwen_scene_prompt": "Barnaby standing with paws at sides",
+            "qwen_end_scene_prompt": "Barnaby raising right paw high in cheerful wave",
+            "character_ids": ["char_1"],
+        }]
+
+        self.pipeline.generate_scene_keyframes(
+            scenes=scenes,
+            characters=chars,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            shared_seed=777,
+            generate_end_frame=True,
+        )
+
+        # Call 1 (Start Frame): base_image=p1 (character portrait), ref_images=[]
+        self.assertEqual(mock_qwen.call_count, 2)
+        call1_kwargs = mock_qwen.call_args_list[0][1]
+        self.assertIs(call1_kwargs["base_image"], p1)
+        self.assertEqual(call1_kwargs["ref_images"], [])
+        self.assertEqual(call1_kwargs["seed"], 777)
+
+        # Call 2 (End Frame): base_image=Start Frame PIL (576x1024), ref_images=[p1]
+        call2_kwargs = mock_qwen.call_args_list[1][1]
+        self.assertEqual(call2_kwargs["base_image"].size, (576, 1024))
+        self.assertEqual(len(call2_kwargs["ref_images"]), 1)
+        self.assertIs(call2_kwargs["ref_images"][0], p1)
+        self.assertEqual(call2_kwargs["seed"], 777)
+        self.assertTrue(os.path.exists(scenes[0]["keyframe_path"]))
+        self.assertTrue(os.path.exists(scenes[0]["last_keyframe_path"]))
+
+        # Selective Redo: which_frame="end" should make only 1 Qwen call (leaving keyframe_seed=777)
+        story_data = {"art_style": "2D cartoon", "characters": chars, "scenes": scenes}
+        self.pipeline.regenerate_single_scene_keyframe(
+            story_data=story_data,
+            scene_index=0,
+            updated_fields={"qwen_end_scene_prompt": "Barnaby bowing politely"},
+            seed=888,
+            which_frame="end",
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+        )
+        self.assertEqual(mock_qwen.call_count, 3)
+        self.assertEqual(scenes[0]["keyframe_seed"], 777)
+        self.assertEqual(scenes[0]["last_keyframe_seed"], 888)
+
+        # Selective Redo: which_frame="start" should make only 1 Qwen call (updating keyframe_seed=999)
+        self.pipeline.regenerate_single_scene_keyframe(
+            story_data=story_data,
+            scene_index=0,
+            updated_fields={"qwen_scene_prompt": "Barnaby standing by oak tree"},
+            seed=999,
+            which_frame="start",
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+        )
+        self.assertEqual(mock_qwen.call_count, 4)
+        self.assertEqual(scenes[0]["keyframe_seed"], 999)
+        self.assertEqual(scenes[0]["last_keyframe_seed"], 888)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Test 12: CIE-Lab Color & Luminance Matching (match_color_histogram_lab)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def test_match_color_histogram_lab_normalizes_exposure_and_tint(self):
+        from studio_pipeline import match_color_histogram_lab
+
+        # Create a warm bright reference Start Frame and a cool dark drifted End Frame
+        rng = np.random.default_rng(42)
+        ref_arr = np.clip(rng.normal(loc=[200, 160, 110], scale=20, size=(128, 128, 3)), 0, 255).astype(np.uint8)
+        src_arr = np.clip(rng.normal(loc=[80, 100, 190], scale=25, size=(128, 128, 3)), 0, 255).astype(np.uint8)
+        ref_pil = Image.fromarray(ref_arr, mode="RGB")
+        src_pil = Image.fromarray(src_arr, mode="RGB")
+
+        matched_pil = match_color_histogram_lab(src_pil, ref_pil, strength=0.9)
+        self.assertEqual(matched_pil.size, ref_pil.size)
+        self.assertEqual(matched_pil.mode, "RGB")
+
+        matched_arr = np.array(matched_pil, dtype=np.float32)
+        # Distance between channel means must be dramatically reduced after CIE-Lab matching
+        orig_mean_diff = np.abs(src_arr.mean(axis=(0, 1)) - ref_arr.mean(axis=(0, 1))).sum()
+        new_mean_diff = np.abs(matched_arr.mean(axis=(0, 1)) - ref_arr.mean(axis=(0, 1))).sum()
+        self.assertLess(new_mean_diff, orig_mean_diff * 0.35)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Test 13: Gemma 4: 31B Vision QA Critic & Auto-Retry Loop
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @patch("studio_pipeline.qwen_image_edit_remote")
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_vlm_qa_critic_and_auto_self_correction_retry(self, mock_chat, mock_qwen):
+        buf = io.BytesIO()
+        Image.new("RGB", (576, 1024), color="green").save(buf, format="JPEG")
+        mock_qwen.return_value = [buf.getvalue()]
+
+        # First QA check scores 5/10 (fails < 7) and suggests refined prompts; second QA check scores 9/10
+        mock_chat.side_effect = [
+            json.dumps({
+                "score": 5,
+                "passed": False,
+                "issues": "Character missing red bowtie in end frame",
+                "suggested_start_prompt": "Barnaby clearly wearing bright red bowtie at start",
+                "suggested_end_prompt": "Barnaby waving while wearing bright red bowtie at end",
+            }),
+            json.dumps({
+                "score": 9,
+                "passed": True,
+                "issues": "none",
+                "suggested_start_prompt": "",
+                "suggested_end_prompt": "",
+            }),
+        ]
+
+        p1 = Image.new("RGB", (256, 256), color="brown")
+        chars = [{"id": "char_1", "name": "Barnaby", "face": "round bear", "clothing": "red bowtie", "portrait_pil": p1}]
+        scenes = [{
+            "scene_number": 1,
+            "title": "Bowtie Check",
+            "scenario": "Barnaby waves",
+            "qwen_scene_prompt": "Barnaby standing",
+            "qwen_end_scene_prompt": "Barnaby waving",
+            "character_ids": ["char_1"],
+        }]
+
+        self.pipeline.generate_scene_keyframes(
+            scenes=scenes,
+            characters=chars,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            shared_seed=500,
+            generate_end_frame=True,
+            auto_qa_retry=True,
+        )
+
+        # Initial attempt (2 Qwen calls with seed 500) + 1 retry (2 Qwen calls with seed 501) = 4 Qwen calls
+        self.assertEqual(mock_qwen.call_count, 4)
+        self.assertEqual(scenes[0]["keyframe_seed"], 501)
+        self.assertEqual(scenes[0]["last_keyframe_seed"], 501)
+        self.assertEqual(scenes[0]["qa_report"]["score"], 9)
+        self.assertTrue(scenes[0]["qa_report"]["passed"])
+        self.assertIn("bright red bowtie", scenes[0]["qwen_scene_prompt"])
+        self.assertIn("bright red bowtie", scenes[0]["qwen_end_scene_prompt"])
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Test 14: Dual-Frame Vision Director + Wan 2.2 FLF2V & 32fps RIFE 2x
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @patch("studio_pipeline.run_remote_inference")
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_dual_frame_vision_director_and_wan_flf2v_with_rife_32fps(self, mock_chat, mock_wan):
+        mock_chat.return_value = json.dumps({
+            "shot_type": "medium shot",
+            "camera_movement": "slow push-in",
+            "motion_intensity": 2,
+            "subject_action": "Barnaby transitions smoothly from standing to waving",
+            "timeline": ["stands ready", "lifts right arm", "waves warmly"],
+            "wan_prompt": "Barnaby lifts his right arm and waves warmly",
+            "guidance_scale": 2.0,
+            "steps": 8,
+            "flow_shift": 3.0,
+        })
+
+        dummy_vid = pathlib.Path(self.temp_dir.name) / "flf2v_dummy.mp4"
+        with open(dummy_vid, "wb") as f:
+            f.write(b"\x00\x00\x00 flf2v mp4")
+        mock_wan.return_value = (str(dummy_vid), "task_flf2v")
+
+        start_kf = Image.new("RGB", (576, 1024), color="orange")
+        end_kf = Image.new("RGB", (576, 1024), color="gold")
+        scenes = [{
+            "scene_number": 1,
+            "title": "Dual Frame Scene",
+            "duration_seconds": 5.0,
+            "scenario": "Barnaby waves",
+            "character_ids": ["char_1"],
+            "keyframe_pil": start_kf,
+            "last_keyframe_pil": end_kf,
+        }]
+        chars = [{"id": "char_1", "name": "Barnaby", "face": "bear face"}]
+
+        # 1. Verify Gemma Vision receives BOTH Start Frame and End Frame images
+        self.pipeline.direct_scene_animations(scenes=scenes, characters=chars, use_vision=True)
+        sent_messages = mock_chat.call_args[0][0]
+        user_content = sent_messages[1]["content"]
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        self.assertEqual(len(image_parts), 2)
+
+        # 2. Verify Wan 2.2 receives processed_last_image (480x832) and frame_multiplier=32 (RIFE 2x)
+        self.pipeline.generate_scene_videos(
+            scenes=scenes,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            base_seed=444444,
+            use_last_frame=True,
+            enable_rife_2x=True,
+        )
+        wan_kwargs = mock_wan.call_args[1]
+        self.assertIsNotNone(wan_kwargs["processed_last_image"])
+        self.assertEqual(wan_kwargs["processed_last_image"].size, (480, 832))
+        self.assertEqual(wan_kwargs["frame_multiplier"], 32)
+
+        # 3. Verify disabling use_last_frame and enable_rife_2x falls back to I2V (None) and 16fps
+        self.pipeline.generate_scene_videos(
+            scenes=scenes,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            base_seed=444444,
+            use_last_frame=False,
+            enable_rife_2x=False,
+        )
+        wan_kwargs_i2v = mock_wan.call_args[1]
+        self.assertIsNone(wan_kwargs_i2v["processed_last_image"])
+        self.assertEqual(wan_kwargs_i2v["frame_multiplier"], 16)
+
 
 if __name__ == "__main__":
     unittest.main()
+

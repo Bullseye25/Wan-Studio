@@ -709,11 +709,32 @@ def _studio_gallery_items(story_data):
         (c["portrait_path"], f"{c.get('name')} (Seed: {c.get('portrait_seed')})")
         for c in (story_data or {}).get("characters", []) if c.get("portrait_path")
     ]
-    scenes = [
-        (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} (Seed: {s.get('keyframe_seed', '')})")
-        for s in (story_data or {}).get("scenes", []) if s.get("keyframe_path")
-    ]
+    scenes = []
+    for s in (story_data or {}).get("scenes", []):
+        if s.get("keyframe_path"):
+            scenes.append(
+                (s["keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} (Seed: {s.get('keyframe_seed', '')})")
+            )
+        if s.get("last_keyframe_path"):
+            end_seed = s.get("last_keyframe_seed", s.get("keyframe_seed", ""))
+            scenes.append(
+                (s["last_keyframe_path"], f"Scene {s.get('scene_number')}: {s.get('title')} — End Frame (Seed: {end_seed})")
+            )
     return chars, scenes
+
+
+def _gallery_index_to_scene_index(gallery_idx: int, story_data: dict) -> int:
+    scenes = (story_data or {}).get("scenes", [])
+    if not scenes:
+        return 0
+    cursor = 0
+    for idx, s in enumerate(scenes):
+        count = (1 if s.get("keyframe_path") else 0) + (1 if s.get("last_keyframe_path") else 0)
+        if count > 0:
+            if gallery_idx < cursor + count:
+                return idx
+            cursor += count
+    return max(0, min(len(scenes) - 1, int(gallery_idx)))
 
 
 def _studio_director_summary(scenes):
@@ -854,7 +875,25 @@ def studio_load_scene_fields(choice_label, current_state, default_seed=42):
     )
 
 
-def studio_save_scene_text_edits(choice_label, title, scenario, qwen_prompt, char_ids_str, current_state):
+def studio_load_scene_fields_dual(choice_label, current_state, default_seed=42):
+    base_fields = studio_load_scene_fields(choice_label, current_state, default_seed=default_seed)
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return (*base_fields, "", None)
+    idx = _parse_selector_index(choice_label, choices)
+    s = scenes[idx]
+    end_img = (
+        s.get("last_keyframe_path")
+        if s.get("last_keyframe_path") and os.path.exists(s.get("last_keyframe_path"))
+        else None
+    )
+    return (*base_fields, s.get("qwen_end_scene_prompt", ""), end_img)
+
+
+def studio_save_scene_text_edits(
+    choice_label, title, scenario, qwen_prompt, char_ids_str, current_state, qwen_end_prompt=None
+):
     scenes = list((current_state or {}).get("scenes", []))
     choices = _scene_choices(current_state)
     if not scenes:
@@ -864,6 +903,8 @@ def studio_save_scene_text_edits(choice_label, title, scenario, qwen_prompt, cha
     s["title"] = title
     s["scenario"] = scenario
     s["qwen_scene_prompt"] = qwen_prompt
+    if qwen_end_prompt is not None:
+        s["qwen_end_scene_prompt"] = qwen_end_prompt
     if char_ids_str and str(char_ids_str).strip():
         s["character_ids"] = [x.strip() for x in str(char_ids_str).split(",") if x.strip()]
     scenes[idx] = s
@@ -877,7 +918,9 @@ def studio_save_scene_text_edits(choice_label, title, scenario, qwen_prompt, cha
 
 def studio_redo_single_scene(
     choice_label, title, scenario, qwen_prompt, char_ids_str, scene_seed,
-    aspect_ratio, api_key, model, current_state, progress=gr.Progress(track_tqdm=True),
+    aspect_ratio, api_key, model, current_state,
+    qwen_end_prompt=None, which_frame="both", auto_qa_retry=False,
+    progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
     choices = _scene_choices(current_state)
@@ -885,30 +928,64 @@ def studio_redo_single_scene(
         return [], None, {}, "### ⚠️ Please run Phase 1 & Phase 2 first.", current_state
     idx = _parse_selector_index(choice_label, choices)
     char_ids = [x.strip() for x in str(char_ids_str or "").split(",") if x.strip()] or scenes[idx].get("character_ids", [])
+    updated_fields = {
+        "title": title,
+        "scenario": scenario,
+        "qwen_scene_prompt": qwen_prompt,
+        "character_ids": char_ids,
+    }
+    if qwen_end_prompt is not None:
+        updated_fields["qwen_end_scene_prompt"] = qwen_end_prompt
+
     pipeline = StudioPipeline(api_key=api_key, model=model)
     try:
         updated_scene = pipeline.regenerate_single_scene_keyframe(
             story_data=current_state,
             scene_index=idx,
-            updated_fields={
-                "title": title,
-                "scenario": scenario,
-                "qwen_scene_prompt": qwen_prompt,
-                "character_ids": char_ids,
-            },
+            updated_fields=updated_fields,
             seed=int(scene_seed),
+            which_frame=str(which_frame or "both"),
+            generate_end_frame=True,
+            auto_qa_retry=bool(auto_qa_retry),
             aspect_ratio=aspect_ratio,
             progress_cb=_studio_progress(progress),
         )
         _, scene_items = _studio_gallery_items(current_state)
+        qa_note = ""
+        if updated_scene.get("qa_report"):
+            qa = updated_scene["qa_report"]
+            qa_note = f"\n- **Gemma Vision QA Score:** `{qa.get('score')}/10` ({'✅ Passed' if qa.get('passed') else '⚠️ Flagged'}) — {qa.get('issues')}"
         status = (
-            f"### 🔄 Scene #{idx+1} Keyframe Redo Complete: `{updated_scene.get('title')}`\n"
+            f"### 🔄 Scene #{idx+1} Keyframe Redo Complete (`{which_frame}`): `{updated_scene.get('title')}`\n"
             f"Regenerated with Qwen Multi-Ref using seed `{int(scene_seed)}`."
+            + qa_note
         )
         return scene_items, updated_scene.get("keyframe_path"), StudioPipeline.serializable(current_state), status, current_state
     except Exception as e:
         _, scene_items = _studio_gallery_items(current_state)
         return scene_items, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Redo Error\n`{e}`", current_state
+
+
+def studio_verify_scene_qa(choice_label, api_key, model, current_state):
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes:
+        return StudioPipeline.serializable(current_state or {}), "### ⚠️ Please generate scene keyframes first.", current_state
+    idx = _parse_selector_index(choice_label, choices)
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    report = pipeline.verify_scene_frames_with_vlm(
+        scenes[idx],
+        current_state.get("characters", []),
+        art_style=current_state.get("art_style", ""),
+    )
+    badge = "✅ PASSED" if report.get("passed") else "⚠️ NEEDS ATTENTION"
+    status = (
+        f"### 🔍 Gemma 4: 31B Vision QA Critic — Scene #{idx+1} ({badge} · Score `{report.get('score')}/10`)\n"
+        f"- **Findings:** {report.get('issues')}\n"
+        + (f"- **Suggested Start Prompt Fix:** `{report['suggested_start_prompt']}`\n" if report.get("suggested_start_prompt") else "")
+        + (f"- **Suggested End Prompt Fix:** `{report['suggested_end_prompt']}`" if report.get("suggested_end_prompt") else "")
+    )
+    return StudioPipeline.serializable(current_state), status, current_state
 
 
 def studio_load_clip_fields(choice_label, current_state, default_seed=42):
@@ -962,6 +1039,7 @@ def studio_redirect_single_clip(
 def studio_redo_single_clip(
     choice_label, motion_desc, camera_move, compiled_wan_prompt, clip_seed,
     re_run_director, use_vision, aspect_ratio, api_key, model, current_state,
+    use_last_frame=True, enable_rife_2x=False,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
@@ -983,14 +1061,17 @@ def studio_redo_single_clip(
             aspect_ratio=aspect_ratio,
             re_run_director=bool(re_run_director),
             use_vision=bool(use_vision),
+            use_last_frame=bool(use_last_frame),
+            enable_rife_2x=bool(enable_rife_2x),
             auto_stitch=True,
             progress_cb=_studio_progress(progress),
         )
         clip_path = updated_scene.get("video_path")
         final_movie = current_state.get("final_movie_path")
+        flf_tag = "FLF2V (First+Last Frame)" if updated_scene.get("used_last_frame") else "I2V (First Frame)"
         status = (
             f"### 🔄 Scene #{idx+1} Video Clip Redo Complete!\n"
-            f"- **Clip:** `{pathlib.Path(clip_path).name if clip_path else 'N/A'}` (Seed `{int(clip_seed)}`)\n"
+            f"- **Clip:** `{pathlib.Path(clip_path).name if clip_path else 'N/A'}` (Seed `{int(clip_seed)}`, Mode: `{flf_tag}`)\n"
             f"- **Final Movie Re-Stitched:** `{pathlib.Path(final_movie).name if final_movie else 'Pending remaining clips'}`"
         )
         return (
@@ -1038,8 +1119,8 @@ def studio_run_full(
             f"### 🎬 Production Complete!\n\n"
             f"- **Screenplay:** '{story_data.get('title')}'\n"
             f"- **Characters:** {len(char_items)} (Z-Image Turbo, locked seed `{z_seed}`)\n"
-            f"- **Scene Keyframes:** {len(scene_items)} (Qwen Multi-Reference, locked seed `{q_seed}`)\n"
-            f"- **Video Clips:** {len(story_data.get('clip_paths', []))} (Wan 2.2, locked seed `{w_seed}`)\n"
+            f"- **Scene Keyframes (Start + End):** {len(scene_items)} (Qwen Multi-Reference, locked seed `{q_seed}`)\n"
+            f"- **Video Clips:** {len(story_data.get('clip_paths', []))} (Wan 2.2 FLF2V, locked seed `{w_seed}`)\n"
             f"- **Final Movie:** `{pathlib.Path(final_video).name if final_video else 'N/A'}`"
             + _studio_director_summary(story_data.get("scenes"))
         )
@@ -1061,7 +1142,7 @@ def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, pr
         status_msg = (
             f"### 📝 Step 1 Complete: Screenplay & Characters Generated\n"
             f"**Title:** *{story_data.get('title')}* — Extracted **{len(story_data.get('characters', []))}** character(s) and "
-            f"**{len(story_data.get('scenes', []))}** shot(s) of ≤5s each.\n"
+            f"**{len(story_data.get('scenes', []))}** shot(s) of ≤5s each (with First + Last Frame beats).\n"
             f"Review/edit below, then click **Next: Validate Story ➔ Phase 2 (Characters)**."
         )
         return StudioPipeline.serializable(story_data), status_msg, story_data
@@ -1091,7 +1172,11 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
         return [], f"### ❌ Step 2 Error\n`{e}`", current_state
 
 
-def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
+def studio_run_step3(
+    aspect_ratio, seed, api_key, model, current_state,
+    generate_end_frame=True, auto_qa_retry=False,
+    progress=gr.Progress(track_tqdm=True),
+):
     if not current_state or "scenes" not in current_state or not any(
         c.get("portrait_path") or c.get("portrait_pil") for c in current_state.get("characters", [])
     ):
@@ -1103,14 +1188,17 @@ def studio_run_step3(aspect_ratio, seed, api_key, model, current_state, progress
             characters=current_state["characters"],
             aspect_ratio=aspect_ratio,
             shared_seed=int(seed),
+            generate_end_frame=bool(generate_end_frame),
+            auto_qa_retry=bool(auto_qa_retry),
+            art_style=current_state.get("art_style", ""),
             progress_cb=_studio_progress(progress),
         )
         current_state["scenes"] = scenes
         _, scene_items = _studio_gallery_items(current_state)
         return scene_items, (
-            f"### 🖼️ Step 3 Complete: {len(scenes)} Scene Keyframes\n"
-            f"All scenes generated with locked Qwen seed `{int(seed)}` & character multi-references. "
-            f"Select any scene on the right to edit its scenario/seed and redo individually, or click **Next ➔ Phase 4**."
+            f"### 🖼️ Step 3 Complete: {len(scenes)} Scenes ({len(scene_items)} Start & End Keyframes)\n"
+            f"All Start & End frames generated with locked Qwen seed `{int(seed)}`, character multi-references, and CIE-Lab color matching. "
+            f"Select any scene on the right to edit its Start/End prompts or redo individually, or click **Next ➔ Phase 4**."
         ), current_state
     except Exception as e:
         return [], f"### ❌ Step 3 Error\n`{e}`", current_state
@@ -1131,14 +1219,18 @@ def studio_run_director(api_key, model, use_vision, current_state, progress=gr.P
             progress_cb=_studio_progress(progress),
         )
         return StudioPipeline.serializable(current_state), (
-            f"### 🎬 Step 4 Complete: Director planned {len(scenes)} shots"
+            f"### 🎬 Step 4 Complete: Director planned {len(scenes)} shots (inspecting Start + End keyframes)"
             + _studio_director_summary(current_state["scenes"])
         ), current_state
     except Exception as e:
         return StudioPipeline.serializable(current_state), f"### ❌ Director Error\n`{e}`", current_state
 
 
-def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_state, progress=gr.Progress(track_tqdm=True)):
+def studio_run_step4(
+    aspect_ratio, seed, api_key, model, use_vision, current_state,
+    use_last_frame=True, enable_rife_2x=False,
+    progress=gr.Progress(track_tqdm=True),
+):
     scenes = (current_state or {}).get("scenes", [])
     if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
         return None, "### ⚠️ Please run Step 3 (Scene Keyframes) first.", current_state
@@ -1153,7 +1245,12 @@ def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_sta
             )
             current_state["scenes"] = scenes
         clips = pipeline.generate_scene_videos(
-            scenes=scenes, aspect_ratio=aspect_ratio, base_seed=int(seed), progress_cb=cb,
+            scenes=scenes,
+            aspect_ratio=aspect_ratio,
+            base_seed=int(seed),
+            use_last_frame=bool(use_last_frame),
+            enable_rife_2x=bool(enable_rife_2x),
+            progress_cb=cb,
         )
         current_state["clip_paths"] = clips
         final_movie = pipeline.stitch_clips(
@@ -1161,8 +1258,10 @@ def studio_run_step4(aspect_ratio, seed, api_key, model, use_vision, current_sta
         )
         current_state["final_movie_path"] = final_movie
         current_state["manifest_path"] = pipeline.save_manifest(current_state)
+        flf_mode = "First+Last Frame (FLF2V)" if use_last_frame else "First Frame Only (I2V)"
+        fps_str = "32fps RIFE 2x" if enable_rife_2x else "16fps Native"
         return final_movie, (
-            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`)\n"
+            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`, Mode: `{flf_mode}`, `{fps_str}`)\n"
             f"Final file: `{pathlib.Path(final_movie).name}`"
             + _studio_director_summary(scenes)
         ), current_state
@@ -1377,12 +1476,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                             )
 
             # ══════════════════════════════════════════════════════════════════
-            # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF)
+            # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF — FIRST + LAST FRAME)
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Multi-Ref)", id="phase3") as phase3_tab:
+            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Dual-Keyframe: First + Last Frame)", id="phase3") as phase3_tab:
                 with gr.Row():
                     studio_step3_btn = gr.Button(
-                        "🖼️ Generate All Scene Images (Using Locked Qwen Seed + Character Refs)",
+                        "🖼️ Generate All Scene First + Last Frames (Locked Qwen Seed + Character Refs + CIE-Lab Match)",
                         variant="primary",
                         size="lg",
                         scale=2,
@@ -1395,26 +1494,40 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                     )
 
                 with gr.Row():
+                    studio_scene_qa_chk = gr.Checkbox(
+                        label="🔍 Auto-Verify & Self-Correct Scenes with Gemma 4: 31B Vision QA Critic (Scores 1-10, retries once if < 7)",
+                        value=False,
+                    )
+
+                with gr.Row():
                     with gr.Column(scale=1):
                         studio_scenes_gallery = gr.Gallery(
-                            label="🖼️ Generated Scene Keyframes (Click any scene to inspect/redo)",
-                            columns=[2, 3],
-                            height=440,
+                            label="🖼️ Generated Scene Keyframes — First (0.0s) & Last (5.0s) Frames (Click any frame to inspect/redo)",
+                            columns=[2, 2],
+                            height=500,
                             object_fit="contain",
                             preview=True,
                         )
                     with gr.Column(scale=1):
-                        gr.Markdown("#### 🛠️ Individual Scene / Scenario Inspector & Redo")
+                        gr.Markdown("#### 🛠️ Individual Scene / Scenario Dual-Keyframe Inspector & Redo")
                         studio_scene_selector = gr.Dropdown(
                             label="Select Scene to Edit / Redo",
                             choices=[],
                             interactive=True,
                         )
-                        studio_scene_preview = gr.Image(
-                            label="Selected Scene Keyframe",
-                            height=220,
-                            interactive=False,
-                        )
+                        with gr.Row():
+                            studio_scene_preview = gr.Image(
+                                label="🟢 First Frame (Start @ 0.0s)",
+                                height=200,
+                                interactive=False,
+                                scale=1,
+                            )
+                            studio_scene_end_preview = gr.Image(
+                                label="🏁 Last Frame (End @ 5.0s — CIE-Lab Matched)",
+                                height=200,
+                                interactive=False,
+                                scale=1,
+                            )
                         with gr.Row():
                             studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=1)
                             studio_scene_seed_edit = gr.Number(
@@ -1428,26 +1541,39 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                             lines=2,
                         )
                         studio_scene_prompt_edit = gr.Textbox(
-                            label="Qwen Visual Scene Prompt (Framing, environment, character pose)",
-                            lines=3,
+                            label="🟢 First Frame Qwen Visual Prompt (Start Pose @ 0.0s)",
+                            lines=2,
                         )
-                        studio_scene_chars_edit = gr.Textbox(
-                            label="Character IDs in Scene (comma-separated, e.g. char_1, char_2)",
+                        studio_scene_end_prompt_edit = gr.Textbox(
+                            label="🏁 Last Frame Qwen Visual Prompt (End Pose @ 5.0s — Anchored on First Frame)",
+                            lines=2,
                         )
                         with gr.Row():
+                            studio_scene_chars_edit = gr.Textbox(
+                                label="Character IDs in Scene (comma-separated, e.g. char_1, char_2)",
+                                scale=2,
+                            )
+                            studio_scene_redo_mode = gr.Dropdown(
+                                label="Frames to Redo",
+                                choices=["both", "start", "end"],
+                                value="both",
+                                scale=1,
+                            )
+                        with gr.Row():
                             studio_scene_save_btn = gr.Button("💾 Save Scene Description Only", variant="secondary")
+                            studio_scene_qa_btn = gr.Button("🔍 Inspect Scene with Gemma Vision QA Critic", variant="secondary")
                             studio_scene_redo_btn = gr.Button(
-                                "🔄 Redo This Scene Image (Qwen Multi-Ref)",
+                                "🔄 Redo Selected Scene Frame(s) (Qwen Multi-Ref)",
                                 variant="primary",
                             )
 
             # ══════════════════════════════════════════════════════════════════
-            # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2)
+            # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2 FLF2V)
             # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2)", id="phase4") as phase4_tab:
+            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2 FLF2V + 32fps RIFE)", id="phase4") as phase4_tab:
                 with gr.Row():
                     studio_step_director_btn = gr.Button(
-                        "🎬 Step 4A: Run Gemma Vision Director on All Scenes",
+                        "🎬 Step 4A: Run Dual-Frame Gemma Vision Director on All Scenes",
                         variant="secondary",
                         scale=1,
                     )
@@ -1458,6 +1584,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                         scale=2,
                     )
                     studio_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary", scale=1)
+
+                with gr.Row():
+                    studio_use_last_frame_chk = gr.Checkbox(
+                        label="📌 Use First + Last Frame in Wan 2.2 (FLF2V Mode — Locks Start & End Poses)",
+                        value=True,
+                    )
+                    studio_rife_2x_chk = gr.Checkbox(
+                        label="✨ Enable 32fps RIFE 2x Smooth Motion Interpolation (16fps ➔ 32fps)",
+                        value=True,
+                    )
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1898,7 +2034,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img = studio_load_character_fields(
             first_char, state, default_seed=z_seed
         )
-        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img = studio_load_scene_fields(
+        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
             first_scene, state, default_seed=q_seed
         )
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(
@@ -1912,7 +2048,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             gr.update(choices=char_opts, value=first_char),
             c_name, c_face, c_hair, c_cloth, c_sig, c_prompt, c_seed, c_img,
             gr.update(choices=scene_opts, value=first_scene),
-            s_title, s_scen, s_qprompt, s_cids, s_seed, s_img,
+            s_title, s_scen, s_qprompt, s_qendprompt, s_cids, s_seed, s_img, s_end_img,
             gr.update(choices=scene_opts, value=first_scene),
             v_mot, v_cam, v_wprompt, v_seed, v_vid,
         )
@@ -1933,7 +2069,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_char_seed_edit, studio_char_preview,
             studio_scene_selector,
             studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
-            studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
+            studio_scene_end_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
+            studio_scene_preview, studio_scene_end_preview,
             studio_clip_selector,
             studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
             studio_clip_seed_edit, studio_clip_preview,
@@ -2104,27 +2241,36 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
-    # Phase 3: Generate All Scene Images & Individual Scene Inspector
-    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, progress=gr.Progress(track_tqdm=True)):
+    # Phase 3: Generate All Scene Images (First + Last Frames) & Individual Scene Inspector
+    def _ui_step3(aspect_ratio, q_seed, api_key, model, current_state, selected_scene, auto_qa_chk=False, progress=gr.Progress(track_tqdm=True)):
         scene_items, status, state = studio_run_step3(
-            aspect_ratio, q_seed, api_key, model, current_state, progress=progress
+            aspect_ratio, q_seed, api_key, model, current_state,
+            auto_qa_retry=bool(auto_qa_chk),
+            progress=progress,
         )
-        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img = studio_load_scene_fields(
+        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
             selected_scene, state, default_seed=q_seed
         )
-        return scene_items, status, state, s_seed, s_img
+        return scene_items, status, state, s_seed, s_img, s_end_img
 
     studio_step3_btn.click(
         fn=_ui_step3,
         inputs=[
             studio_aspect_ratio, studio_qwen_seed, studio_ollama_key,
             studio_ollama_model, studio_pipeline_state, studio_scene_selector,
+            studio_scene_qa_chk,
         ],
         outputs=[
             studio_scenes_gallery, studio_status, studio_pipeline_state,
-            studio_scene_seed_edit, studio_scene_preview,
+            studio_scene_seed_edit, studio_scene_preview, studio_scene_end_preview,
         ],
     )
+
+    def studio_load_scene_end_fields(choice_label, current_state, default_seed=42):
+        _, _, _, _, _, _, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
+            choice_label, current_state, default_seed=default_seed
+        )
+        return s_qendprompt, s_end_img
 
     studio_scene_selector.change(
         fn=studio_load_scene_fields,
@@ -2133,13 +2279,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
             studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
         ],
+    ).then(
+        fn=studio_load_scene_end_fields,
+        inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
     )
 
     def _on_scene_gallery_select(evt: gr.SelectData, current_state, default_seed):
         choices = _scene_choices(current_state)
-        if not choices or evt.index >= len(choices):
+        scene_idx = _gallery_index_to_scene_index(evt.index, current_state)
+        if not choices or scene_idx >= len(choices):
             return gr.update(), "", "", "", "", int(default_seed), None
-        chosen = choices[evt.index]
+        chosen = choices[scene_idx]
         fields = studio_load_scene_fields(chosen, current_state, default_seed)
         return (gr.update(value=chosen), *fields)
 
@@ -2151,6 +2302,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
             studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
         ],
+    ).then(
+        fn=studio_load_scene_end_fields,
+        inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
     )
 
     studio_scene_save_btn.click(
@@ -2158,6 +2313,15 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
             studio_scene_prompt_edit, studio_scene_chars_edit, studio_pipeline_state,
+            studio_scene_end_prompt_edit,
+        ],
+        outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_scene_qa_btn.click(
+        fn=studio_verify_scene_qa,
+        inputs=[
+            studio_scene_selector, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
         ],
         outputs=[studio_json_display, studio_status, studio_pipeline_state],
     )
@@ -2168,11 +2332,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
             studio_scene_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
             studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+            studio_scene_end_prompt_edit, studio_scene_redo_mode, studio_scene_qa_chk,
         ],
         outputs=[
             studio_scenes_gallery, studio_scene_preview, studio_json_display,
             studio_status, studio_pipeline_state,
         ],
+    ).then(
+        fn=studio_load_scene_end_fields,
+        inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
     )
 
     # Phase 4: Director, Generate All Video Clips, and Individual Clip Redo
@@ -2193,9 +2362,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
-    def _ui_step4(aspect_ratio, w_seed, api_key, model, use_vision, current_state, selected_clip, progress=gr.Progress(track_tqdm=True)):
+    def _ui_step4(
+        aspect_ratio, w_seed, api_key, model, use_vision, current_state, selected_clip,
+        use_last_frame=True, enable_rife_2x=True,
+        progress=gr.Progress(track_tqdm=True),
+    ):
         final_vid, status, state = studio_run_step4(
-            aspect_ratio, w_seed, api_key, model, use_vision, current_state, progress=progress
+            aspect_ratio, w_seed, api_key, model, use_vision, current_state,
+            use_last_frame=bool(use_last_frame),
+            enable_rife_2x=bool(enable_rife_2x),
+            progress=progress,
         )
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
         return final_vid, status, state, v_mot, v_cam, v_wprompt, v_seed, v_vid
@@ -2205,6 +2381,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_aspect_ratio, studio_wan_seed, studio_ollama_key,
             studio_ollama_model, studio_use_vision, studio_pipeline_state, studio_clip_selector,
+            studio_use_last_frame_chk, studio_rife_2x_chk,
         ],
         outputs=[
             studio_final_video, studio_status, studio_pipeline_state,
@@ -2241,6 +2418,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_clip_wan_prompt_edit, studio_clip_seed_edit,
             studio_clip_rerundir_chk, studio_use_vision, studio_aspect_ratio,
             studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+            studio_use_last_frame_chk, studio_rife_2x_chk,
         ],
         outputs=[
             studio_clip_preview, studio_final_video, studio_json_display,

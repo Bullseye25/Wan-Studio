@@ -341,7 +341,7 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         self.assertEqual(s_fields[4], 2222)
         self.assertEqual(s_fields[5], self.scene_img_path)
 
-        # Save text edits for scene 1
+        # Save text edits for scene 1 (including End Frame prompt)
         json_out, status, new_state = app.studio_save_scene_text_edits(
             "Scene 1: The Discovery",
             "The Glowing Crater",
@@ -349,10 +349,12 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
             "Wide shot of Luna and glowing star",
             "char_1",
             self.sample_state,
+            qwen_end_prompt="Luna gently cradling the warm baby star",
         )
         self.assertIn("Saved description updates for Scene #1", status)
         self.assertEqual(new_state["scenes"][0]["title"], "The Glowing Crater")
         self.assertEqual(new_state["scenes"][0]["character_ids"], ["char_1"])
+        self.assertEqual(new_state["scenes"][0]["qwen_end_scene_prompt"], "Luna gently cradling the warm baby star")
 
         # Simulate clicking Scene #1 in the Gradio gallery
         mock_evt = MagicMock()
@@ -360,6 +362,46 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         sel_res = app._on_scene_gallery_select(mock_evt, new_state, default_seed=888)
         self.assertEqual(sel_res[0]["value"], "Scene 1: The Glowing Crater")
         self.assertEqual(sel_res[1], "The Glowing Crater")
+
+    @patch.object(StudioPipeline, "_chat_completion")
+    def test_phase3_dual_keyframe_and_qa_critic_ui_handlers(self, mock_chat):
+        end_img_path = os.path.join(self.temp_dir.name, "scene1_end.jpg")
+        Image.new("RGB", (64, 64), color="green").save(end_img_path)
+        self.sample_state["scenes"][0]["last_keyframe_path"] = end_img_path
+        self.sample_state["scenes"][0]["last_keyframe_seed"] = 2222
+        self.sample_state["scenes"][0]["qwen_end_scene_prompt"] = "Luna lifting the star at 5.0s"
+
+        # Gallery items should contain both Start (0.0s) and End (5.0s) frames
+        _, scene_items = app._studio_gallery_items(self.sample_state)
+        self.assertEqual(len(scene_items), 2)
+        self.assertIn("Scene 1: The Discovery", scene_items[0][1])
+        self.assertIn("End Frame", scene_items[1][1])
+
+        # Both gallery index 0 (Start Frame) and index 1 (End Frame) map to Scene 0
+        self.assertEqual(app._gallery_index_to_scene_index(0, self.sample_state), 0)
+        self.assertEqual(app._gallery_index_to_scene_index(1, self.sample_state), 0)
+
+        # Dual scene field loader returns 8-tuple including end prompt and end image
+        dual_fields = app.studio_load_scene_fields_dual("Scene 1: The Discovery", self.sample_state, default_seed=888)
+        self.assertEqual(len(dual_fields), 8)
+        self.assertEqual(dual_fields[5], self.scene_img_path)
+        self.assertEqual(dual_fields[6], "Luna lifting the star at 5.0s")
+        self.assertEqual(dual_fields[7], end_img_path)
+
+        # Verify QA Critic UI handler
+        mock_chat.return_value = json.dumps({
+            "score": 9,
+            "passed": True,
+            "issues": "none",
+            "suggested_start_prompt": "",
+            "suggested_end_prompt": "",
+        })
+        json_qa, status_qa, state_qa = app.studio_verify_scene_qa(
+            "Scene 1: The Discovery", "dummy_key", "gemma4:31b", self.sample_state
+        )
+        self.assertIn("PASSED", status_qa)
+        self.assertIn("9/10", status_qa)
+        self.assertEqual(state_qa["scenes"][0]["qa_report"]["score"], 9)
 
     @patch.object(StudioPipeline, "_chat_completion")
     def test_phase4_load_and_redirect_single_clip(self, mock_chat):

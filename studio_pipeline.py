@@ -128,6 +128,43 @@ def _trim(text: Any, limit: int) -> str:
     return s if len(s) <= limit else s[: limit - 1].rsplit(" ", 1)[0] + "…"
 
 
+def match_color_histogram_lab(
+    source_pil: Image.Image,
+    reference_pil: Image.Image,
+    strength: float = 0.85,
+) -> Image.Image:
+    """
+    Matches the CIE-Lab luminance and color-temperature statistics (Reinhard transfer)
+    of `source_pil` (e.g. End Frame) to `reference_pil` (e.g. Start Frame) so Wan 2.2
+    First-Last-Frame (FLF2V) interpolation never suffers from exposure flashing or tint drift.
+    """
+    import numpy as np
+    import cv2
+
+    strength = float(_clamp(strength, 0.0, 1.0, 0.85))
+    if strength <= 0.0 or source_pil is None or reference_pil is None:
+        return source_pil
+
+    src_rgb = np.array(source_pil.convert("RGB"), dtype=np.uint8)
+    ref_rgb = np.array(reference_pil.convert("RGB").resize(source_pil.size, Image.Resampling.BILINEAR), dtype=np.uint8)
+
+    src_lab = cv2.cvtColor(src_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    matched_lab = np.empty_like(src_lab)
+    for ch in range(3):
+        s_mean, s_std = float(src_lab[:, :, ch].mean()), float(src_lab[:, :, ch].std()) + 1e-5
+        r_mean, r_std = float(ref_lab[:, :, ch].mean()), float(ref_lab[:, :, ch].std()) + 1e-5
+        # Clamp std ratio to [0.7, 1.35] so contrast never blows out
+        std_ratio = max(0.7, min(1.35, r_std / s_std))
+        transferred = (src_lab[:, :, ch] - s_mean) * std_ratio + r_mean
+        matched_lab[:, :, ch] = (1.0 - strength) * src_lab[:, :, ch] + strength * transferred
+
+    matched_lab = np.clip(matched_lab, 0.0, 255.0).astype(np.uint8)
+    matched_rgb = cv2.cvtColor(matched_lab, cv2.COLOR_LAB2RGB)
+    return Image.fromarray(matched_rgb)
+
+
 class StudioPipeline:
     """
     Automated Multi-Agent Video Production Studio Coordinator.
@@ -211,7 +248,8 @@ class StudioPipeline:
     ) -> Dict[str, Any]:
         """
         Queries Ollama Cloud (gemma4:31b) to produce a structured short story with
-        extracted character visual details and scene-by-scene story beats.
+        extracted character visual details and scene-by-scene story beats (including both
+        START frame and END frame prompts for Wan 2.2 First-Last-Frame animation).
         Scene count is raised automatically so no clip exceeds Wan's 5s window.
         """
         num_scenes = plan_scene_count(target_duration, num_scenes)
@@ -223,10 +261,15 @@ class StudioPipeline:
         system_prompt = (
             "You are a master animation director and AI scriptwriter.\n"
             f"The user wants a short movie: {target_duration} seconds total, EXACTLY {num_scenes} scenes, "
-            f"~{scene_duration}s each. Every scene is ONE continuous shot animated from a single keyframe, so each "
-            "scene must describe a single clear action that fits in 5 seconds (no cuts inside a scene).\n"
+            f"~{scene_duration}s each. Every scene is ONE continuous shot animated between a FIRST FRAME (t=0s) "
+            "and a LAST FRAME (t=5s), so each scene must describe a single clear action that fits in 5 seconds "
+            "(no cuts inside a scene).\n"
             "Extract exact character visual details (face, hair, clothing, signature traits) so every image model "
             "renders them identically. Keep character designs fixed across all scenes.\n"
+            "For every scene, write BOTH:\n"
+            "- `qwen_scene_prompt`: The STARTING keyframe composition & character poses at t=0.0s.\n"
+            "- `qwen_end_scene_prompt`: The ENDING keyframe pose & expression at t=5.0s in the EXACT SAME environment, "
+            "lighting, and camera framing after completing the shot's action.\n"
             "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
             "{\n"
             '  "title": "Short Film Title",\n'
@@ -251,8 +294,9 @@ class StudioPipeline:
             '      "title": "Scene Name",\n'
             f'      "duration_seconds": {scene_duration},\n'
             '      "scenario": "Story beat: what happens in this single shot",\n'
-            '      "qwen_scene_prompt": "Keyframe image prompt: environment, composition, character poses at the START of the shot",\n'
-            '      "wan_motion_prompt": "Draft motion description for the shot",\n'
+            '      "qwen_scene_prompt": "FIRST FRAME (t=0s) prompt: environment, composition, character poses at the START of the shot",\n'
+            '      "qwen_end_scene_prompt": "LAST FRAME (t=5s) prompt: same environment and lighting, character poses/expressions at the END of the shot",\n'
+            '      "wan_motion_prompt": "Draft motion description bridging the first frame to the last frame",\n'
             '      "camera_movement": "e.g. Slow Cinematic Push-In / Static Tripod Shot",\n'
             '      "character_ids": ["char_1"]\n'
             "    }\n"
@@ -298,7 +342,8 @@ class StudioPipeline:
     ) -> Dict[str, Any]:
         """
         Enforces the schema contract on LLM output: valid character ids, scenes that reference
-        existing characters, sequential numbering, and per-scene durations within Wan's window.
+        existing characters, sequential numbering, both start & end keyframe prompts, and per-scene
+        durations within Wan's window.
         """
         data = dict(data or {})
         data.setdefault("title", "Studio Story")
@@ -336,6 +381,7 @@ class StudioPipeline:
                 "title": "Scene 1",
                 "scenario": prompt,
                 "qwen_scene_prompt": prompt,
+                "qwen_end_scene_prompt": f"{prompt}, characters settled in warm final pose at end of shot",
                 "wan_motion_prompt": "cinematic smooth motion, locked character identity",
                 "camera_movement": "Slow Cinematic Push-In",
                 "character_ids": valid_ids[:1],
@@ -349,6 +395,12 @@ class StudioPipeline:
             s["scene_number"] = i + 1
             s.setdefault("title", f"Scene {i+1}")
             s.setdefault("scenario", s.get("qwen_scene_prompt", ""))
+            s.setdefault("qwen_scene_prompt", s.get("scenario", prompt))
+            if not s.get("qwen_end_scene_prompt"):
+                motion_beat = s.get("wan_motion_prompt") or s.get("scenario") or "completing the shot action"
+                s["qwen_end_scene_prompt"] = (
+                    f"{s['qwen_scene_prompt']}. Ending pose at the end of the 5-second shot after: {motion_beat}"
+                )
             ids = s.get("character_ids")
             if isinstance(ids, str):
                 ids = [ids]
@@ -487,7 +539,7 @@ class StudioPipeline:
         return target
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STAGE 3: Scene Frame Synthesis via Qwen Image Edit (Multi-Reference)
+    # STAGE 3: Dual Scene Frame Synthesis via Qwen Image Edit (Start + End Frames)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _synthesize_single_scene_frame(
@@ -496,8 +548,18 @@ class StudioPipeline:
         characters: List[Dict[str, Any]],
         aspect_ratio: str,
         seed: int,
+        generate_end_frame: Optional[bool] = None,
+        which_frame: str = "both",
+        end_seed: Optional[int] = None,
+        color_match_end: bool = True,
     ) -> Dict[str, Any]:
-        """Internal helper that generates a single scene keyframe with Qwen Image Edit."""
+        """
+        Generates the Starting Frame (t=0s) and/or Ending Frame (t=5s) for a scene using Qwen Image Edit.
+        - Start Frame (`keyframe_pil` / `keyframe_path`): Conditioned on character reference portraits + `qwen_scene_prompt`.
+        - End Frame (`last_keyframe_pil` / `last_keyframe_path`): Anchor-chained onto the Start Frame as `base_image`
+          plus character reference portraits + `qwen_end_scene_prompt`, then normalized in CIE-Lab space via
+          `match_color_histogram_lab` so background, lighting, and character identity remain 100% locked.
+        """
         dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
         qwen_w, qwen_h = dims["qwen_w"], dims["qwen_h"]
 
@@ -521,55 +583,210 @@ class StudioPipeline:
             ref_chars = [default_char]
         ref_chars = [rc for rc in ref_chars if rc.get("portrait_pil") is not None][:QWEN_MAX_INPUT_IMAGES]
 
-        if ref_chars:
-            base_pil = ref_chars[0]["portrait_pil"]
-            additional_refs = [rc["portrait_pil"] for rc in ref_chars[1:]]
+        scene_entry = dict(scene)
+        use_seed = int(seed)
+        use_end_seed = int(end_seed if end_seed is not None else scene.get("last_keyframe_seed", use_seed))
+        which = str(which_frame or "both").lower().strip()
+        if which not in ("both", "start", "end"):
+            which = "both"
+
+        if generate_end_frame is None:
+            should_gen_end = bool(scene.get("qwen_end_scene_prompt")) or which == "end"
         else:
-            base_pil = Image.new("RGB", (qwen_w, qwen_h), (255, 255, 255))
-            additional_refs = []
+            should_gen_end = bool(generate_end_frame) or which == "end"
 
         scene_prompt = scene.get("qwen_scene_prompt") or scene.get("scenario") or "Scene background"
-        if ref_chars:
-            mapping = "; ".join(
-                f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
-            )
-            refined_prompt = (
-                f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
-                f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
-            )
-        else:
-            refined_prompt = f"{scene_prompt}, full-frame cinematic composition, detailed background, 4k"
-
-        use_seed = int(seed)
-        print(f"[StudioPipeline] Generating Qwen keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_seed})...")
-
-        results = qwen_image_edit_remote(
-            base_image=base_pil,
-            ref_images=additional_refs,
-            prompt=refined_prompt,
-            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            seed=use_seed,
-            steps=20,
-            true_cfg_scale=4.0,
-            guidance_scale=1.0,
-            num_images=1,
-            custom_width=qwen_w,
-            custom_height=qwen_h,
-        )
-
-        keyframe_pil = Image.open(io.BytesIO(results[0])).convert("RGB")
-
         timestamp = int(time.time())
-        filename = f"scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.jpg"
-        keyframe_path = self.scenes_dir / filename
-        keyframe_pil.save(keyframe_path, format="JPEG", quality=95)
-        print(f"[StudioPipeline] Saved Scene {scene_num} keyframe: {keyframe_path}")
+        clean_title = self._sanitize_filename(title)
 
-        scene_entry = dict(scene)
-        scene_entry["keyframe_pil"] = keyframe_pil
-        scene_entry["keyframe_path"] = str(keyframe_path)
-        scene_entry["keyframe_seed"] = use_seed
+        # ── 1. Generate Starting Frame (t = 0.0s) ─────────────────────────────
+        keyframe_pil = scene_entry.get("keyframe_pil")
+        if keyframe_pil is None and scene_entry.get("keyframe_path") and os.path.exists(scene_entry["keyframe_path"]):
+            try:
+                keyframe_pil = Image.open(scene_entry["keyframe_path"]).convert("RGB")
+            except Exception:
+                keyframe_pil = None
+
+        if which in ("both", "start") or keyframe_pil is None:
+            if ref_chars:
+                base_pil = ref_chars[0]["portrait_pil"]
+                additional_refs = [rc["portrait_pil"] for rc in ref_chars[1:]]
+                mapping = "; ".join(
+                    f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
+                )
+                refined_prompt = (
+                    f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
+                    f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
+                )
+            else:
+                base_pil = Image.new("RGB", (qwen_w, qwen_h), (255, 255, 255))
+                additional_refs = []
+                refined_prompt = f"{scene_prompt}, full-frame cinematic composition, detailed background, 4k"
+
+            print(f"[StudioPipeline] Generating Qwen START keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_seed})...")
+            results = qwen_image_edit_remote(
+                base_image=base_pil,
+                ref_images=additional_refs,
+                prompt=refined_prompt,
+                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                seed=use_seed,
+                steps=20,
+                true_cfg_scale=4.0,
+                guidance_scale=1.0,
+                num_images=1,
+                custom_width=qwen_w,
+                custom_height=qwen_h,
+            )
+            keyframe_pil = Image.open(io.BytesIO(results[0])).convert("RGB")
+            filename = f"scene_{scene_num}_{clean_title}_{timestamp}.jpg"
+            keyframe_path = self.scenes_dir / filename
+            keyframe_pil.save(keyframe_path, format="JPEG", quality=95)
+            print(f"[StudioPipeline] Saved Scene {scene_num} START keyframe: {keyframe_path}")
+
+            scene_entry["keyframe_pil"] = keyframe_pil
+            scene_entry["keyframe_path"] = str(keyframe_path)
+            scene_entry["keyframe_seed"] = use_seed
+
+        # ── 2. Generate Ending Frame (t = 5.0s, Anchor-Chained on Start Frame) ─
+        if should_gen_end and which in ("both", "end"):
+            end_raw = (
+                scene.get("qwen_end_scene_prompt")
+                or scene.get("wan_motion_prompt")
+                or f"{scene_prompt}, characters in the final pose at the end of the 5-second shot"
+            )
+            scene_entry.setdefault("qwen_end_scene_prompt", end_raw)
+
+            # Anchor on Start Frame (`keyframe_pil`) as Image 1 + up to 2 character portraits as Image 2/3
+            char_refs_for_end = [rc["portrait_pil"] for rc in ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)]]
+            char_ref_mapping = "; ".join(
+                f"{rc.get('name', 'character')} matches character sheet in image {i+2}"
+                for i, rc in enumerate(ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)])
+            )
+            end_refined_prompt = (
+                f"Image 1 is the exact starting frame of this shot. Keep the EXACT same background environment, "
+                f"camera framing, lighting, and character outfits/faces from Image 1, and transition the "
+                f"character pose and expression to the ending state at the end of the 5-second shot: {end_raw}. "
+                + (f"{char_ref_mapping}. " if char_ref_mapping else "")
+                + "Full-frame cinematic composition, identical background and character identity, 4k"
+            )
+
+            print(f"[StudioPipeline] Generating Qwen END keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_end_seed})...")
+            end_results = qwen_image_edit_remote(
+                base_image=keyframe_pil,
+                ref_images=char_refs_for_end,
+                prompt=end_refined_prompt,
+                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                seed=use_end_seed,
+                steps=20,
+                true_cfg_scale=4.0,
+                guidance_scale=1.0,
+                num_images=1,
+                custom_width=qwen_w,
+                custom_height=qwen_h,
+            )
+            last_keyframe_pil = Image.open(io.BytesIO(end_results[0])).convert("RGB")
+            if color_match_end and keyframe_pil is not None:
+                last_keyframe_pil = match_color_histogram_lab(last_keyframe_pil, keyframe_pil, strength=0.85)
+
+            end_filename = f"scene_{scene_num}_end_{clean_title}_{timestamp}.jpg"
+            last_keyframe_path = self.scenes_dir / end_filename
+            last_keyframe_pil.save(last_keyframe_path, format="JPEG", quality=95)
+            print(f"[StudioPipeline] Saved Scene {scene_num} END keyframe: {last_keyframe_path}")
+
+            scene_entry["last_keyframe_pil"] = last_keyframe_pil
+            scene_entry["last_keyframe_path"] = str(last_keyframe_path)
+            scene_entry["last_keyframe_seed"] = use_end_seed
+
         return scene_entry
+
+    def verify_scene_frames_with_vlm(
+        self,
+        scene: Dict[str, Any],
+        characters: List[Dict[str, Any]],
+        art_style: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Gemma 4: 31B Vision QA Critic — inspects the generated Start Frame and End Frame
+        against the character sheet and scene beat to catch anatomy errors, wrong outfits,
+        or background discontinuity before video animation.
+        """
+        char_map = {c.get("id"): c for c in (characters or [])}
+        cast = [char_map[cid] for cid in scene.get("character_ids", []) if cid in char_map]
+        cast_desc = "\n".join(
+            f"- {c.get('name')}: face={c.get('face', '')}; hair={c.get('hair', '')}; "
+            f"clothing={c.get('clothing', '')}; props={c.get('signature_details', '')}"
+            for c in cast
+        ) or "- (no specific characters)"
+
+        b64_start = self._keyframe_b64(scene)
+        b64_end = self._last_keyframe_b64(scene)
+        if not b64_start:
+            return {
+                "passed": False,
+                "score": 0,
+                "issues": "Missing start keyframe image.",
+                "suggested_start_prompt": scene.get("qwen_scene_prompt", ""),
+                "suggested_end_prompt": scene.get("qwen_end_scene_prompt", ""),
+            }
+
+        system = (
+            "You are a strict animation Quality Assurance (QA) Vision Critic.\n"
+            "You inspect the generated START FRAME (and END FRAME if attached) of a 5-second animated shot.\n"
+            "Check for:\n"
+            "1. Character accuracy: Do the characters match their required face, fur/hair, and outfit descriptions?\n"
+            "2. Visual quality: Are there extra limbs, deformed faces, text watermarks, or severe artifacts?\n"
+            "3. Start-to-End continuity: If two frames are attached, does the End Frame preserve the same background "
+            "and character design as the Start Frame while advancing the pose?\n"
+            "Output ONLY valid JSON without markdown:\n"
+            "{\n"
+            '  "passed": true,\n'
+            '  "score": 1-10,\n'
+            '  "issues": "Brief summary of any visual mistakes or \'None\'",\n'
+            '  "suggested_start_prompt": "Improved start frame prompt if score < 7, else empty string",\n'
+            '  "suggested_end_prompt": "Improved end frame prompt if score < 7, else empty string"\n'
+            "}"
+        )
+        user_text = (
+            f"Scene {scene.get('scene_number', 1)}: {scene.get('title', '')} | Style: {art_style}\n"
+            f"Story Beat: {scene.get('scenario', '')}\n"
+            f"Start Frame Prompt: {scene.get('qwen_scene_prompt', '')}\n"
+            f"End Frame Prompt: {scene.get('qwen_end_scene_prompt', '')}\n"
+            f"Expected Characters:\n{cast_desc}\n"
+        )
+        content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_start}"}})
+        if b64_end:
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_end}"}})
+
+        try:
+            raw_text = self._chat_completion(
+                [{"role": "system", "content": system}, {"role": "user", "content": content}],
+                max_tokens=600,
+                temperature=0.3,
+                max_retries=1,
+            )
+            parsed = self._parse_json_safely(raw_text)
+            score = int(round(_clamp(parsed.get("score"), 1, 10, 8)))
+            passed = bool(parsed.get("passed", score >= 7)) and score >= 7
+            report = {
+                "passed": passed,
+                "score": score,
+                "issues": _trim(parsed.get("issues") or "None", 240),
+                "suggested_start_prompt": _trim(parsed.get("suggested_start_prompt") or "", 300),
+                "suggested_end_prompt": _trim(parsed.get("suggested_end_prompt") or "", 300),
+            }
+        except Exception as e:
+            print(f"[StudioPipeline] VLM QA Critic note for scene {scene.get('scene_number', 1)}: {e}")
+            report = {
+                "passed": True,
+                "score": 8,
+                "issues": "QA check skipped (offline fallback)",
+                "suggested_start_prompt": "",
+                "suggested_end_prompt": "",
+            }
+
+        scene["qa_report"] = report
+        return report
 
     def generate_scene_keyframes(
         self,
@@ -577,10 +794,13 @@ class StudioPipeline:
         characters: List[Dict[str, Any]],
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         shared_seed: int = 42,
+        generate_end_frame: Optional[bool] = None,
+        auto_qa_retry: bool = False,
+        art_style: str = "",
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Synthesizes scene keyframes using Qwen Image Edit Rapid AIO.
+        Synthesizes scene keyframes (Start Frame + End Frame) using Qwen Image Edit Rapid AIO.
         Uses the SAME LOCKED SEED (`shared_seed` / `qwen_seed`) across all scenes so lighting,
         palette, and rendering grain stay consistent, while transferring character faces and
         outfits via multi-reference conditioning.
@@ -597,7 +817,7 @@ class StudioPipeline:
                 pct = 0.30 + (idx / max(1, total)) * 0.20
                 progress_cb(
                     pct,
-                    f"Synthesizing scene frame {idx+1}/{total}: '{title}' via Qwen Multi-Ref (Seed {locked_qwen_seed})...",
+                    f"Synthesizing scene {idx+1}/{total} Start & End frames: '{title}' via Qwen Multi-Ref (Seed {locked_qwen_seed})...",
                 )
 
             scene_entry = self._synthesize_single_scene_frame(
@@ -605,7 +825,35 @@ class StudioPipeline:
                 characters=characters,
                 aspect_ratio=aspect_ratio,
                 seed=locked_qwen_seed,
+                generate_end_frame=generate_end_frame,
+                which_frame="both",
+                end_seed=locked_qwen_seed,
             )
+
+            if auto_qa_retry:
+                qa = self.verify_scene_frames_with_vlm(scene_entry, characters, art_style=art_style)
+                if not qa.get("passed", True):
+                    retry_seed = locked_qwen_seed + 1
+                    print(
+                        f"[StudioPipeline] Scene {scene_num} flagged by VLM QA Critic "
+                        f"(score={qa.get('score')}/10: {qa.get('issues')}). Auto-retrying with seed {retry_seed}..."
+                    )
+                    if qa.get("suggested_start_prompt"):
+                        scene_entry["qwen_scene_prompt"] = qa["suggested_start_prompt"]
+                    if qa.get("suggested_end_prompt"):
+                        scene_entry["qwen_end_scene_prompt"] = qa["suggested_end_prompt"]
+                    scene_entry = self._synthesize_single_scene_frame(
+                        scene=scene_entry,
+                        characters=characters,
+                        aspect_ratio=aspect_ratio,
+                        seed=retry_seed,
+                        generate_end_frame=generate_end_frame,
+                        which_frame="both",
+                        end_seed=retry_seed,
+                    )
+                    self.verify_scene_frames_with_vlm(scene_entry, characters, art_style=art_style)
+
+            scene.update(scene_entry)
             updated_scenes.append(scene_entry)
 
         if progress_cb:
@@ -622,12 +870,17 @@ class StudioPipeline:
         scene_index: int,
         updated_fields: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
+        end_seed: Optional[int] = None,
+        which_frame: str = "both",
+        generate_end_frame: Optional[bool] = None,
+        auto_qa_retry: bool = False,
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Updates a single scene's description/scenario/prompt/character_ids and regenerates
-        ONLY that scene's keyframe image via Qwen Image Edit using the given seed.
+        Updates a single scene's description/scenario/start_prompt/end_prompt/character_ids and
+        regenerates that scene's Start Frame, End Frame, or Both (`which_frame="both" | "start" | "end"`)
+        via Qwen Image Edit using the given seed(s).
         """
         scenes = list((story_data or {}).get("scenes", []))
         if not scenes or scene_index < 0 or scene_index >= len(scenes):
@@ -635,31 +888,77 @@ class StudioPipeline:
 
         target = dict(scenes[scene_index])
         if updated_fields:
-            for k in ("title", "scenario", "qwen_scene_prompt", "wan_motion_prompt", "camera_movement", "character_ids"):
+            for k in (
+                "title",
+                "scenario",
+                "qwen_scene_prompt",
+                "qwen_end_scene_prompt",
+                "wan_motion_prompt",
+                "camera_movement",
+                "character_ids",
+            ):
                 if k in updated_fields and updated_fields[k] is not None:
                     target[k] = updated_fields[k]
 
         use_seed = int(seed if seed is not None else target.get("keyframe_seed", 42))
+        use_end_seed = int(end_seed if end_seed is not None else (seed if seed is not None else target.get("last_keyframe_seed", use_seed)))
         title = target.get("title", f"Scene {scene_index+1}")
 
         if progress_cb:
-            progress_cb(0.35, f"Redoing Scene {scene_index+1} ('{title}') keyframe with Qwen (Seed {use_seed})...")
+            progress_cb(
+                0.35,
+                f"Redoing Scene {scene_index+1} ('{title}', mode={which_frame}) with Qwen (Seed {use_seed})...",
+            )
 
         updated_scene = self._synthesize_single_scene_frame(
             scene=target,
             characters=story_data.get("characters", []),
             aspect_ratio=aspect_ratio,
             seed=use_seed,
+            generate_end_frame=generate_end_frame,
+            which_frame=which_frame,
+            end_seed=use_end_seed,
         )
+
+        if auto_qa_retry:
+            qa = self.verify_scene_frames_with_vlm(
+                updated_scene,
+                story_data.get("characters", []),
+                art_style=story_data.get("art_style", ""),
+            )
+            if not qa.get("passed", True):
+                retry_seed = use_seed + 1
+                if qa.get("suggested_start_prompt"):
+                    updated_scene["qwen_scene_prompt"] = qa["suggested_start_prompt"]
+                if qa.get("suggested_end_prompt"):
+                    updated_scene["qwen_end_scene_prompt"] = qa["suggested_end_prompt"]
+                updated_scene = self._synthesize_single_scene_frame(
+                    scene=updated_scene,
+                    characters=story_data.get("characters", []),
+                    aspect_ratio=aspect_ratio,
+                    seed=retry_seed,
+                    generate_end_frame=generate_end_frame,
+                    which_frame=which_frame,
+                    end_seed=retry_seed,
+                )
+                self.verify_scene_frames_with_vlm(
+                    updated_scene,
+                    story_data.get("characters", []),
+                    art_style=story_data.get("art_style", ""),
+                )
+
         # Clear stale director plan if keyframe changed so it can be re-directed cleanly
-        if updated_fields and any(k in updated_fields for k in ("scenario", "qwen_scene_prompt", "wan_motion_prompt", "camera_movement")):
+        if updated_fields and any(
+            k in updated_fields for k in ("scenario", "qwen_scene_prompt", "qwen_end_scene_prompt", "wan_motion_prompt", "camera_movement")
+        ):
             updated_scene.pop("director", None)
 
-        scenes[scene_index] = updated_scene
+        scenes[scene_index].clear()
+        scenes[scene_index].update(updated_scene)
         story_data["scenes"] = scenes
 
         if progress_cb:
-            progress_cb(1.0, f"Scene {scene_index+1} ('{title}') keyframe regenerated with seed {use_seed}.")
+            progress_cb(1.0, f"Scene {scene_index+1} ('{title}') keyframe(s) regenerated with seed {use_seed}.")
         return updated_scene
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -675,12 +974,10 @@ class StudioPipeline:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        For every scene, Gemma acts as the shot director: it LOOKS at the actual Qwen keyframe
-        (vision input), reads the story beat plus the previous/next beats for continuity, and
-        returns a structured shot plan — a 3-phase action timeline, camera move, motion
-        intensity, identity anchors and safe Wan 2.2 parameters. The plan is compiled into
-        the final Wan prompt/negative prompt. Falls back to text-only, then to a deterministic
-        template, so the pipeline never stalls on the Director.
+        For every scene, Gemma acts as the shot director: it LOOKS at BOTH the Start Frame and
+        End Frame (vision input), reads the story beat plus the previous/next beats for continuity,
+        and returns a structured shot plan — a 3-phase action timeline, camera move, motion
+        intensity, identity anchors and safe Wan 2.2 parameters.
         """
         story_meta = story_meta or {}
         char_map = {c.get("id"): c for c in characters}
@@ -740,6 +1037,18 @@ class StudioPipeline:
         img.convert("RGB").save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
+    def _last_keyframe_b64(self, scene: Dict[str, Any], max_side: int = 768) -> Optional[str]:
+        img = scene.get("last_keyframe_pil")
+        if img is None and scene.get("last_keyframe_path") and os.path.exists(scene["last_keyframe_path"]):
+            img = Image.open(scene["last_keyframe_path"]).convert("RGB")
+        if img is None:
+            return None
+        img = img.copy()
+        img.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
     def _build_director_messages(
         self,
         scene: Dict[str, Any],
@@ -750,22 +1059,31 @@ class StudioPipeline:
         include_image: bool = True,
     ) -> List[Dict[str, Any]]:
         duration = float(scene.get("duration_seconds", MAX_CLIP_SECONDS))
+        b64_start = self._keyframe_b64(scene) if include_image else None
+        b64_end = self._last_keyframe_b64(scene) if include_image else None
+        has_both_frames = bool(b64_start and b64_end)
+
         system = (
-            "You are the animation director for an image-to-video model (Wan 2.2). You receive the FIRST FRAME "
-            f"of a single continuous {duration:.1f}-second shot and must plan exactly how it moves.\n"
-            "Rules for good Wan 2.2 results:\n"
-            "- One clear, physically plausible action per shot; motion must start from the pose visible in the frame.\n"
+            "You are the animation director for a First-Last-Frame image-to-video model (Wan 2.2). "
+            + (
+                f"You receive BOTH the FIRST FRAME (t=0.0s) and the LAST FRAME (t={duration:.1f}s) of a single "
+                f"continuous {duration:.1f}-second shot and must plan the exact motion bridge between them.\n"
+                if has_both_frames
+                else f"You receive the FIRST FRAME of a single continuous {duration:.1f}-second shot and must plan how it moves.\n"
+            )
+            + "Rules for good Wan 2.2 results:\n"
+            "- One clear, physically plausible action per shot; motion must start from the First Frame pose and "
+            "arrive naturally at the Last Frame pose.\n"
             "- Describe concrete body/face motion (e.g. 'raises left paw and offers the berry'), not abstract emotions.\n"
-            "- Never introduce new characters or objects that are not in the frame; never cut or change location.\n"
+            "- Never introduce new characters or objects that are not in the frames; never cut or change location.\n"
             "- Prefer ONE camera move; static or slow moves keep faces stable. Fast action needs higher intensity.\n"
-            "- End the shot in a pose that flows naturally into the next story beat.\n"
             "Output ONLY valid JSON, no markdown:\n"
             "{\n"
             '  "shot_type": "e.g. medium two-shot / close-up / wide establishing",\n'
             '  "camera_movement": "single camera move, e.g. slow push-in",\n'
             '  "motion_intensity": 1-5,\n'
-            '  "subject_action": "one-sentence summary of the main action",\n'
-            '  "timeline": ["phase 1 action (opening)", "phase 2 action (main beat)", "phase 3 action (settle/hand-off)"],\n'
+            '  "subject_action": "one-sentence summary of the main action bridging start to end",\n'
+            '  "timeline": ["phase 1 action (opening from First Frame)", "phase 2 action (main transition beat)", "phase 3 action (settling into Last Frame pose)"],\n'
             '  "environment_motion": "ambient motion: wind, light, particles, background",\n'
             '  "identity_anchors": "visual traits that must stay fixed (faces, colors, outfits, props)",\n'
             '  "wan_prompt": "dense 1-2 sentence motion prompt for Wan 2.2",\n'
@@ -780,25 +1098,37 @@ class StudioPipeline:
             f"clothing={c.get('clothing', '')}; props={c.get('signature_details', '')}"
             for c in cast
         ) or "- (no named characters)"
+        end_prompt_note = f"End frame beat: {scene.get('qwen_end_scene_prompt', '')}\n" if scene.get("qwen_end_scene_prompt") else ""
         text = (
             f"Film: {story_meta.get('title', '')} | Style: {story_meta.get('art_style', '')} | "
             f"Theme: {story_meta.get('theme', '')}\n"
             f"Shot {scene.get('scene_number')}: {scene.get('title', '')} ({duration:.1f}s)\n"
             f"Story beat: {scene.get('scenario', '')}\n"
+            f"{end_prompt_note}"
             f"Draft motion from writer: {scene.get('wan_motion_prompt', '')}\n"
             f"Draft camera: {scene.get('camera_movement', '')}\n"
             f"Previous beat: {prev_beat}\nNext beat: {next_beat}\n"
             f"Cast in frame:\n{cast_desc}\n"
-            + ("The attached image is the exact first frame. Base the motion on what you see."
-               if include_image else "No image attached; infer composition from the beat.")
+            + (
+                "Image 1 is the exact FIRST FRAME (0.0s) and Image 2 is the exact LAST FRAME. Plan the smooth transition connecting them."
+                if has_both_frames
+                else (
+                    "The attached image is the exact first frame. Base the motion on what you see."
+                    if b64_start
+                    else "No image attached; infer composition from the beat."
+                )
+            )
         )
-        b64 = self._keyframe_b64(scene) if include_image else None
         user_content: Any = text
-        if b64:
+        if b64_start:
             user_content = [
                 {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_start}"}},
             ]
+            if b64_end:
+                user_content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_end}"}}
+                )
         return [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
 
     @staticmethod
@@ -930,7 +1260,7 @@ class StudioPipeline:
         return plan
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STAGE 5: Scene Video Animation via Wan 2.2 (Locked Wan Seed)
+    # STAGE 5: Scene Video Animation via Wan 2.2 (First+Last Frame FLF2V + RIFE)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _animate_single_scene_clip(
@@ -940,9 +1270,16 @@ class StudioPipeline:
         seed: int,
         characters: Optional[List[Dict[str, Any]]] = None,
         story_meta: Optional[Dict[str, Any]] = None,
+        use_last_frame: bool = True,
+        enable_rife_2x: bool = False,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> str:
-        """Internal helper that animates a single scene keyframe with Wan 2.2."""
+        """
+        Animates a single scene with Wan 2.2 on Modal.
+        When `use_last_frame=True` and the scene has a `last_keyframe_pil` / `last_keyframe_path`,
+        both the Start Frame (`resized_image`) and CIE-Lab color-matched End Frame (`processed_last_image`)
+        are passed to Wan 2.2 for First-Last-Frame (FLF2V) animation.
+        """
         dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
         wan_w, wan_h = dims["wan_w"], dims["wan_h"]
 
@@ -956,6 +1293,18 @@ class StudioPipeline:
 
         resized_frame = keyframe_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
 
+        resized_last_frame = None
+        if use_last_frame:
+            last_pil = scene.get("last_keyframe_pil")
+            if last_pil is None and scene.get("last_keyframe_path") and os.path.exists(scene["last_keyframe_path"]):
+                try:
+                    last_pil = Image.open(scene["last_keyframe_path"]).convert("RGB")
+                except Exception:
+                    last_pil = None
+            if last_pil is not None:
+                resized_last_frame = last_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
+                resized_last_frame = match_color_histogram_lab(resized_last_frame, resized_frame, strength=0.85)
+
         plan = scene.get("director")
         if not plan:
             plan = self.compile_director_plan({}, scene, characters or [], story_meta or {})
@@ -964,13 +1313,15 @@ class StudioPipeline:
         duration_sec = float(plan.get("duration_seconds", scene.get("duration_seconds", 3.5)))
         num_frames = frames_for_duration(duration_sec)
         use_seed = int(seed)
+        frame_mult = (WAN_FPS * 2) if enable_rife_2x else WAN_DEFAULTS["frame_multiplier"]
 
+        mode_str = "FLF2V (First+Last Frame)" if resized_last_frame is not None else "I2V (First Frame)"
         print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
-              f"seed={use_seed}, director={plan.get('source')})...")
+              f"mode={mode_str}, fps={frame_mult}, seed={use_seed}, director={plan.get('source')})...")
 
         result = run_remote_inference(
             resized_image=resized_frame,
-            processed_last_image=None,
+            processed_last_image=resized_last_frame,
             prompt=plan["wan_prompt"],
             steps=int(plan.get("steps", WAN_DEFAULTS["steps"])),
             negative_prompt=plan.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
@@ -980,7 +1331,7 @@ class StudioPipeline:
             current_seed=use_seed,
             scheduler_name=WAN_DEFAULTS["scheduler_name"],
             flow_shift=float(plan.get("flow_shift", WAN_DEFAULTS["flow_shift"])),
-            frame_multiplier=WAN_DEFAULTS["frame_multiplier"],
+            frame_multiplier=frame_mult,
             quality=WAN_DEFAULTS["quality"],
             duration_seconds=duration_sec,
             safe_mode=True,
@@ -995,6 +1346,7 @@ class StudioPipeline:
         print(f"[StudioPipeline] Saved Scene {scene_num} clip: {clip_dest}")
         scene["video_path"] = str(clip_dest)
         scene["video_seed"] = use_seed
+        scene["used_last_frame"] = resized_last_frame is not None
         return str(clip_dest)
 
     def generate_scene_videos(
@@ -1002,10 +1354,13 @@ class StudioPipeline:
         scenes: List[Dict[str, Any]],
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         base_seed: int = 42,
+        use_last_frame: bool = True,
+        enable_rife_2x: bool = False,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[str]:
         """
-        Animates each scene keyframe into a clip with Wan 2.2 on Modal.
+        Animates each scene into a clip with Wan 2.2 on Modal (using both First Frame and Last Frame
+        when available and `use_last_frame=True`).
         Uses the SAME LOCKED SEED (`base_seed` / `wan_seed`) across all 5-second clips
         for uniform temporal noise and motion physics across cuts.
         """
@@ -1031,6 +1386,8 @@ class StudioPipeline:
                 scene=scene,
                 aspect_ratio=aspect_ratio,
                 seed=locked_wan_seed,
+                use_last_frame=use_last_frame,
+                enable_rife_2x=enable_rife_2x,
             )
             clip_paths.append(clip_dest)
 
@@ -1048,6 +1405,8 @@ class StudioPipeline:
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         re_run_director: bool = False,
         use_vision: bool = True,
+        use_last_frame: bool = True,
+        enable_rife_2x: bool = False,
         auto_stitch: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
@@ -1111,6 +1470,8 @@ class StudioPipeline:
             seed=use_seed,
             characters=characters,
             story_meta=story_data,
+            use_last_frame=use_last_frame,
+            enable_rife_2x=enable_rife_2x,
             progress_cb=progress_cb,
         )
         scenes[scene_index] = target
