@@ -916,7 +916,7 @@ def studio_load_scene_fields_dual(choice_label, current_state, default_seed=42):
     scenes = (current_state or {}).get("scenes", [])
     choices = _scene_choices(current_state)
     if not scenes:
-        return (*base_fields, "", None)
+        return (*base_fields, "", None, int((default_seed + 10007) % (2**31 - 1)), "N/A")
     idx = _parse_selector_index(choice_label, choices)
     s = scenes[idx]
     end_img = (
@@ -924,7 +924,11 @@ def studio_load_scene_fields_dual(choice_label, current_state, default_seed=42):
         if s.get("last_keyframe_path") and os.path.exists(s.get("last_keyframe_path"))
         else None
     )
-    return (*base_fields, s.get("qwen_end_scene_prompt", ""), end_img)
+    start_seed = int(s.get("keyframe_seed", default_seed))
+    end_seed = int(s.get("last_keyframe_seed", (start_seed + 10007) % (2**31 - 1)))
+    delta_val = s.get("pose_delta")
+    delta_str = f"🏃 Pose Delta: {delta_val:.1f} (High Motion)" if delta_val is not None else "Pending generation"
+    return (*base_fields, s.get("qwen_end_scene_prompt", ""), end_img, end_seed, delta_str)
 
 
 def studio_save_scene_text_edits(
@@ -956,12 +960,13 @@ def studio_redo_single_scene(
     choice_label, title, scenario, qwen_prompt, char_ids_str, scene_seed,
     aspect_ratio, api_key, model, current_state,
     qwen_end_prompt=None, which_frame="both", auto_qa_retry=False,
+    scene_end_seed=None, direct_end_frame=True,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
     choices = _scene_choices(current_state)
     if not scenes:
-        return [], None, {}, "### ⚠️ Please run Phase 1 & Phase 2 first.", current_state
+        return [], None, None, {}, "### ⚠️ Please run Phase 1 & Phase 2 first.", current_state
     idx = _parse_selector_index(choice_label, choices)
     char_ids = [x.strip() for x in str(char_ids_str or "").split(",") if x.strip()] or scenes[idx].get("character_ids", [])
     updated_fields = {
@@ -973,15 +978,20 @@ def studio_redo_single_scene(
     if qwen_end_prompt is not None:
         updated_fields["qwen_end_scene_prompt"] = qwen_end_prompt
 
+    start_seed = int(scene_seed)
+    end_s = int(scene_end_seed) if (scene_end_seed is not None and int(scene_end_seed) != start_seed) else (start_seed + 10007) % (2**31 - 1)
+
     pipeline = StudioPipeline(api_key=api_key, model=model)
     try:
         updated_scene = pipeline.regenerate_single_scene_keyframe(
             story_data=current_state,
             scene_index=idx,
             updated_fields=updated_fields,
-            seed=int(scene_seed),
+            seed=start_seed,
+            end_seed=end_s,
             which_frame=str(which_frame or "both"),
             generate_end_frame=True,
+            direct_end_frame=bool(direct_end_frame),
             auto_qa_retry=bool(auto_qa_retry),
             aspect_ratio=aspect_ratio,
             progress_cb=_studio_progress(progress),
@@ -991,15 +1001,18 @@ def studio_redo_single_scene(
         if updated_scene.get("qa_report"):
             qa = updated_scene["qa_report"]
             qa_note = f"\n- **Gemma Vision QA Score:** `{qa.get('score')}/10` ({'✅ Passed' if qa.get('passed') else '⚠️ Flagged'}) — {qa.get('issues')}"
+        delta_val = updated_scene.get("pose_delta")
+        delta_note = f"\n- **🏃 Pose Motion Delta:** `{delta_val:.1f}` ({'✅ High Motion' if (delta_val or 0) >= 18.0 else '⚠️ Low Motion'})" if delta_val is not None else ""
         status = (
             f"### 🔄 Scene #{idx+1} Keyframe Redo Complete (`{which_frame}`): `{updated_scene.get('title')}`\n"
-            f"Regenerated with Qwen Multi-Ref using seed `{int(scene_seed)}`."
+            f"- **Start Seed:** `{start_seed}` | **End Seed:** `{updated_scene.get('last_keyframe_seed', end_s)}`"
+            + delta_note
             + qa_note
         )
-        return scene_items, updated_scene.get("keyframe_path"), StudioPipeline.serializable(current_state), status, current_state
+        return scene_items, updated_scene.get("keyframe_path"), updated_scene.get("last_keyframe_path"), StudioPipeline.serializable(current_state), status, current_state
     except Exception as e:
         _, scene_items = _studio_gallery_items(current_state)
-        return scene_items, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Redo Error\n`{e}`", current_state
+        return scene_items, None, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Redo Error\n`{e}`", current_state
 
 
 def studio_verify_scene_qa(choice_label, api_key, model, current_state):
@@ -1623,11 +1636,24 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                 scale=1,
                             )
                         with gr.Row():
-                            studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=1)
+                            studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=2)
                             studio_scene_seed_edit = gr.Number(
-                                label="Scene Seed (Change to vary composition)",
+                                label="Start Frame (0.0s) Seed",
                                 value=INITIAL_STUDIO_SEEDS["qwen_seed"],
                                 precision=0,
+                                scale=1,
+                            )
+                            studio_scene_end_seed_edit = gr.Number(
+                                label="End Frame (5.0s) Seed",
+                                value=INITIAL_STUDIO_SEEDS["qwen_seed"] + 10007,
+                                precision=0,
+                                scale=1,
+                            )
+                        with gr.Row():
+                            studio_scene_delta_badge = gr.Textbox(
+                                label="🏃 Motion Delta Metric (Start vs End)",
+                                value="Pending generation",
+                                interactive=False,
                                 scale=1,
                             )
                         studio_scene_scenario_edit = gr.Textbox(
@@ -2356,10 +2382,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             direct_end_frame=bool(direct_end_chk),
             progress=progress,
         )
-        s_title, s_scen, s_qprompt, s_cids, s_seed, s_img, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
+        fields = studio_load_scene_fields_dual(
             selected_scene, state, default_seed=q_seed
         )
-        return scene_items, status, state, s_seed, s_img, s_end_img
+        return scene_items, status, state, fields[4], fields[5], fields[7], fields[8], fields[9]
 
     studio_step3_btn.click(
         fn=_ui_step3,
@@ -2371,14 +2397,15 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[
             studio_scenes_gallery, studio_status, studio_pipeline_state,
             studio_scene_seed_edit, studio_scene_preview, studio_scene_end_preview,
+            studio_scene_end_seed_edit, studio_scene_delta_badge,
         ],
     )
 
     def studio_load_scene_end_fields(choice_label, current_state, default_seed=42):
-        _, _, _, _, _, _, s_qendprompt, s_end_img = studio_load_scene_fields_dual(
+        fields = studio_load_scene_fields_dual(
             choice_label, current_state, default_seed=default_seed
         )
-        return s_qendprompt, s_end_img
+        return fields[6], fields[7], fields[8], fields[9]
 
     studio_scene_selector.change(
         fn=studio_load_scene_fields,
@@ -2390,7 +2417,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     ).then(
         fn=studio_load_scene_end_fields,
         inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
-        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit, studio_scene_delta_badge],
     )
 
     def _on_scene_gallery_select(evt: gr.SelectData, current_state, default_seed):
@@ -2413,7 +2440,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     ).then(
         fn=studio_load_scene_end_fields,
         inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
-        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit, studio_scene_delta_badge],
     )
 
     studio_scene_save_btn.click(
@@ -2449,15 +2476,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_scene_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
             studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
             studio_scene_end_prompt_edit, studio_scene_redo_mode, studio_scene_qa_chk,
+            studio_scene_end_seed_edit, studio_scene_direct_end_chk,
         ],
         outputs=[
-            studio_scenes_gallery, studio_scene_preview, studio_json_display,
+            studio_scenes_gallery, studio_scene_preview, studio_scene_end_preview, studio_json_display,
             studio_status, studio_pipeline_state,
         ],
     ).then(
         fn=studio_load_scene_end_fields,
         inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
-        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview],
+        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit, studio_scene_delta_badge],
     )
 
     # Phase 4: Director, Generate All Video Clips, and Individual Clip Redo

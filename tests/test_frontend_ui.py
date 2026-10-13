@@ -382,12 +382,13 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         self.assertEqual(app._gallery_index_to_scene_index(0, self.sample_state), 0)
         self.assertEqual(app._gallery_index_to_scene_index(1, self.sample_state), 0)
 
-        # Dual scene field loader returns 8-tuple including end prompt and end image
+        # Dual scene field loader returns 10-tuple including end prompt, end image, end seed, and delta metric
         dual_fields = app.studio_load_scene_fields_dual("Scene 1: The Discovery", self.sample_state, default_seed=888)
-        self.assertEqual(len(dual_fields), 8)
+        self.assertEqual(len(dual_fields), 10)
         self.assertEqual(dual_fields[5], self.scene_img_path)
         self.assertEqual(dual_fields[6], "Luna lifting the star at 5.0s")
         self.assertEqual(dual_fields[7], end_img_path)
+        self.assertEqual(dual_fields[8], 2222)
 
         # Verify QA Critic UI handler
         mock_chat.return_value = json.dumps({
@@ -493,7 +494,7 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
         self.assertIn("Please run Phase 1", r_char[3])
 
         r_scene = app.studio_redo_single_scene("1", "T", "S", "P", "char_1", 42, "9:16 Vertical (Shorts/Reels)", "k", "m", {})
-        self.assertIn("Please run Phase 1 & Phase 2", r_scene[3])
+        self.assertIn("Please run Phase 1 & Phase 2", r_scene[4])
 
         r_clip = app.studio_redo_single_clip("1", "M", "C", "P", 42, False, True, "9:16 Vertical (Shorts/Reels)", "k", "m", {})
         self.assertIn("Please generate scene keyframes first", r_clip[3])

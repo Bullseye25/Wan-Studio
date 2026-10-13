@@ -781,10 +781,10 @@ class TestStudioPipeline(unittest.TestCase):
                 "gemma4:31b",
                 state,
             )
-            scene_gallery, scene_preview, _, status_redo_scene, state = redo_scene_res
+            scene_gallery, scene_preview, scene_end_preview, _, status_redo_scene, state = redo_scene_res
             self.assertIn("Keyframe Redo Complete", status_redo_scene)
             self.assertEqual(state["scenes"][0]["keyframe_seed"], 202)
-            self.assertEqual(state["scenes"][0]["last_keyframe_seed"], 202)
+            self.assertIn(state["scenes"][0]["last_keyframe_seed"], [(202 + 10007) % (2**31 - 1), (202 + 10007 + 54321) % (2**31 - 1)])
 
             # Phase 4: Generate All Video Clips & Final Movie
             step4_res = app.studio_run_step4(
@@ -863,7 +863,7 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertEqual(call2_kwargs["base_image"].size, (576, 1024))
         self.assertEqual(len(call2_kwargs["ref_images"]), 1)
         self.assertIs(call2_kwargs["ref_images"][0], p1)
-        self.assertEqual(call2_kwargs["seed"], 777)
+        self.assertEqual(call2_kwargs["seed"], (777 + 10007) % (2**31 - 1))
         self.assertTrue(os.path.exists(scenes[0]["keyframe_path"]))
         self.assertTrue(os.path.exists(scenes[0]["last_keyframe_path"]))
 
@@ -925,9 +925,16 @@ class TestStudioPipeline(unittest.TestCase):
     @patch("studio_pipeline.qwen_image_edit_remote")
     @patch.object(StudioPipeline, "_chat_completion")
     def test_vlm_qa_critic_and_auto_self_correction_retry(self, mock_chat, mock_qwen):
-        buf = io.BytesIO()
-        Image.new("RGB", (576, 1024), color="green").save(buf, format="JPEG")
-        mock_qwen.return_value = [buf.getvalue()]
+        buf_start = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(50, 200, 50)).save(buf_start, format="JPEG")
+        buf_end = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(200, 50, 50)).save(buf_end, format="JPEG")
+        mock_qwen.side_effect = [
+            [buf_start.getvalue()],
+            [buf_end.getvalue()],
+            [buf_start.getvalue()],
+            [buf_end.getvalue()],
+        ]
 
         # First QA check scores 5/10 (fails < 7) and suggests refined prompts; second QA check scores 9/10
         mock_chat.side_effect = [
@@ -971,7 +978,7 @@ class TestStudioPipeline(unittest.TestCase):
         # Initial attempt (2 Qwen calls with seed 500) + 1 retry (2 Qwen calls with seed 501) = 4 Qwen calls
         self.assertEqual(mock_qwen.call_count, 4)
         self.assertEqual(scenes[0]["keyframe_seed"], 501)
-        self.assertEqual(scenes[0]["last_keyframe_seed"], 501)
+        self.assertEqual(scenes[0]["last_keyframe_seed"], (501 + 10007) % (2**31 - 1))
         self.assertEqual(scenes[0]["qa_report"]["score"], 9)
         self.assertTrue(scenes[0]["qa_report"]["passed"])
         self.assertIn("bright red bowtie", scenes[0]["qwen_scene_prompt"])
@@ -1222,8 +1229,93 @@ class TestStudioPipeline(unittest.TestCase):
         )
 
         self.assertIsNotNone(directed)
-        self.assertIn("Modify the characters in Image 1 into their dynamic ending pose at t=5.0s", directed)
+        self.assertIn("Ending frame at t=5.0s", directed)
         self.assertIn("Heroes ready their weapons in combat stance", directed)
+
+    def test_measure_frame_pose_delta(self):
+        """Verifies pose delta calculation correctly identifies identical vs distinct keyframes."""
+        from studio_pipeline import measure_frame_pose_delta
+        im1 = Image.new("RGB", (100, 100), color=(100, 100, 100))
+        im2 = Image.new("RGB", (100, 100), color=(100, 100, 100))
+        # Identical images must yield 0.0 delta
+        self.assertEqual(measure_frame_pose_delta(im1, im2), 0.0)
+
+        # Subtle noise / near identical (delta < 18.0)
+        im_subtle = Image.new("RGB", (100, 100), color=(105, 105, 105))
+        self.assertLess(measure_frame_pose_delta(im1, im_subtle), 18.0)
+
+        # Clear pose transformation (high delta >= 18.0)
+        im3 = Image.new("RGB", (100, 100), color=(200, 50, 50))
+        delta = measure_frame_pose_delta(im1, im3)
+        self.assertGreaterEqual(delta, 18.0)
+
+    def test_ensure_high_delta_end_prompt(self):
+        """Verifies prompt validator replaces stagnant end prompts with concrete contrasting postures."""
+        from studio_pipeline import ensure_high_delta_end_prompt
+
+        start = "Mercenaries aiming weapons forward into the dark cave"
+        # 1. Identical prompt -> auto-enhanced
+        fixed1 = ensure_high_delta_end_prompt(start, start, scenario="Blind Fire", motion="firing weapons")
+        self.assertNotEqual(fixed1, start)
+        self.assertIn("Ending frame at t=5.0s", fixed1)
+        self.assertTrue(any(kw in fixed1.lower() for kw in ["duck", "crouch", "kneel", "recoil", "cover"]))
+
+        # 2. Too similar prompt (high overlap, missing posture keyword) -> auto-enhanced
+        similar = "Mercenaries continue aiming forward in the cave"
+        fixed2 = ensure_high_delta_end_prompt(start, similar, scenario="Blind Fire", motion="firing weapons")
+        self.assertIn("Ending frame at t=5.0s", fixed2)
+
+        # 3. Genuinely distinct prompt with posture keyword -> preserved
+        distinct = "Mercenaries drop to one knee taking cover behind rock crates with rifles lowered"
+        preserved = ensure_high_delta_end_prompt(start, distinct)
+        self.assertEqual(preserved, distinct)
+
+    @patch("studio_pipeline.qwen_image_edit_remote")
+    def test_pose_delta_gatekeeper_triggers_retry_on_low_delta(self, mock_qwen):
+        """Verifies that if Qwen returns an identical end frame (delta < 18.0), the gatekeeper retries with high delta."""
+        # Start frame: green
+        img_start = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(50, 150, 50)).save(img_start, format="JPEG")
+
+        # First end frame: almost identical green (mean diff ~2 < 18.0) -> triggers gatekeeper retry
+        img_low_delta = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(52, 152, 52)).save(img_low_delta, format="JPEG")
+
+        # Second end frame (retry): distinct blue/red pose
+        img_retry = io.BytesIO()
+        Image.new("RGB", (576, 1024), color=(200, 50, 50)).save(img_retry, format="JPEG")
+
+        # Mock sequence: 1st call = start frame, 2nd call = stagnant end frame, 3rd call = retry end frame
+        mock_qwen.side_effect = [
+            [img_start.getvalue()],
+            [img_low_delta.getvalue()],
+            [img_retry.getvalue()],
+        ]
+
+        scene = {
+            "scene_number": 1,
+            "title": "Blind Fire",
+            "scenario": "Three soldiers fire rifles",
+            "qwen_scene_prompt": "Three soldiers aiming rifles forward",
+            "qwen_end_scene_prompt": "Three soldiers continue aiming rifles",
+            "character_ids": ["c1"],
+        }
+        chars = [{"id": "c1", "name": "Soldier", "portrait_pil": Image.new("RGB", (64, 64))}]
+
+        res = self.pipeline._synthesize_single_scene_frame(
+            scene=scene,
+            characters=chars,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+            seed=12345,
+            which_frame="both",
+            direct_end_frame=False,
+        )
+
+        # Verify retry was executed (3 calls total: start, initial end, retry end)
+        self.assertEqual(mock_qwen.call_count, 3)
+        self.assertGreaterEqual(res["pose_delta"], 18.0)
+        # End seed must be different from start seed
+        self.assertNotEqual(res["last_keyframe_seed"], 12345)
 
     def test_cinematography_vault_blueprint_retrieval(self):
         """Verifies semantic & rule-based retrieval of lens optics, rigs, and reactive physics."""
