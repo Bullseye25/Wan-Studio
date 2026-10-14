@@ -359,7 +359,7 @@ class WanModel:
         def from_tensor(tensor):
             t = tensor[0, :, :H, :W]
             t = t.permute(1, 2, 0)
-            return t.float().cpu().numpy()
+            return t.detach().float().cpu().numpy()
 
         def make_inference(I0, I1, n):
             if self.rife_model.version >= 3.9:
@@ -378,22 +378,23 @@ class WanModel:
                 else:
                     return [*first_half, *second_half]
 
-        output_frames = []
-        I1 = to_tensor(frames_np[0])
+        with torch.inference_mode():
+            output_frames = []
+            I1 = to_tensor(frames_np[0])
 
-        for i in range(T - 1):
-            I0 = I1
-            output_frames.append(from_tensor(I0))
-            I1 = to_tensor(frames_np[i+1])
-            mid_tensors = make_inference(I0, I1, n_interp)
-            for mid in mid_tensors:
-                output_frames.append(from_tensor(mid))
+            for i in range(T - 1):
+                I0 = I1
+                output_frames.append(from_tensor(I0))
+                I1 = to_tensor(frames_np[i+1])
+                mid_tensors = make_inference(I0, I1, n_interp)
+                for mid in mid_tensors:
+                    output_frames.append(from_tensor(mid))
+                
+            output_frames.append(from_tensor(I1))
             
-        output_frames.append(from_tensor(I1))
-        
-        del I0, I1
-        torch.cuda.empty_cache()
-        return output_frames
+            del I0, I1
+            torch.cuda.empty_cache()
+            return output_frames
 
     def deflicker_temporal_smoothing(self, frames_np, strength=0.25):
         """
