@@ -84,6 +84,7 @@ class TestGradioFrontendStructure(unittest.TestCase):
             "studio_save_scene_text_edits",
             "studio_direct_single_scene_end_frame",
             "studio_redo_single_scene",
+            "studio_step_to_next_scene",
             "_ui_director",
             "_ui_step4",
             "studio_load_clip_fields",
@@ -612,6 +613,51 @@ class TestSafeguardsAndAntiNoiseFrontend(unittest.TestCase):
         self.assertIn("Anti-Noise & Rotation Guard: ON", status)
         self.assertTrue(mock_gen_vid.call_args[1]["anti_noise_guard"])
 
+    def test_studio_step_to_next_scene_navigation(self):
+        """studio_step_to_next_scene smoothly cycles through scenes and updates fields."""
+        story = {
+            "characters": [{"id": "char_1", "name": "Luna"}],
+            "scenes": [
+                {"scene_number": 1, "title": "Scene 1", "keyframe_seed": 100},
+                {"scene_number": 2, "title": "Scene 2", "keyframe_seed": 200},
+            ],
+        }
+        # Advance from Scene 1 to Scene 2
+        res = app.studio_step_to_next_scene("Scene 1: Scene 1", story)
+        dropdown_upd = res[0]
+        status = res[-1]
+        self.assertEqual(dropdown_upd["value"], "Scene 2: Scene 2")
+        self.assertIn("Scene #2/2: `Scene 2`", status)
+
+        # Advance from Scene 2 wraps to Scene 1
+        res2 = app.studio_step_to_next_scene("Scene 2: Scene 2", story)
+        self.assertEqual(res2[0]["value"], "Scene 1: Scene 1")
+        self.assertIn("Scene #1/2: `Scene 1`", res2[-1])
+
+    @patch.object(StudioPipeline, "regenerate_single_scene_keyframe")
+    def test_studio_redo_single_scene_with_chaining(self, mock_redo_kf):
+        mock_redo_kf.return_value = {
+            "scene_number": 2,
+            "title": "Scene 2",
+            "keyframe_path": "/dummy/s2.jpg",
+            "last_keyframe_path": "/dummy/s2_end.jpg",
+        }
+        story = {
+            "characters": [{"id": "char_1", "name": "Luna"}],
+            "scenes": [
+                {"scene_number": 1, "title": "Scene 1", "last_keyframe_path": "/dummy/s1_end.jpg"},
+                {"scene_number": 2, "title": "Scene 2"},
+            ],
+        }
+        items, kf_p, last_p, state_ser, status, state = app.studio_redo_single_scene(
+            "Scene 2: Scene 2", "Scene 2", "Scenario 2", "Prompt", "char_1", 12345,
+            "9:16 Vertical (Shorts/Reels)", "key", "model", story,
+            chain_previous_end_frame=True,
+        )
+        self.assertTrue(mock_redo_kf.call_args[1]["chain_previous_end_frame"])
+        self.assertIn("Chained seamlessly from Scene #1 End Frame", status)
+
 
 if __name__ == "__main__":
     unittest.main()
+

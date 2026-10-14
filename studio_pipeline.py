@@ -44,10 +44,14 @@ DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
 
 # Aspect ratio presets for scene synthesis and video animation
 ASPECT_RATIO_PRESETS = {
-    "9:16 Vertical (Shorts/Reels)": {"qwen_w": 576, "qwen_h": 1024, "wan_w": 480, "wan_h": 832},
-    "16:9 Landscape (Cinematic)":   {"qwen_w": 1024, "qwen_h": 576,  "wan_w": 832, "wan_h": 480},
-    "1:1 Square (Social Media)":     {"qwen_w": 1024, "qwen_h": 1024, "wan_w": 640, "wan_h": 640},
+    "9:16 Vertical (Shorts/Reels)": {"qwen_w": 576, "qwen_h": 1024, "wan_w": 480, "wan_h": 832, "char_w": 576, "char_h": 1024},
+    "16:9 Landscape (Cinematic)":   {"qwen_w": 1024, "qwen_h": 576,  "wan_w": 832, "wan_h": 480, "char_w": 576, "char_h": 1024},
+    "1:1 Square (Social Media)":     {"qwen_w": 1024, "qwen_h": 1024, "wan_w": 640, "wan_h": 640, "char_w": 576, "char_h": 1024},
 }
+
+# Character reference portraits default to 9:16 vertical full-body orientation (576x1024)
+CHARACTER_PORTRAIT_WIDTH = 576
+CHARACTER_PORTRAIT_HEIGHT = 1024
 
 # Wan 2.2 temporal limits (3D-VAE requires 4k+1 frames; native window 17..81 frames @ 16fps)
 WAN_FPS = 16
@@ -549,17 +553,19 @@ class StudioPipeline:
 
     @staticmethod
     def build_character_prompt(char: Dict[str, Any], art_style: str = "") -> str:
-        """Constructs the full Z-Image Turbo character reference sheet prompt."""
+        """Constructs the full Z-Image Turbo character reference sheet prompt in 9:16 vertical full-body orientation."""
         name = char.get("name", "Character")
         details = ", ".join(
             v for v in [char.get("face"), char.get("hair"), char.get("clothing"), char.get("signature_details")] if v
         )
-        base_prompt = char.get("z_image_prompt") or f"Full-body character sheet of {name}"
+        base_prompt = char.get("z_image_prompt") or f"Full-body character model sheet of {name}"
         char_prompt = f"{base_prompt}, {details}" if details and details not in base_prompt else base_prompt
         if art_style and art_style.lower() not in char_prompt.lower():
             char_prompt = f"{char_prompt}, {art_style}"
         if "single character" not in char_prompt.lower():
-            char_prompt += ", single character, front view, clean neutral background, crisp lighting"
+            char_prompt += ", single character, 9:16 vertical full-body portrait, standing head-to-toe, complete outfit and footwear visible, front view, clean neutral background, crisp lighting"
+        elif "full-body" not in char_prompt.lower():
+            char_prompt += ", 9:16 vertical full-body portrait, standing head-to-toe, complete outfit and footwear visible"
         return char_prompt
 
     def generate_character_portraits(
@@ -567,12 +573,15 @@ class StudioPipeline:
         characters: List[Dict[str, Any]],
         shared_seed: int = 42,
         art_style: str = "",
+        width: int = CHARACTER_PORTRAIT_WIDTH,
+        height: int = CHARACTER_PORTRAIT_HEIGHT,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Synthesizes reference portrait images for all extracted characters using
-        Z-Image Turbo on Modal. Uses the SAME LOCKED SEED for all characters
-        to establish a coherent base latent structure and visual harmony.
+        Z-Image Turbo on Modal in 9:16 vertical full-body orientation (576x1024).
+        Uses the SAME LOCKED SEED for all characters to establish a coherent base latent
+        structure and visual harmony.
         """
         total = len(characters)
         updated_characters = []
@@ -585,14 +594,14 @@ class StudioPipeline:
 
             if progress_cb:
                 pct = 0.15 + (idx / max(1, total)) * 0.15
-                progress_cb(pct, f"Synthesizing character reference {idx+1}/{total}: '{name}' (Seed {locked_seed})...")
+                progress_cb(pct, f"Synthesizing character reference {idx+1}/{total}: '{name}' (Seed {locked_seed}, 9:16)...")
 
-            print(f"[StudioPipeline] Generating Z-Image Turbo portrait for '{name}' with locked seed {locked_seed}...")
+            print(f"[StudioPipeline] Generating Z-Image Turbo 9:16 portrait for '{name}' with locked seed {locked_seed} ({width}x{height})...")
             pil_img, local_path = generate_z_image_turbo_remote(
                 prompt=char_prompt,
                 seed=locked_seed,
-                width=1024,
-                height=1024,
+                width=width,
+                height=height,
                 steps=9,
                 save_dir=str(self.char_dir),
                 filename_prefix=f"{char_id}_{self._sanitize_filename(name)}",
@@ -605,7 +614,7 @@ class StudioPipeline:
             updated_characters.append(char_entry)
 
         if progress_cb:
-            progress_cb(0.30, f"All {total} character portraits synthesized with locked seed {locked_seed}.")
+            progress_cb(0.30, f"All {total} character portraits synthesized in 9:16 with locked seed {locked_seed}.")
 
         return updated_characters
 
@@ -615,12 +624,14 @@ class StudioPipeline:
         char_index: int,
         updated_fields: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
+        width: int = CHARACTER_PORTRAIT_WIDTH,
+        height: int = CHARACTER_PORTRAIT_HEIGHT,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Updates a single character's attributes (name, face, hair, clothing, signature_details,
         z_image_prompt) and regenerates ONLY that character's image with Z-Image Turbo using
-        the specified seed.
+        the specified seed in 9:16 vertical full-body orientation (576x1024).
         """
         chars = list((story_data or {}).get("characters", []))
         if not chars or char_index < 0 or char_index >= len(chars):
@@ -639,14 +650,14 @@ class StudioPipeline:
         char_prompt = self.build_character_prompt(target, art_style)
 
         if progress_cb:
-            progress_cb(0.25, f"Redoing character '{name}' with Z-Image Turbo (Seed {use_seed})...")
+            progress_cb(0.25, f"Redoing character '{name}' in 9:16 with Z-Image Turbo (Seed {use_seed})...")
 
-        print(f"[StudioPipeline] Redoing Z-Image Turbo portrait for '{name}' (index={char_index}, seed={use_seed})...")
+        print(f"[StudioPipeline] Redoing Z-Image Turbo 9:16 portrait for '{name}' (index={char_index}, seed={use_seed}, {width}x{height})...")
         pil_img, local_path = generate_z_image_turbo_remote(
             prompt=char_prompt,
             seed=use_seed,
-            width=1024,
-            height=1024,
+            width=width,
+            height=height,
             steps=9,
             save_dir=str(self.char_dir),
             filename_prefix=f"{char_id}_{self._sanitize_filename(name)}",
@@ -1200,13 +1211,14 @@ class StudioPipeline:
         generate_end_frame: Optional[bool] = None,
         direct_end_frame: bool = False,
         auto_qa_retry: bool = False,
+        chain_previous_end_frame: bool = False,
         aspect_ratio: str = "9:16 Vertical (Shorts/Reels)",
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Updates a single scene's description/scenario/start_prompt/end_prompt/character_ids and
         regenerates that scene's Start Frame, End Frame, or Both (`which_frame="both" | "start" | "end"`)
-        via Qwen Image Edit using the given seed(s).
+        via Qwen Image Edit using the given seed(s). Supports seamless shot chaining from previous scene.
         """
         scenes = list((story_data or {}).get("scenes", []))
         if not scenes or scene_index < 0 or scene_index >= len(scenes):
@@ -1227,6 +1239,26 @@ class StudioPipeline:
                     target[k] = updated_fields[k]
 
         which = str(which_frame or "both").lower().strip()
+
+        # Seamless Continuous Shot Chaining (Scene N End Frame -> Scene N+1 Start Frame)
+        if chain_previous_end_frame and scene_index > 0:
+            prev_scene = scenes[scene_index - 1]
+            prev_last_path = prev_scene.get("last_keyframe_path") or prev_scene.get("keyframe_path")
+            prev_last_pil = prev_scene.get("last_keyframe_pil") or prev_scene.get("keyframe_pil")
+            if prev_last_path and not prev_last_pil and os.path.exists(prev_last_path):
+                try:
+                    prev_last_pil = Image.open(prev_last_path).convert("RGB")
+                except Exception:
+                    pass
+            if prev_last_path:
+                prev_last_seed = prev_scene.get("last_keyframe_seed", prev_scene.get("keyframe_seed", seed or 42))
+                target["keyframe_pil"] = prev_last_pil
+                target["keyframe_path"] = prev_last_path
+                target["keyframe_seed"] = prev_last_seed
+                which = "end"
+                which_frame = "end"
+                print(f"[StudioPipeline] [Chain] Scene {scene_index + 1} chained seamlessly from Scene {scene_index} End Frame.")
+
         if which == "end":
             use_seed = int(target.get("keyframe_seed", seed if seed is not None else 42))
             use_end_seed = int(end_seed if end_seed is not None else (seed if seed is not None else target.get("last_keyframe_seed", (use_seed + 10007) % (2**31 - 1))))

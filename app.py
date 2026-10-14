@@ -883,8 +883,8 @@ def studio_redo_single_character(
         )
         char_items, _ = _studio_gallery_items(current_state)
         status = (
-            f"### 🔄 Character Redo Complete: `{updated_char.get('name')}`\n"
-            f"Regenerated with Z-Image Turbo using seed `{int(char_seed)}`."
+            f"### 🔄 Character Redo Complete (9:16 Full-Body): `{updated_char.get('name')}`\n"
+            f"Regenerated in 9:16 vertical full-body orientation (576x1024) with Z-Image Turbo using seed `{int(char_seed)}`."
         )
         return char_items, updated_char.get("portrait_path"), StudioPipeline.serializable(current_state), status, current_state
     except Exception as e:
@@ -961,6 +961,7 @@ def studio_redo_single_scene(
     aspect_ratio, api_key, model, current_state,
     qwen_end_prompt=None, which_frame="both", auto_qa_retry=False,
     scene_end_seed=None, direct_end_frame=True,
+    chain_previous_end_frame=False,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
@@ -993,6 +994,7 @@ def studio_redo_single_scene(
             generate_end_frame=True,
             direct_end_frame=bool(direct_end_frame),
             auto_qa_retry=bool(auto_qa_retry),
+            chain_previous_end_frame=bool(chain_previous_end_frame),
             aspect_ratio=aspect_ratio,
             progress_cb=_studio_progress(progress),
         )
@@ -1003,16 +1005,45 @@ def studio_redo_single_scene(
             qa_note = f"\n- **Gemma Vision QA Score:** `{qa.get('score')}/10` ({'✅ Passed' if qa.get('passed') else '⚠️ Flagged'}) — {qa.get('issues')}"
         delta_val = updated_scene.get("pose_delta")
         delta_note = f"\n- **🏃 Pose Motion Delta:** `{delta_val:.1f}` ({'✅ High Motion' if (delta_val or 0) >= 18.0 else '⚠️ Low Motion'})" if delta_val is not None else ""
+        chain_note = f"\n- **🔗 Shot Continuity:** Chained seamlessly from Scene #{idx} End Frame (Zero Drift)" if (chain_previous_end_frame and idx > 0) else ""
         status = (
-            f"### 🔄 Scene #{idx+1} Keyframe Redo Complete (`{which_frame}`): `{updated_scene.get('title')}`\n"
+            f"### 🎯 Scene #{idx+1} Keyframe Redo Complete (`{which_frame}`): `{updated_scene.get('title')}`\n"
             f"- **Start Seed:** `{start_seed}` | **End Seed:** `{updated_scene.get('last_keyframe_seed', end_s)}`"
             + delta_note
             + qa_note
+            + chain_note
         )
         return scene_items, updated_scene.get("keyframe_path"), updated_scene.get("last_keyframe_path"), StudioPipeline.serializable(current_state), status, current_state
     except Exception as e:
         _, scene_items = _studio_gallery_items(current_state)
-        return scene_items, None, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Redo Error\n`{e}`", current_state
+        return scene_items, None, None, StudioPipeline.serializable(current_state), f"### ❌ Scene Generation Error\n`{e}`", current_state
+
+
+def studio_step_to_next_scene(choice_label, current_state, default_seed=42):
+    """Advances selection to the next scene in the story and populates its dual-keyframe fields."""
+    scenes = (current_state or {}).get("scenes", [])
+    choices = _scene_choices(current_state)
+    if not scenes or not choices:
+        return (
+            gr.update(choices=[], value=None),
+            "", "", "", "", int(default_seed), None,
+            "", None, int((default_seed + 10007) % (2**31 - 1)), "Pending generation",
+            "### ⚠️ No scenes available.",
+        )
+    current_idx = _parse_selector_index(choice_label, choices)
+    next_idx = (current_idx + 1) % len(choices)
+    next_choice = choices[next_idx]
+    fields = studio_load_scene_fields_dual(next_choice, current_state, default_seed=default_seed)
+    status = (
+        f"### 🎬 Switched to Scene #{next_idx + 1}/{len(choices)}: `{scenes[next_idx].get('title', '')}`\n"
+        f"Review prompts and click **'🎯 Generate Selected Scene (Scene-by-Scene Mode)'**."
+    )
+    return (
+        gr.update(choices=choices, value=next_choice),
+        fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
+        fields[6], fields[7], fields[8], fields[9],
+        status,
+    )
 
 
 def studio_verify_scene_qa(choice_label, api_key, model, current_state):
@@ -1516,7 +1547,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2") as phase2_tab:
                 with gr.Row():
                     studio_step2_btn = gr.Button(
-                        "🎨 Generate All Characters (Using Locked Z-Image Seed)",
+                        "🎨 Generate All Characters (9:16 Full-Body · Locked Z-Image Seed)",
                         variant="primary",
                         size="lg",
                         scale=2,
@@ -1531,9 +1562,9 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                 with gr.Row():
                     with gr.Column(scale=1):
                         studio_char_gallery = gr.Gallery(
-                            label="👤 Generated Character Reference Sheets (Click a character to inspect/redo)",
+                            label="👤 Generated Character Reference Sheets (9:16 Vertical Head-to-Toe · Click to inspect/redo)",
                             columns=[2],
-                            height=420,
+                            height=460,
                             object_fit="contain",
                             preview=True,
                         )
@@ -1545,8 +1576,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                             interactive=True,
                         )
                         studio_char_preview = gr.Image(
-                            label="Selected Character Portrait",
-                            height=200,
+                            label="Selected Character Portrait (9:16 Full-Body)",
+                            height=320,
                             interactive=False,
                         )
                         with gr.Row():
@@ -1568,7 +1599,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                         with gr.Row():
                             studio_char_save_btn = gr.Button("💾 Save Description Changes Only", variant="secondary")
                             studio_char_redo_btn = gr.Button(
-                                "🔄 Redo This Character Image (Z-Image Turbo)",
+                                "🔄 Redo This Character Image (9:16 Z-Image Turbo)",
                                 variant="primary",
                             )
 
@@ -1577,9 +1608,15 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             # ══════════════════════════════════════════════════════════════════
             with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Dual-Keyframe: First + Last Frame)", id="phase3") as phase3_tab:
                 with gr.Row():
-                    studio_step3_btn = gr.Button(
-                        "🖼️ Generate All Scene First + Last Frames (Locked Qwen Seed + Character Refs + CIE-Lab Match)",
+                    studio_step3_single_btn = gr.Button(
+                        "🎯 Generate Selected Scene (Scene-by-Scene Mode)",
                         variant="primary",
+                        size="lg",
+                        scale=2,
+                    )
+                    studio_step3_btn = gr.Button(
+                        "⚡ Generate ALL Scenes at Once (Batch Mode)",
+                        variant="secondary",
                         size="lg",
                         scale=2,
                     )
@@ -1684,8 +1721,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                             studio_scene_direct_end_btn = gr.Button("🎬 Direct End Frame with Gemma Vision", variant="secondary")
                             studio_scene_qa_btn = gr.Button("🔍 Inspect Scene with Gemma Vision QA Critic", variant="secondary")
                             studio_scene_redo_btn = gr.Button(
-                                "🔄 Redo Selected Scene Frame(s) (Qwen Multi-Ref)",
+                                "🎨 Generate / Redo Selected Scene Frame(s)",
                                 variant="primary",
+                            )
+                            studio_scene_next_btn = gr.Button(
+                                "⏭️ Next Scene ➔",
+                                variant="secondary",
                             )
 
             # ══════════════════════════════════════════════════════════════════
@@ -2471,23 +2512,36 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[studio_json_display, studio_status, studio_pipeline_state],
     )
 
-    studio_scene_redo_btn.click(
-        fn=studio_redo_single_scene,
-        inputs=[
-            studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
-            studio_scene_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
-            studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
-            studio_scene_end_prompt_edit, studio_scene_redo_mode, studio_scene_qa_chk,
-            studio_scene_end_seed_edit, studio_scene_direct_end_chk,
-        ],
-        outputs=[
-            studio_scenes_gallery, studio_scene_preview, studio_scene_end_preview, studio_json_display,
-            studio_status, studio_pipeline_state,
-        ],
-    ).then(
-        fn=studio_load_scene_end_fields,
+    for single_scene_btn in (studio_step3_single_btn, studio_scene_redo_btn):
+        single_scene_btn.click(
+            fn=studio_redo_single_scene,
+            inputs=[
+                studio_scene_selector, studio_scene_title_edit, studio_scene_scenario_edit,
+                studio_scene_prompt_edit, studio_scene_chars_edit, studio_scene_seed_edit,
+                studio_aspect_ratio, studio_ollama_key, studio_ollama_model, studio_pipeline_state,
+                studio_scene_end_prompt_edit, studio_scene_redo_mode, studio_scene_qa_chk,
+                studio_scene_end_seed_edit, studio_scene_direct_end_chk, studio_scene_chain_chk,
+            ],
+            outputs=[
+                studio_scenes_gallery, studio_scene_preview, studio_scene_end_preview, studio_json_display,
+                studio_status, studio_pipeline_state,
+            ],
+        ).then(
+            fn=studio_load_scene_end_fields,
+            inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
+            outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit, studio_scene_delta_badge],
+        )
+
+    studio_scene_next_btn.click(
+        fn=studio_step_to_next_scene,
         inputs=[studio_scene_selector, studio_pipeline_state, studio_qwen_seed],
-        outputs=[studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit, studio_scene_delta_badge],
+        outputs=[
+            studio_scene_selector,
+            studio_scene_title_edit, studio_scene_scenario_edit, studio_scene_prompt_edit,
+            studio_scene_chars_edit, studio_scene_seed_edit, studio_scene_preview,
+            studio_scene_end_prompt_edit, studio_scene_end_preview, studio_scene_end_seed_edit,
+            studio_scene_delta_badge, studio_status,
+        ],
     )
 
     # Phase 4: Director, Generate All Video Clips, and Individual Clip Redo

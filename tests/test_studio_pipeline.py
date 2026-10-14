@@ -198,6 +198,9 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertEqual(call_args_1["seed"], locked_seed)
         self.assertEqual(call_args_2["seed"], locked_seed)
         self.assertIn("2D vibrant cartoon animation", call_args_1["prompt"])
+        self.assertEqual(call_args_1["width"], 576)
+        self.assertEqual(call_args_1["height"], 1024)
+        self.assertIn("9:16 vertical full-body", call_args_1["prompt"])
         self.assertEqual(updated_chars[0]["portrait_seed"], locked_seed)
         self.assertEqual(updated_chars[1]["portrait_seed"], locked_seed)
 
@@ -644,6 +647,9 @@ class TestStudioPipeline(unittest.TestCase):
         )
         self.assertEqual(updated_char["clothing"], "emerald wizard cape")
         self.assertEqual(updated_char["portrait_seed"], 55555)
+        self.assertEqual(mock_z_img.call_args[1]["width"], 576)
+        self.assertEqual(mock_z_img.call_args[1]["height"], 1024)
+        self.assertIn("9:16 vertical full-body", mock_z_img.call_args[1]["prompt"])
         self.assertEqual(story_data["characters"][0]["portrait_seed"], 100)  # char 0 untouched!
 
         # 2. Redo single scene keyframe (index 0 -> Scene 1) with new prompt & seed
@@ -657,6 +663,17 @@ class TestStudioPipeline(unittest.TestCase):
         self.assertEqual(updated_scene["scenario"], "Luna finds a glowing crystal")
         self.assertEqual(updated_scene["keyframe_seed"], 66666)
         self.assertEqual(mock_qwen.call_args[1]["seed"], 66666)
+
+        # 2b. Redo single scene with shot chaining from Scene 1
+        updated_scene_2 = self.pipeline.regenerate_single_scene_keyframe(
+            story_data=story_data,
+            scene_index=1,
+            seed=88888,
+            chain_previous_end_frame=True,
+            aspect_ratio="9:16 Vertical (Shorts/Reels)",
+        )
+        prev_kf = updated_scene.get("last_keyframe_path") or updated_scene.get("keyframe_path")
+        self.assertEqual(updated_scene_2["keyframe_path"], prev_kf)
 
         # 3. Redo single 5s video clip (index 0 -> Scene 1) with new motion description & seed
         updated_clip_scene = self.pipeline.regenerate_single_scene_video(
