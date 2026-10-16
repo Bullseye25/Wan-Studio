@@ -1158,6 +1158,20 @@ class SpritesPipeline:
         resized_sprite = master_sprite_pil.resize((480, 832), Image.Resampling.LANCZOS)
         last_sprite = resized_sprite if not is_loop else None
 
+        def _safe_progress(pct, *args, **kwargs):
+            if not progress_cb:
+                return
+            msg = kwargs.get("desc") or (args[0] if args else "")
+            try:
+                progress_cb(pct, desc=msg)
+            except TypeError:
+                try:
+                    progress_cb(pct, msg)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         local_video_path, _ = run_remote_inference(
             resized_image=resized_sprite,
             processed_last_image=last_sprite,
@@ -1178,7 +1192,7 @@ class SpritesPipeline:
             duration_seconds=5.0,
             safe_mode=True,
             deflicker_frames=True,
-            progress=progress_cb,
+            progress=_safe_progress,
             last_frame_image=last_sprite,
         )
 

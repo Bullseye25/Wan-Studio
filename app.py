@@ -824,9 +824,11 @@ def roll_three_studio_seeds():
 
 
 def _studio_progress(progress):
-    def cb(pct, msg):
+    def cb(pct, msg=None, *args, **kwargs):
+        desc = msg or kwargs.get("desc") or (args[0] if args else "")
         try:
-            progress(pct, desc=msg)
+            if progress is not None:
+                progress(pct, desc=desc)
         except Exception:
             pass
     return cb
@@ -2021,9 +2023,11 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
 
     pipeline = SpritesPipeline()
     try:
-        def cb(pct, msg):
+        def cb(pct, msg=None, *args, **kwargs):
+            desc = msg or kwargs.get("desc") or (args[0] if args else "")
             try:
-                progress(pct, desc=msg)
+                if progress is not None:
+                    progress(pct, desc=desc)
             except Exception:
                 pass
 
