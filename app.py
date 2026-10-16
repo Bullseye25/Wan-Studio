@@ -19,6 +19,7 @@ from studio_pipeline import (
     ASPECT_RATIO_PRESETS,
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_MODEL,
+    VERIFIED_OLLAMA_MODELS,
     generate_three_studio_seeds,
     restore_extracted_video_frame,
 )
@@ -510,59 +511,148 @@ def use_generated_as_video_input(generated_image):
 # ── CSS ───────────────────────────────────────────────────────────────────────
 
 CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-* { font-family: 'Inter', sans-serif; }
+* { font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+code, pre, .mono-font { font-family: 'JetBrains Mono', monospace !important; }
 
 body, .gradio-container {
-    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e) !important;
+    background: radial-gradient(circle at 50% 0%, #17153a 0%, #0a0b10 55%, #030508 100%) !important;
     min-height: 100vh;
+    color: #f8fafc;
 }
 
+/* Glassmorphic Panels */
+.glass-panel {
+    background: rgba(15, 23, 42, 0.7) !important;
+    backdrop-filter: blur(16px) !important;
+    -webkit-backdrop-filter: blur(16px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
+    padding: 16px !important;
+}
+
+.studio-panel {
+    background: linear-gradient(145deg, rgba(30, 27, 75, 0.45), rgba(15, 23, 42, 0.65)) !important;
+    border: 1px solid rgba(168, 85, 247, 0.25) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 0 35px rgba(168, 85, 247, 0.08) !important;
+    padding: 18px !important;
+}
+
+.sprites-panel {
+    background: linear-gradient(145deg, rgba(16, 185, 129, 0.1), rgba(15, 23, 42, 0.65)) !important;
+    border: 1px solid rgba(16, 185, 129, 0.25) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 0 35px rgba(16, 185, 129, 0.08) !important;
+    padding: 18px !important;
+}
+
+.qwen-panel {
+    background: linear-gradient(145deg, rgba(99, 102, 241, 0.12), rgba(15, 23, 42, 0.65)) !important;
+    border: 1px solid rgba(99, 102, 241, 0.28) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 0 35px rgba(99, 102, 241, 0.08) !important;
+    padding: 18px !important;
+}
+
+.wan-panel {
+    background: linear-gradient(145deg, rgba(14, 165, 233, 0.12), rgba(15, 23, 42, 0.65)) !important;
+    border: 1px solid rgba(14, 165, 233, 0.28) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 0 35px rgba(14, 165, 233, 0.08) !important;
+    padding: 18px !important;
+}
+
+/* Header Branding */
 .main-title {
     text-align: center;
-    background: linear-gradient(90deg, #a78bfa, #60a5fa, #34d399);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    font-size: 1.8em !important;
-    font-weight: 700 !important;
+    background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    font-size: 2.2em !important;
+    font-weight: 800 !important;
+    letter-spacing: -0.02em;
     margin-bottom: 4px !important;
 }
 
 .subtitle {
     text-align: center;
-    color: #94a3b8;
-    font-size: 0.95em;
+    color: #94a3b8 !important;
+    font-size: 0.95em !important;
+    margin-bottom: 14px !important;
+}
+
+/* Pipeline Progression Rail */
+.pipeline-progression-rail {
+    background: rgba(15, 23, 42, 0.75) !important;
+    border: 1px solid rgba(56, 189, 248, 0.25) !important;
+    border-radius: 14px !important;
+    padding: 12px 18px !important;
+    margin-bottom: 16px !important;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25) !important;
+}
+
+/* Top Level Main Workspace Tabs */
+.main-workspace-tabs > .tab-nav {
+    background: rgba(15, 23, 42, 0.85) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 14px !important;
+    padding: 6px !important;
+    gap: 8px !important;
     margin-bottom: 16px !important;
 }
 
-.qwen-panel {
-    background: linear-gradient(145deg, rgba(99,102,241,0.12), rgba(139,92,246,0.08));
-    border: 1px solid rgba(139,92,246,0.35);
-    border-radius: 14px;
-    padding: 16px;
-    box-shadow: 0 0 30px rgba(139,92,246,0.1);
-    margin-bottom: 16px !important;
+.main-workspace-tabs > .tab-nav button {
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 1.05em !important;
+    color: #94a3b8 !important;
+    padding: 10px 20px !important;
+    transition: all 0.2s ease-in-out !important;
 }
 
-.wan-panel {
-    background: linear-gradient(145deg, rgba(14,165,233,0.12), rgba(6,182,212,0.08));
-    border: 1px solid rgba(14,165,233,0.35);
-    border-radius: 14px;
-    padding: 16px;
-    box-shadow: 0 0 30px rgba(14,165,233,0.1);
-    margin-bottom: 16px !important;
+.main-workspace-tabs > .tab-nav button.selected {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(168, 85, 247, 0.22)) !important;
+    color: #38bdf8 !important;
+    border: 1px solid rgba(56, 189, 248, 0.45) !important;
+    box-shadow: 0 0 18px rgba(56, 189, 248, 0.3) !important;
 }
 
-.studio-panel {
-    background: linear-gradient(145deg, rgba(236,72,153,0.12), rgba(168,85,247,0.08));
-    border: 1px solid rgba(236,72,153,0.35);
-    border-radius: 14px;
-    padding: 16px;
-    box-shadow: 0 0 30px rgba(236,72,153,0.1);
-    margin-bottom: 16px !important;
+/* Buttons Glow & Polish */
+button.primary, .gr-button-primary {
+    background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+    border: 1px solid rgba(56, 189, 248, 0.4) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 15px rgba(2, 132, 199, 0.35) !important;
+    transition: all 0.2s ease !important;
 }
 
+button.primary:hover, .gr-button-primary:hover {
+    box-shadow: 0 6px 20px rgba(56, 189, 248, 0.55) !important;
+    transform: translateY(-1px) !important;
+}
+
+button.secondary, .gr-button-secondary {
+    background: rgba(30, 41, 59, 0.7) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    color: #cbd5e1 !important;
+    border-radius: 10px !important;
+    transition: all 0.2s ease !important;
+}
+
+button.secondary:hover, .gr-button-secondary:hover {
+    background: rgba(51, 65, 85, 0.9) !important;
+    border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+/* Tool Accordion Styling (fallback/nested) */
 .tool-accordion {
     border-radius: 14px !important;
     margin-bottom: 16px !important;
@@ -575,24 +665,26 @@ body, .gradio-container {
 }
 
 .section-header {
-    font-size: 1.05em !important;
+    font-size: 1.15em !important;
     font-weight: 700 !important;
-    margin-bottom: 6px !important;
-    color: #e2e8f0 !important;
+    margin-bottom: 8px !important;
+    color: #f1f5f9 !important;
+    letter-spacing: -0.01em;
 }
 
 .step-hint {
     color: #94a3b8;
-    font-size: 0.85em;
+    font-size: 0.88em;
     margin-top: 2px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    line-height: 1.5;
 }
 
 .director-panel {
-    background: linear-gradient(145deg, rgba(168,85,247,0.12), rgba(99,102,241,0.08));
-    border: 1px solid rgba(168,85,247,0.35);
-    border-radius: 12px;
-    padding: 12px;
+    background: linear-gradient(145deg, rgba(168, 85, 247, 0.12), rgba(99, 102, 241, 0.08)) !important;
+    border: 1px solid rgba(168, 85, 247, 0.35) !important;
+    border-radius: 14px !important;
+    padding: 14px !important;
     margin-bottom: 12px !important;
 }
 
@@ -1409,7 +1501,13 @@ def sprites_ui_refine_character(user_concept, genre, art_style, api_key, model):
             genre=genre,
             art_style=art_style,
         )
-        status = f"### ✨ Gemma Refined 2D Game Character: `{refined.get('name')}`\nGenre: `{genre}` | Style: `{art_style}`"
+        arch = SpritesPipeline.detect_character_combat_archetype(refined, genre=genre)
+        status = (
+            f"### ✨ Gemma Refined 2D Game Character: `{refined.get('name')}`\n"
+            f"- **Genre:** `{genre}` | **Style:** `{art_style}`\n"
+            f"- **Detected Combat Archetype:** `{arch['role_title']}` | **Weapon/Gear:** `{arch['weapon_label']}`\n"
+            f"- **Choreography Focus:** {arch['combat_style_summary']}"
+        )
         return (
             refined.get("name", "Hero"),
             refined.get("title", ""),
@@ -1423,15 +1521,42 @@ def sprites_ui_refine_character(user_concept, genre, art_style, api_key, model):
 
 
 def sprites_ui_generate_master_sprite(
-    name, title, appearance, gear, z_prompt, seed, genre, art_style, api_key, model, current_state
+    name, title, appearance, gear, z_prompt, seed, genre, art_style, api_key, model, current_state, user_concept=""
 ):
     pipeline = SpritesPipeline(api_key=api_key, model=model)
+
+    # Smart auto-enrichment if the user typed a concept (e.g. "Samurai with a sword") and clicked Generate directly
+    eff_name = (name or "").strip()
+    eff_title = (title or "").strip()
+    eff_appearance = (appearance or "").strip()
+    eff_gear = (gear or "").strip()
+    eff_prompt = (z_prompt or "").strip()
+    concept_str = (user_concept or "").strip()
+
+    if concept_str and (not eff_appearance or not eff_gear or eff_name in ("", "Pepsi_Hero")):
+        refined = pipeline.refine_character_with_gemma(
+            user_input=concept_str,
+            genre=genre,
+            art_style=art_style,
+        )
+        if not eff_name or eff_name == "Pepsi_Hero":
+            eff_name = refined.get("name") or eff_name
+        if not eff_title or eff_title == "Endless Obstacle Runner":
+            eff_title = refined.get("title") or eff_title
+        if not eff_appearance:
+            eff_appearance = refined.get("appearance") or concept_str
+        if not eff_gear:
+            eff_gear = refined.get("signature_gear") or ""
+        if not eff_prompt:
+            eff_prompt = refined.get("z_image_prompt") or ""
+
     char_data = {
-        "name": name or "Hero",
-        "title": title or "Arcade Fighter",
-        "appearance": appearance or "",
-        "signature_gear": gear or "",
-        "z_image_prompt": z_prompt or f"2D game character sheet of {name}",
+        "name": eff_name or "Hero",
+        "title": eff_title or "Arcade Fighter",
+        "appearance": eff_appearance or concept_str or "",
+        "signature_gear": eff_gear or "",
+        "user_concept": concept_str,
+        "z_image_prompt": eff_prompt or f"2D game character sheet of {eff_name or 'Hero'} {('holding ' + eff_gear) if eff_gear else ''}",
         "genre": genre,
         "art_style": art_style,
     }
@@ -1441,17 +1566,24 @@ def sprites_ui_generate_master_sprite(
         char_data["master_sprite_path"] = local_path
         char_data["master_seed"] = int(seed)
 
-        # Initialize default move-set from genre template
-        moves = SpritesPipeline.get_default_moves_for_genre(genre)
+        # Smart Character & Weapon-Aware Move-Set Generation (uses Gemma when api_key is provided, contextual weapon-aware fallback otherwise)
+        moves = pipeline.generate_smart_moveset_with_gemma(
+            character_data=char_data,
+            genre=genre,
+            use_llm=bool(api_key),
+        )
         char_data["moves"] = moves
+        arch = SpritesPipeline.detect_character_combat_archetype(char_data, genre=genre)
+        char_data["combat_archetype"] = arch
 
         current_state = current_state or {}
         current_state["character"] = char_data
 
         move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
         status = (
-            f"### 🎨 Master 2D Sprite Generated: `{name}` (Seed {seed})\n"
-            f"Isolated on Chroma Key Green. Initialized `{len(moves)}` default moves for `{genre}`."
+            f"### 🎨 Master 2D Sprite & Smart Choreography Ready: `{char_data['name']}` (Seed {seed})\n"
+            f"- **Weapon / Gear Detected:** `{arch['weapon_label']}` (`{arch['role_title']}`)\n"
+            f"- **Smart Move-Set:** Tailored `{len(moves)}` character-specific moves & pre-animation instructions for `{genre}`."
         )
         first_choice = move_choices[0] if move_choices else None
         return (
@@ -1465,6 +1597,273 @@ def sprites_ui_generate_master_sprite(
         )
     except Exception as e:
         return None, gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(choices=[], value=None), [], f"### ❌ Sprite Generation Error\n`{e}`", current_state
+
+
+def sprites_ui_smart_choreograph_moveset(
+    char_state, genre, combat_notes, name, title, appearance, gear, api_key, model
+):
+    """
+    Uses Gemma 4: 31B to intelligently generate or re-architect the character's entire move-set
+    and pre-animation instructions based on their weapon/gear, appearance, and combat style notes.
+    """
+    char_state = char_state or {}
+    character_data = dict(char_state.get("character") or {})
+    if name and str(name).strip():
+        character_data["name"] = str(name).strip()
+    if title and str(title).strip():
+        character_data["title"] = str(title).strip()
+    if appearance and str(appearance).strip():
+        character_data["appearance"] = str(appearance).strip()
+    if gear and str(gear).strip():
+        character_data["signature_gear"] = str(gear).strip()
+    character_data["genre"] = genre
+
+    pipeline = SpritesPipeline(api_key=api_key, model=model)
+    moves = pipeline.generate_smart_moveset_with_gemma(
+        character_data=character_data,
+        genre=genre,
+        combat_notes=combat_notes or "",
+        use_llm=bool(api_key),
+    )
+    character_data["moves"] = moves
+    arch = SpritesPipeline.detect_character_combat_archetype(character_data, genre=genre)
+    character_data["combat_archetype"] = arch
+    char_state["character"] = character_data
+
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    first_choice = move_choices[0] if move_choices else None
+    first_move = moves[0] if moves else {}
+    first_type_label = (
+        "🔁 Seamless Looping Cycle" if first_move.get("type") == "loop" else "🎯 Action (Return to Idle Stance)"
+    )
+
+    status = (
+        f"### 🧠 Gemma Smart Choreography Complete for `{character_data.get('name', 'Hero')}`!\n"
+        f"- **Combat Archetype:** `{arch['role_title']}` | **Weapon / Gear:** `{arch['weapon_label']}`\n"
+        f"- **Style Focus:** {arch['combat_style_summary']}\n"
+        f"- **Tailored Move-Set:** Generated `{len(moves)}` moves with weapon-locked pre-animation Wan 2.2 instructions."
+    )
+    return (
+        gr.update(choices=move_choices, value=first_choice),
+        gr.update(choices=move_choices, value=first_choice),
+        gr.update(choices=move_choices, value=first_choice),
+        moves,
+        first_move.get("name", ""),
+        first_type_label,
+        first_move.get("description", ""),
+        first_move.get("refined_prompt", ""),
+        status,
+        char_state,
+    )
+
+
+def sprites_ui_select_move_for_edit(choice_label, char_state):
+    """Loads the selected move's pre-animation choreography instructions into the Phase 2 editor."""
+    info, vpath = sprites_ui_load_move_details(choice_label, char_state)
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = character_data.get("moves", [])
+    for m in moves:
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            type_label = (
+                "🔁 Seamless Looping Cycle" if m.get("type") == "loop" else "🎯 Action (Return to Idle Stance)"
+            )
+            return (
+                m.get("name", ""),
+                type_label,
+                m.get("description", ""),
+                m.get("refined_prompt", ""),
+                info,
+                vpath,
+            )
+    return "", "🎯 Action (Return to Idle Stance)", "", "", info, vpath
+
+
+def sprites_ui_rechoreograph_selected_move(
+    choice_label, edit_name, edit_type, edit_desc, genre, api_key, model, char_state
+):
+    """Uses Gemma 4: 31B to rewrite the selected move's pre-animation instructions for the character's weapon/gear."""
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = list(character_data.get("moves", []))
+    if not character_data or not moves:
+        return "", "", gr.update(), gr.update(), gr.update(), [], "### ⚠️ Please generate a character first in Phase 1.", char_state
+
+    idx = 0
+    for i, m in enumerate(moves):
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            idx = i
+            break
+
+    target_move = dict(moves[idx])
+    anim_name = (edit_name or target_move.get("name") or "Move").strip()
+    anim_type = "loop" if "loop" in str(edit_type).lower() else "action"
+    raw_desc = (edit_desc or target_move.get("description") or anim_name).strip()
+
+    pipeline = SpritesPipeline(api_key=api_key, model=model)
+    plan = pipeline.refine_custom_animation_with_gemma(
+        character_data=character_data,
+        genre=genre,
+        anim_name=anim_name,
+        raw_description=raw_desc,
+        anim_type=anim_type,
+    )
+    new_desc = plan.get("choreography_prompt") or plan.get("action_summary") or raw_desc
+    new_prompt = plan.get("wan_prompt") or ""
+
+    target_move["name"] = anim_name
+    target_move["type"] = anim_type
+    target_move["description"] = new_desc
+    target_move["refined_prompt"] = new_prompt
+    moves[idx] = target_move
+    character_data["moves"] = moves
+    char_state["character"] = character_data
+
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    selected_label = move_choices[idx]
+    status = (
+        f"### ✨ Gemma Re-Choreographed Move: `{anim_name}` ({anim_type.upper()})\n"
+        f"- **Summary:** {plan.get('action_summary', new_desc)}"
+    )
+    return (
+        new_desc,
+        new_prompt,
+        gr.update(choices=move_choices, value=selected_label),
+        gr.update(choices=move_choices, value=selected_label),
+        gr.update(choices=move_choices, value=selected_label),
+        moves,
+        status,
+        char_state,
+    )
+
+
+def sprites_ui_save_selected_move(
+    choice_label, edit_name, edit_type, edit_desc, edit_prompt, genre, char_state
+):
+    """Saves manual edits to a move's name, motion rule, choreography description, and Wan prompt."""
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = list(character_data.get("moves", []))
+    if not character_data or not moves:
+        return gr.update(), gr.update(), gr.update(), [], "### ⚠️ No active move-set to update.", char_state
+
+    idx = 0
+    for i, m in enumerate(moves):
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            idx = i
+            break
+
+    target_move = dict(moves[idx])
+    anim_name = (edit_name or target_move.get("name") or f"Move {idx+1}").strip()
+    anim_type = "loop" if "loop" in str(edit_type).lower() else "action"
+    desc_str = (edit_desc or target_move.get("description") or "").strip()
+    prompt_str = (edit_prompt or "").strip()
+    if not prompt_str:
+        prompt_str = SpritesPipeline.build_pre_animation_wan_prompt(
+            character_data=character_data,
+            genre=genre,
+            move_name=anim_name,
+            move_type=anim_type,
+            move_description=desc_str,
+        )
+
+    target_move["name"] = anim_name
+    target_move["type"] = anim_type
+    target_move["description"] = desc_str
+    target_move["refined_prompt"] = prompt_str
+    moves[idx] = target_move
+    character_data["moves"] = moves
+    char_state["character"] = character_data
+
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    selected_label = move_choices[idx]
+    status = f"### 💾 Saved Pre-Animation Instructions for `{anim_name}` ({anim_type.upper()})."
+    return (
+        gr.update(choices=move_choices, value=selected_label),
+        gr.update(choices=move_choices, value=selected_label),
+        gr.update(choices=move_choices, value=selected_label),
+        moves,
+        status,
+        char_state,
+    )
+
+
+def sprites_ui_validate_phase1_to_phase2(
+    char_state, genre, art_style, name, title, appearance, gear, z_prompt, user_concept, api_key, model
+):
+    """
+    Validates Phase 1 character details and ensures Phase 2 is populated with smart,
+    weapon-aware moves and pre-animation instructions before switching to Phase 2.
+    """
+    char_state = char_state or {}
+    character_data = dict(char_state.get("character") or {})
+
+    prev_gear = character_data.get("signature_gear", "")
+    prev_appearance = character_data.get("appearance", "")
+
+    if name and str(name).strip():
+        character_data["name"] = str(name).strip()
+    if title and str(title).strip():
+        character_data["title"] = str(title).strip()
+    if appearance and str(appearance).strip():
+        character_data["appearance"] = str(appearance).strip()
+    elif user_concept and str(user_concept).strip() and not character_data.get("appearance"):
+        character_data["appearance"] = str(user_concept).strip()
+    if gear and str(gear).strip():
+        character_data["signature_gear"] = str(gear).strip()
+    if z_prompt and str(z_prompt).strip():
+        character_data["z_image_prompt"] = str(z_prompt).strip()
+    if user_concept and str(user_concept).strip():
+        character_data["user_concept"] = str(user_concept).strip()
+    character_data["genre"] = genre
+    character_data["art_style"] = art_style
+
+    moves = character_data.get("moves") or []
+    gear_changed = (character_data.get("signature_gear", "") != prev_gear) or (character_data.get("appearance", "") != prev_appearance)
+
+    if not moves or gear_changed:
+        pipeline = SpritesPipeline(api_key=api_key, model=model)
+        moves = pipeline.generate_smart_moveset_with_gemma(
+            character_data=character_data,
+            genre=genre,
+            use_llm=bool(api_key),
+        )
+        character_data["moves"] = moves
+
+    arch = SpritesPipeline.detect_character_combat_archetype(character_data, genre=genre)
+    character_data["combat_archetype"] = arch
+    char_state["character"] = character_data
+
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    first_choice = move_choices[0] if move_choices else None
+    first_move = moves[0] if moves else {}
+    first_type_label = (
+        "🔁 Seamless Looping Cycle" if first_move.get("type") == "loop" else "🎯 Action (Return to Idle Stance)"
+    )
+    combat_directive_default = f"{arch['role_title']} wielding {arch['weapon_label']} — {arch['combat_style_summary']}"
+
+    status = (
+        f"### ⚔️ Phase 2 Ready: Smart Choreography Loaded for `{character_data.get('name', 'Hero')}`\n"
+        f"- **Detected Weapon / Gear:** `{arch['weapon_label']}` (`{arch['role_title']}`)\n"
+        f"- **Pre-Animation Instructions:** `{len(moves)}` moves tailored to `{arch['weapon_label']}` (no mismatched animations)."
+    )
+    return (
+        gr.update(selected="sprites_phase2"),
+        gr.update(choices=move_choices, value=first_choice),
+        gr.update(choices=move_choices, value=first_choice),
+        gr.update(choices=move_choices, value=first_choice),
+        moves,
+        combat_directive_default,
+        first_move.get("name", ""),
+        first_type_label,
+        first_move.get("description", ""),
+        first_move.get("refined_prompt", ""),
+        status,
+        char_state,
+    )
 
 
 def sprites_ui_refine_custom_anim(char_state, genre, custom_name, custom_desc, custom_type, api_key, model):
@@ -1497,12 +1896,23 @@ def sprites_ui_add_custom_anim(char_state, custom_name, custom_desc, custom_type
     anim_type = "loop" if "loop" in str(custom_type).lower() else "action"
     new_id = f"custom_move_{len(moves) + 1}"
     name_str = custom_name.strip() if custom_name and custom_name.strip() else f"Custom Move {len(moves)+1}"
+    genre = character_data.get("genre", "Custom / Hybrid Genre")
+    desc_str = (custom_desc or "").strip()
+    prompt_str = (refined_prompt or "").strip()
+    if not prompt_str:
+        prompt_str = SpritesPipeline.build_pre_animation_wan_prompt(
+            character_data=character_data,
+            genre=genre,
+            move_name=name_str,
+            move_type=anim_type,
+            move_description=desc_str or name_str,
+        )
     new_move = {
         "id": new_id,
         "name": name_str,
         "type": anim_type,
-        "description": custom_desc or "",
-        "refined_prompt": refined_prompt or custom_desc or "",
+        "description": desc_str,
+        "refined_prompt": prompt_str,
         "wan_seed": 42 + len(moves) * 1007,
         "video_path": None,
         "sheet_path": None,
@@ -1635,11 +2045,17 @@ def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state
 
 with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
-    gr.Markdown("## 🎬 Wan 2.2 AI Filmmaking Studio", elem_classes="main-title")
-    gr.Markdown(
-        "**💰 GPU Cost-Saver Mode Active:** Models run strictly **On-Demand ($0 Idle)** with `max_containers=1` & 15s auto-scaledown   |   "
-        "**3-Seed Consistency Engine** (`Z-Image Seed` · `Qwen Scene Seed` · `Wan Video Seed`)",
-        elem_classes="subtitle"
+    gr.HTML(
+        """
+        <div style="text-align: center; margin-bottom: 12px; padding-top: 6px;">
+            <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 20px; padding: 4px 14px; margin-bottom: 8px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
+                <span style="color: #38bdf8; font-size: 0.82em; font-weight: 700; letter-spacing: 0.05em;">SERVERLESS ON-DEMAND GPU CLUSTER · ZERO IDLE COST</span>
+            </div>
+            <h1 class="main-title">🎬 Wan 2.2 Generative AI Studio</h1>
+            <p class="subtitle">Next-Gen Multi-Modal Production Suite · Screenplay to Final Movie · 2D Game Sprites · Qwen Edit · Wan 2.2 I2V</p>
+        </div>
+        """
     )
 
     with gr.Row():
@@ -1649,855 +2065,952 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         clear_outputs_btn = gr.Button("🗑️ Clear All Outputs", variant="stop", scale=1)
 
     with gr.Row(elem_classes="toolbar-row"):
-        expand_all_btn = gr.Button("🔽 Expand All Tools", variant="secondary", size="sm")
-        collapse_all_btn = gr.Button("🔼 Collapse All Tools", variant="secondary", size="sm")
+        nav_studio_btn = gr.Button("🎬 Story Studio", variant="primary", size="sm", scale=1)
+        nav_sprites_btn = gr.Button("🎮 2D Sprites Engine", variant="secondary", size="sm", scale=1)
+        nav_qwen_btn = gr.Button("🖼️ Image Generator & Editor", variant="secondary", size="sm", scale=1)
+        nav_wan_btn = gr.Button("🎥 Cinematic Video Studio", variant="secondary", size="sm", scale=1)
+        expand_all_btn = gr.Button("🔽 Expand All Tools", variant="secondary", size="sm", visible=False)
+        collapse_all_btn = gr.Button("🔼 Collapse All Tools", variant="secondary", size="sm", visible=False)
 
-    # ── Tool 0 (Flagship): Universal 2D Game Sprites Creator Studio ──────────
-    with gr.Accordion(
-        "🎮 2D Game Sprites Creator Studio — Multi-Genre Asset Pipeline (Action Runner, Mega Man X, RPG, Shmup, Beat 'em Up)",
-        open=True,
-        elem_classes="tool-accordion sprites-panel",
-    ) as sprites_accordion:
-        gr.Markdown(
-            "### 🎮 Universal 2D Game Sprites Creator · Gemma 4: 31B ➔ Z-Image Turbo ➔ Wan 2.2 ➔ Transparent Sprite Sheet",
-            elem_classes="section-header",
-        )
-
-        sprites_state_store = gr.State({})
-
-        with gr.Group():
-            with gr.Row():
-                sprites_genre = gr.Dropdown(
-                    label="🕹️ Game Genre / Perspective Archetype",
-                    choices=list(GENRE_PRESETS.keys()),
-                    value="Action Runner (Pepsiman / Crash Bandicoot)",
-                    scale=2,
+    with gr.Tabs(selected="tab_studio", elem_classes="main-workspace-tabs") as main_workspace_tabs:
+        # ── Tool 1: AI Story-to-Movie Studio (Flagship 4-Phase Wizard) ─────────
+        with gr.TabItem("🎬 AI Story-to-Movie Studio", id="tab_studio") as tab_studio:
+            with gr.Group(elem_classes="studio-panel") as studio_accordion:
+                gr.HTML(
+                    """
+                    <div class="pipeline-progression-rail">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 800; font-size: 1.05em;">🎬 5-STEP MOVIE PIPELINE:</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.88em; flex-wrap: wrap;">
+                            <span style="color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.3);">1️⃣ Screenplay</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #a855f7; background: rgba(168, 85, 247, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(168, 85, 247, 0.3);">2️⃣ Character Cast</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #ec4899; background: rgba(236, 72, 153, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(236, 72, 153, 0.3);">3️⃣ Dual Keyframes</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.3);">4️⃣ Wan 2.2 Video</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #f59e0b; background: rgba(245, 158, 11, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3);">5️⃣ Film Stitch</span>
+                        </div>
+                    </div>
+                    """
                 )
-                sprites_art_style = gr.Dropdown(
-                    label="🎨 Art Aesthetic Style",
-                    choices=[
-                        "16-bit arcade pixel art style",
-                        "Hand-drawn 2D anime cel style",
-                        "2.5D stylized rendered sprite",
-                        "Classic retro 8-bit NES style",
-                        "High-res modern vector arcade style",
-                    ],
-                    value="16-bit arcade pixel art style",
-                    scale=1,
-                )
-                sprites_char_seed = gr.Number(
-                    value=42, precision=0, label="🎲 Character Seed", scale=1
-                )
-                sprites_anim_seed = gr.Number(
-                    value=8888, precision=0, label="🎲 Animation Seed", scale=1
+                gr.Markdown(
+                    "### 🎬 4-Phase Interactive Studio · Validate & Redo Every Character, Scene, and 5s Video Clip",
+                    elem_classes="section-header",
                 )
 
-            with gr.Accordion("🔑 Gemma 4: 31B Cloud API Settings", open=False):
-                with gr.Row():
-                    sprites_ollama_key = gr.Textbox(
-                        label="Ollama API Key",
-                        value=DEFAULT_OLLAMA_API_KEY,
-                        type="password",
-                        scale=3,
-                    )
-                    sprites_ollama_model = gr.Textbox(
-                        label="Model Tag",
-                        value=DEFAULT_OLLAMA_MODEL,
-                        scale=1,
-                    )
-
-        sprites_status = gr.Markdown("### 🕹️ Ready. Enter a character concept below to begin Phase 1.")
-
-        with gr.Tabs() as sprites_wizard_tabs:
-            # ─────────────────────────────────────────────────────────────
-            # Phase 1: Character Genesis
-            # ─────────────────────────────────────────────────────────────
-            with gr.TabItem("1️⃣ Phase 1: Character Genesis", id="sprites_phase1"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        sprites_user_concept = gr.Textbox(
-                            label="Character Concept / Details",
-                            placeholder="e.g. Silver metallic runner with blue logo on chest, athletic build, running sneakers, energetic hero personality",
-                            lines=3,
+                # Global 3-Seed Bar & Global Studio Configuration
+                with gr.Group():
+                    with gr.Row():
+                        studio_seed = gr.Number(
+                            value=INITIAL_STUDIO_SEEDS["z_image_seed"],
+                            precision=0,
+                            label="🎲 Seed #1: Z-Image Turbo (All Characters)",
+                            scale=1,
                         )
+                        studio_qwen_seed = gr.Number(
+                            value=INITIAL_STUDIO_SEEDS["qwen_seed"],
+                            precision=0,
+                            label="🎲 Seed #2: Qwen Image Edit (All Scene Images)",
+                            scale=1,
+                        )
+                        studio_wan_seed = gr.Number(
+                            value=INITIAL_STUDIO_SEEDS["wan_seed"],
+                            precision=0,
+                            label="🎲 Seed #3: Wan 2.2 (All 5s Video Clips)",
+                            scale=1,
+                        )
+                        studio_roll_seeds_btn = gr.Button("🎲 Roll 3 New Random Seeds", variant="secondary", scale=1)
+
+                    with gr.Row():
+                        studio_art_style = gr.Dropdown(
+                            label="Art Style",
+                            choices=[
+                                "2D vibrant cartoon animation",
+                                "Cyberpunk anime aesthetic",
+                                "3D Pixar / Disney animation style",
+                                "Photorealistic cinematic",
+                                "Watercolor children's book illustration",
+                            ],
+                            value="2D vibrant cartoon animation",
+                            scale=1,
+                        )
+                        studio_aspect_ratio = gr.Dropdown(
+                            label="Aspect Ratio / Format",
+                            choices=list(ASPECT_RATIO_PRESETS.keys()),
+                            value="9:16 Vertical (Shorts/Reels)",
+                            scale=1,
+                        )
+                        studio_num_scenes = gr.Slider(
+                            minimum=3, maximum=8, step=1, value=6,
+                            label="Scenes Count (≤5s each)",
+                            scale=1,
+                        )
+                        studio_total_duration = gr.Slider(
+                            minimum=15.0, maximum=40.0, step=2.5, value=30.0,
+                            label="Total Movie Duration (s)",
+                            scale=1,
+                        )
+
+                studio_status = gr.Markdown(
+                    "### 🟢 Phase 1 Ready — Enter your story idea below and click **1️⃣ Generate Story (Gemma 4: 31B)**."
+                )
+
+                # ── 4-Phase Wizard Tabs ───────────────────────────────────────────────
+                with gr.Tabs(selected="phase1") as studio_wizard_tabs:
+
+                    # ══════════════════════════════════════════════════════════════════
+                    # PHASE 1: STORY & SCREENPLAY
+                    # ══════════════════════════════════════════════════════════════════
+                    with gr.TabItem("1️⃣ Phase 1: Story & Screenplay", id="phase1") as phase1_tab:
                         with gr.Row():
-                            sprites_refine_char_btn = gr.Button("✨ Refine Character with Gemma 4: 31B", variant="secondary")
-                            sprites_gen_char_btn = gr.Button("🎨 Generate Master 2D Sprite", variant="primary")
-
-                        with gr.Row():
-                            sprites_char_name = gr.Textbox(label="Character Name", value="Pepsi_Hero", scale=1)
-                            sprites_char_title = gr.Textbox(label="Title / Archetype", value="Endless Obstacle Runner", scale=1)
-                        sprites_char_appearance = gr.Textbox(label="Visual Description & Outfit", lines=2)
-                        sprites_char_gear = gr.Textbox(label="Signature Gear / Item", lines=1)
-                        sprites_char_prompt = gr.Textbox(label="Z-Image Prompt (Chroma Key Green #00FF00)", lines=2)
-
-                    with gr.Column(scale=1):
-                        sprites_char_preview = gr.Image(
-                            label="Master 2D Sprite Preview (Isolated on Solid Chroma Green)",
-                            height=380,
-                            interactive=False,
-                        )
-                        sprites_phase1_next_btn = gr.Button(
-                            "✅ Validate Character & Proceed to Move Choreography ➔",
-                            variant="primary",
-                            size="lg",
-                        )
-
-            # ─────────────────────────────────────────────────────────────
-            # Phase 2: Move Choreography & Custom Animation Creator
-            # ─────────────────────────────────────────────────────────────
-            with gr.TabItem("2️⃣ Phase 2: Move Choreography & Custom Creator", id="sprites_phase2"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 📋 Active Character Move-Set")
-                        sprites_move_selector = gr.Dropdown(
-                            label="Select Move to Inspect / Animate",
-                            choices=[],
-                            interactive=True,
-                        )
-                        sprites_moves_json = gr.JSON(label="Move-Set Registry")
-
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### ➕ Add Custom Animation")
-                        sprites_custom_name = gr.Textbox(
-                            label="Custom Animation Name",
-                            placeholder="e.g. Soda Can Chug, Hadouken Blast, Double Backflip...",
-                        )
-                        sprites_custom_desc = gr.Textbox(
-                            label="Movement & Behavior Description",
-                            placeholder="Describe what the character does in plain natural language...",
-                            lines=2,
-                        )
-                        sprites_custom_type = gr.Radio(
-                            label="Animation Motion Rule",
-                            choices=["🎯 Action (Return to Idle Stance)", "🔁 Seamless Looping Cycle"],
-                            value="🎯 Action (Return to Idle Stance)",
-                        )
-                        sprites_custom_refined_prompt = gr.Textbox(
-                            label="Refined Wan Choreography Prompt",
-                            lines=2,
-                            placeholder="Click 'Direct & Refine with Gemma' to compile micro-choreography prompt...",
-                        )
-                        with gr.Row():
-                            sprites_refine_custom_btn = gr.Button("✨ Direct & Refine with Gemma", variant="secondary")
-                            sprites_add_custom_btn = gr.Button("➕ Add to Character's Move-Set", variant="primary")
-
-                with gr.Row():
-                    sprites_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary")
-                    sprites_phase2_next_btn = gr.Button("✅ Proceed to Phase 3: Wan 2.2 Animation Studio ➔", variant="primary")
-
-            # ─────────────────────────────────────────────────────────────
-            # Phase 3: Wan 2.2 Animation Studio
-            # ─────────────────────────────────────────────────────────────
-            with gr.TabItem("3️⃣ Phase 3: Wan 2.2 Animation Studio", id="sprites_phase3"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        sprites_anim_target_move = gr.Dropdown(
-                            label="Select Move to Animate with Wan 2.2",
-                            choices=[],
-                            interactive=True,
-                        )
-                        with gr.Row():
-                            sprites_animate_single_btn = gr.Button("🎬 Animate Selected Move (Wan 2.2)", variant="primary", size="lg")
-                        sprites_anim_info = gr.Markdown("Select a move and click animate.")
-
-                    with gr.Column(scale=1):
-                        sprites_anim_video_preview = gr.Video(
-                            label="Synthesized Move Animation Clip (Looping MP4)",
-                            height=360,
-                            autoplay=True,
-                            loop=True,
-                        )
-                with gr.Row():
-                    sprites_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary")
-                    sprites_phase3_next_btn = gr.Button("✅ Proceed to Phase 4: Sprite Cutter & Sheet Exporter ➔", variant="primary")
-
-            # ─────────────────────────────────────────────────────────────
-            # Phase 4: Sprite Cutter & Sheet Exporter
-            # ─────────────────────────────────────────────────────────────
-            with gr.TabItem("4️⃣ Phase 4: Sprite Cutter & Sheet Exporter", id="sprites_phase4"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        sprites_cut_target_move = gr.Dropdown(
-                            label="Select Move Animation to Slice into Sprite Sheet",
-                            choices=[],
-                            interactive=True,
-                        )
-                        with gr.Row():
-                            sprites_target_fps = gr.Dropdown(
-                                label="Target Game Frame Rate",
-                                choices=[8, 12, 16, 24],
-                                value=12,
-                                scale=1,
-                            )
-                            sprites_chroma_tol = gr.Slider(
-                                label="Chroma Removal Tolerance",
-                                minimum=15.0,
-                                maximum=70.0,
-                                value=38.0,
-                                step=1.0,
-                                scale=1,
-                            )
-                        sprites_cut_sheet_btn = gr.Button("✂️ Cut Video to Transparent Sprite Sheet & JSON", variant="primary", size="lg")
-                        with gr.Row():
-                            sprites_download_sheet = gr.File(label="💾 Download Sprite Sheet (.png)")
-                            sprites_download_json = gr.File(label="📄 Download Engine Manifest (.json)")
-
-                    with gr.Column(scale=1):
-                        sprites_sheet_preview = gr.Image(
-                            label="Packed Transparent Sprite Sheet Atlas (PNG)",
-                            height=380,
-                        )
-                        sprites_json_preview = gr.JSON(label="Generated Engine Metadata (Unity / Godot / Unreal)")
-                with gr.Row():
-                    sprites_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary")
-
-    # ── Tool 3: 4-Phase Interactive AI Filmmaking Studio Wizard ───────────────
-    with gr.Accordion(
-        "🎬 AI Filmmaking Studio — 4-Phase Interactive Story-to-Movie Wizard (Gemma 4: 31B ➔ Z-Image ➔ Qwen ➔ Wan 2.2)",
-        open=False,
-        elem_classes="tool-accordion studio-panel",
-    ) as studio_accordion:
-        gr.Markdown(
-            "### 🎬 4-Phase Interactive Studio · Validate & Redo Every Character, Scene, and 5s Video Clip",
-            elem_classes="section-header",
-        )
-
-        # Global 3-Seed Bar & Global Studio Configuration
-        with gr.Group():
-            with gr.Row():
-                studio_seed = gr.Number(
-                    value=INITIAL_STUDIO_SEEDS["z_image_seed"],
-                    precision=0,
-                    label="🎲 Seed #1: Z-Image Turbo (All Characters)",
-                    scale=1,
-                )
-                studio_qwen_seed = gr.Number(
-                    value=INITIAL_STUDIO_SEEDS["qwen_seed"],
-                    precision=0,
-                    label="🎲 Seed #2: Qwen Image Edit (All Scene Images)",
-                    scale=1,
-                )
-                studio_wan_seed = gr.Number(
-                    value=INITIAL_STUDIO_SEEDS["wan_seed"],
-                    precision=0,
-                    label="🎲 Seed #3: Wan 2.2 (All 5s Video Clips)",
-                    scale=1,
-                )
-                studio_roll_seeds_btn = gr.Button("🎲 Roll 3 New Random Seeds", variant="secondary", scale=1)
-
-            with gr.Row():
-                studio_art_style = gr.Dropdown(
-                    label="Art Style",
-                    choices=[
-                        "2D vibrant cartoon animation",
-                        "Cyberpunk anime aesthetic",
-                        "3D Pixar / Disney animation style",
-                        "Photorealistic cinematic",
-                        "Watercolor children's book illustration",
-                    ],
-                    value="2D vibrant cartoon animation",
-                    scale=1,
-                )
-                studio_aspect_ratio = gr.Dropdown(
-                    label="Aspect Ratio / Format",
-                    choices=list(ASPECT_RATIO_PRESETS.keys()),
-                    value="9:16 Vertical (Shorts/Reels)",
-                    scale=1,
-                )
-                studio_num_scenes = gr.Slider(
-                    minimum=3, maximum=8, step=1, value=6,
-                    label="Scenes Count (≤5s each)",
-                    scale=1,
-                )
-                studio_total_duration = gr.Slider(
-                    minimum=15.0, maximum=40.0, step=2.5, value=30.0,
-                    label="Total Movie Duration (s)",
-                    scale=1,
-                )
-
-        studio_status = gr.Markdown(
-            "### 🟢 Phase 1 Ready — Enter your story idea below and click **1️⃣ Generate Story (Gemma 4: 31B)**."
-        )
-
-        # ── 4-Phase Wizard Tabs ───────────────────────────────────────────────
-        with gr.Tabs(selected="phase1") as studio_wizard_tabs:
-
-            # ══════════════════════════════════════════════════════════════════
-            # PHASE 1: STORY & SCREENPLAY
-            # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("1️⃣ Phase 1: Story & Screenplay", id="phase1") as phase1_tab:
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        studio_prompt = gr.Textbox(
-                            label="Story Premise / Idea",
-                            value="Two best friends, Barnaby the fluffy brown bear and Pippin the white rabbit, discover a basket of sweet wild berries in an enchanted forest meadow and learn that sharing brings true happiness.",
-                            placeholder="Describe your story premise or thematic concept...",
-                            lines=4,
-                        )
-                        studio_use_vision = gr.Checkbox(
-                            label="🎬 Enable Gemma 4: 31B Multimodal Vision Director (inspects each keyframe before animating)",
-                            value=True,
-                        )
-                        with gr.Accordion("⚙️ Ollama Cloud API & One-Click Auto Mode", open=False):
-                            with gr.Row():
-                                studio_ollama_key = gr.Textbox(
-                                    label="Ollama Cloud API Key",
-                                    value=DEFAULT_OLLAMA_API_KEY,
-                                    type="password",
-                                    scale=2,
+                            with gr.Column(scale=1):
+                                studio_prompt = gr.Textbox(
+                                    label="Story Premise / Idea",
+                                    value="Two best friends, Barnaby the fluffy brown bear and Pippin the white rabbit, discover a basket of sweet wild berries in an enchanted forest meadow and learn that sharing brings true happiness.",
+                                    placeholder="Describe your story premise or thematic concept...",
+                                    lines=4,
                                 )
-                                studio_ollama_model = gr.Textbox(
-                                    label="Ollama Model",
-                                    value=DEFAULT_OLLAMA_MODEL,
-                                    scale=1,
+                                studio_use_vision = gr.Checkbox(
+                                    label="🎬 Enable Gemma 4: 31B Multimodal Vision Director (inspects each keyframe before animating)",
+                                    value=True,
                                 )
-                            studio_run_full_btn = gr.Button(
-                                "🚀 Run Full Automated Pipeline (All 4 Phases Non-Stop)",
-                                variant="secondary",
-                            )
+                                with gr.Accordion("⚙️ Ollama Cloud API & One-Click Auto Mode", open=False):
+                                    with gr.Row():
+                                        studio_ollama_key = gr.Textbox(
+                                            label="Ollama Cloud API Key",
+                                            value=DEFAULT_OLLAMA_API_KEY,
+                                            type="password",
+                                            scale=2,
+                                        )
+                                        studio_ollama_model = gr.Dropdown(
+                                            label="🧠 Ollama Cloud Model",
+                                            choices=VERIFIED_OLLAMA_MODELS,
+                                            value=DEFAULT_OLLAMA_MODEL,
+                                            allow_custom_value=True,
+                                            scale=2,
+                                        )
+                                    studio_run_full_btn = gr.Button(
+                                        "🚀 Run Full Automated Pipeline (All 4 Phases Non-Stop)",
+                                        variant="secondary",
+                                    )
 
-                        studio_step1_btn = gr.Button(
-                            "1️⃣ Generate Story & Extract Characters (Gemma 4: 31B)",
-                            variant="primary",
-                            size="lg",
-                        )
+                                studio_step1_btn = gr.Button(
+                                    "1️⃣ Generate Story & Extract Characters (Gemma 4: 31B)",
+                                    variant="primary",
+                                    size="lg",
+                                )
 
-                    with gr.Column(scale=1):
-                        studio_story_title_edit = gr.Textbox(
-                            label="Movie Title (Editable)",
-                            placeholder="Generated story title will appear here...",
-                        )
-                        studio_json_display = gr.JSON(label="Generated Screenplay, Cast & Scene Breakdown")
-                        studio_phase1_next_btn = gr.Button(
-                            "✅ Validate Story & Next ➔ Phase 2: Characters",
-                            variant="primary",
-                            size="lg",
-                        )
+                            with gr.Column(scale=1):
+                                studio_story_title_edit = gr.Textbox(
+                                    label="Movie Title (Editable)",
+                                    placeholder="Generated story title will appear here...",
+                                )
+                                studio_json_display = gr.JSON(label="Generated Screenplay, Cast & Scene Breakdown")
+                                studio_phase1_next_btn = gr.Button(
+                                    "✅ Validate Story & Next ➔ Phase 2: Characters",
+                                    variant="primary",
+                                    size="lg",
+                                )
 
-            # ══════════════════════════════════════════════════════════════════
-            # PHASE 2: CHARACTER STUDIO (Z-IMAGE TURBO)
-            # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2") as phase2_tab:
-                with gr.Row():
-                    studio_step2_btn = gr.Button(
-                        "🎨 Generate All Characters (9:16 Full-Body · Locked Z-Image Seed)",
-                        variant="primary",
-                        size="lg",
-                        scale=2,
-                    )
-                    studio_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary", scale=1)
-                    studio_phase2_next_btn = gr.Button(
-                        "✅ Validate Characters & Next ➔ Phase 3: Scene Images",
-                        variant="primary",
-                        scale=2,
-                    )
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        studio_char_gallery = gr.Gallery(
-                            label="👤 Generated Character Reference Sheets (9:16 Vertical Head-to-Toe · Click to inspect/redo)",
-                            columns=[2],
-                            height=460,
-                            object_fit="contain",
-                            preview=True,
-                        )
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 🛠️ Individual Character Inspector & Redo")
-                        studio_char_selector = gr.Dropdown(
-                            label="Select Character to Edit / Redo",
-                            choices=[],
-                            interactive=True,
-                        )
-                        studio_char_preview = gr.Image(
-                            label="Selected Character Portrait (9:16 Full-Body)",
-                            height=320,
-                            interactive=False,
-                        )
+                    # ══════════════════════════════════════════════════════════════════
+                    # PHASE 2: CHARACTER STUDIO (Z-IMAGE TURBO)
+                    # ══════════════════════════════════════════════════════════════════
+                    with gr.TabItem("2️⃣ Phase 2: Character Studio (Z-Image Turbo)", id="phase2") as phase2_tab:
                         with gr.Row():
-                            studio_char_name_edit = gr.Textbox(label="Character Name", scale=1)
-                            studio_char_seed_edit = gr.Number(
-                                label="Character Seed (Change to vary portrait)",
-                                value=INITIAL_STUDIO_SEEDS["z_image_seed"],
-                                precision=0,
-                                scale=1,
-                            )
-                        studio_char_face_edit = gr.Textbox(label="Face Details (eyes, expression, muzzle/features)")
-                        studio_char_hair_edit = gr.Textbox(label="Hair / Fur / Feathers Details")
-                        studio_char_cloth_edit = gr.Textbox(label="Clothing & Outfit Details")
-                        studio_char_sig_edit = gr.Textbox(label="Signature Props / Accessories")
-                        studio_char_prompt_edit = gr.Textbox(
-                            label="Z-Image Prompt Override",
-                            lines=2,
-                        )
-                        with gr.Row():
-                            studio_char_save_btn = gr.Button("💾 Save Description Changes Only", variant="secondary")
-                            studio_char_redo_btn = gr.Button(
-                                "🔄 Redo This Character Image (9:16 Z-Image Turbo)",
+                            studio_step2_btn = gr.Button(
+                                "🎨 Generate All Characters (9:16 Full-Body · Locked Z-Image Seed)",
                                 variant="primary",
-                            )
-
-            # ══════════════════════════════════════════════════════════════════
-            # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF — FIRST + LAST FRAME)
-            # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Dual-Keyframe: First + Last Frame)", id="phase3") as phase3_tab:
-                with gr.Row():
-                    studio_step3_single_btn = gr.Button(
-                        "🎯 Generate Selected Scene (Scene-by-Scene Mode)",
-                        variant="primary",
-                        size="lg",
-                        scale=2,
-                    )
-                    studio_step3_btn = gr.Button(
-                        "⚡ Generate ALL Scenes at Once (Batch Mode)",
-                        variant="secondary",
-                        size="lg",
-                        scale=2,
-                    )
-                    studio_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary", scale=1)
-                    studio_phase3_next_btn = gr.Button(
-                        "✅ Validate Scene Images & Next ➔ Phase 4: Video Clips",
-                        variant="primary",
-                        scale=2,
-                    )
-
-                with gr.Row():
-                    studio_scene_direct_end_chk = gr.Checkbox(
-                        label="🎬 Auto-Direct Last Frame with Gemma Vision (Ensures High-Delta Dynamic Pose at 5.0s)",
-                        value=True,
-                        info="Gemma 4: 31B Vision inspects the Start Frame (0.0s) and directs an explicit limb, weapon, and stance progression at 5.0s.",
-                    )
-                    studio_scene_qa_chk = gr.Checkbox(
-                        label="🔍 Auto-Verify & Self-Correct Scenes with Gemma 4: 31B Vision QA Critic (Scores 1-10, retries once if < 7)",
-                        value=False,
-                    )
-                    studio_scene_chain_chk = gr.Checkbox(
-                        label="🔗 Seamless Continuous Shot Chaining (Scene N End Frame ➔ Scene N+1 Start Frame — Zero Degradation)",
-                        value=False,
-                        info="Reuses previous scene's clean Qwen end frame as the next scene's start frame to guarantee 100% visual continuity and cut generation time.",
-                    )
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        studio_scenes_gallery = gr.Gallery(
-                            label="🖼️ Generated Scene Keyframes — First (0.0s) & Last (5.0s) Frames (Click any frame to inspect/redo)",
-                            columns=[2, 2],
-                            height=500,
-                            object_fit="contain",
-                            preview=True,
-                        )
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 🛠️ Individual Scene / Scenario Dual-Keyframe Inspector & Redo")
-                        studio_scene_selector = gr.Dropdown(
-                            label="Select Scene to Edit / Redo",
-                            choices=[],
-                            interactive=True,
-                        )
-                        with gr.Row():
-                            studio_scene_preview = gr.Image(
-                                label="🟢 First Frame (Start @ 0.0s)",
-                                height=200,
-                                interactive=False,
-                                scale=1,
-                            )
-                            studio_scene_end_preview = gr.Image(
-                                label="🏁 Last Frame (End @ 5.0s — CIE-Lab Matched)",
-                                height=200,
-                                interactive=False,
-                                scale=1,
-                            )
-                        with gr.Row():
-                            studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=2)
-                            studio_scene_seed_edit = gr.Number(
-                                label="Start Frame (0.0s) Seed",
-                                value=INITIAL_STUDIO_SEEDS["qwen_seed"],
-                                precision=0,
-                                scale=1,
-                            )
-                            studio_scene_end_seed_edit = gr.Number(
-                                label="End Frame (5.0s) Seed",
-                                value=INITIAL_STUDIO_SEEDS["qwen_seed"] + 10007,
-                                precision=0,
-                                scale=1,
-                            )
-                        with gr.Row():
-                            studio_scene_delta_badge = gr.Textbox(
-                                label="🏃 Motion Delta Metric (Start vs End)",
-                                value="Pending generation",
-                                interactive=False,
-                                scale=1,
-                            )
-                        studio_scene_scenario_edit = gr.Textbox(
-                            label="Scene Scenario / Story Beat Description",
-                            lines=2,
-                        )
-                        studio_scene_prompt_edit = gr.Textbox(
-                            label="🟢 First Frame Qwen Visual Prompt (Start Pose @ 0.0s)",
-                            lines=2,
-                        )
-                        studio_scene_end_prompt_edit = gr.Textbox(
-                            label="🏁 Last Frame Qwen Visual Prompt (End Pose @ 5.0s — Anchored on First Frame)",
-                            lines=2,
-                        )
-                        with gr.Row():
-                            studio_scene_chars_edit = gr.Textbox(
-                                label="Character IDs in Scene (comma-separated, e.g. char_1, char_2)",
+                                size="lg",
                                 scale=2,
                             )
-                            studio_scene_redo_mode = gr.Dropdown(
-                                label="Frames to Redo",
-                                choices=["both", "start", "end"],
-                                value="both",
-                                scale=1,
-                            )
-                        with gr.Row():
-                            studio_scene_save_btn = gr.Button("💾 Save Scene Description Only", variant="secondary")
-                            studio_scene_direct_end_btn = gr.Button("🎬 Direct End Frame with Gemma Vision", variant="secondary")
-                            studio_scene_qa_btn = gr.Button("🔍 Inspect Scene with Gemma Vision QA Critic", variant="secondary")
-                            studio_scene_redo_btn = gr.Button(
-                                "🎨 Generate / Redo Selected Scene Frame(s)",
+                            studio_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary", scale=1)
+                            studio_phase2_next_btn = gr.Button(
+                                "✅ Validate Characters & Next ➔ Phase 3: Scene Images",
                                 variant="primary",
-                            )
-                            studio_scene_next_btn = gr.Button(
-                                "⏭️ Next Scene ➔",
-                                variant="secondary",
+                                scale=2,
                             )
 
-            # ══════════════════════════════════════════════════════════════════
-            # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2 FLF2V)
-            # ══════════════════════════════════════════════════════════════════
-            with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2 FLF2V + 32fps RIFE)", id="phase4") as phase4_tab:
-                with gr.Row():
-                    studio_step_director_btn = gr.Button(
-                        "🎬 Step 4A: Run Dual-Frame Gemma Vision Director on All Scenes",
-                        variant="secondary",
-                        scale=1,
-                    )
-                    studio_step4_btn = gr.Button(
-                        "🎥 Step 4B: Generate All 5s Video Clips & Stitch Final Movie (Locked Wan Seed)",
-                        variant="primary",
-                        size="lg",
-                        scale=2,
-                    )
-                    studio_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary", scale=1)
-
-                with gr.Row():
-                    studio_use_last_frame_chk = gr.Checkbox(
-                        label="📌 Use First + Last Frame in Wan 2.2 (FLF2V Mode — Locks Start & End Poses)",
-                        value=True,
-                    )
-                    studio_rife_2x_chk = gr.Checkbox(
-                        label="✨ Enable 32fps RIFE 2x Smooth Motion Interpolation (16fps ➔ 32fps)",
-                        value=True,
-                    )
-                    studio_anti_noise_chk = gr.Checkbox(
-                        label="🛡️ Anti-Noise & Rotation Identity Guard (5s Noise Clamp & Turn Lock)",
-                        value=True,
-                        info="Clamps CFG <= 2.0 and sets FlowShift 4.5 on long clips to stop noise dissolution; locks facial identity during rotations.",
-                    )
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        studio_final_video = gr.Video(
-                            label="🎬 Final Stitched Movie (All Clips Combined)",
-                            autoplay=True,
-                            interactive=False,
-                            height=360,
-                        )
-                        studio_clip_preview = gr.Video(
-                            label="🎞️ Selected Individual 5-Second Scene Clip Preview",
-                            autoplay=False,
-                            interactive=False,
-                            height=260,
-                        )
-
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 🛠️ Individual 5s Video Clip Inspector & Redo")
-                        studio_clip_selector = gr.Dropdown(
-                            label="Select 5s Scene Clip to Inspect / Edit / Redo",
-                            choices=[],
-                            interactive=True,
-                        )
                         with gr.Row():
-                            studio_clip_camera_edit = gr.Textbox(
-                                label="Camera Movement",
-                                value="Slow Cinematic Push-In",
-                                scale=1,
-                            )
-                            studio_clip_seed_edit = gr.Number(
-                                label="Clip Seed (Change to vary motion trajectory)",
-                                value=INITIAL_STUDIO_SEEDS["wan_seed"],
-                                precision=0,
-                                scale=1,
-                            )
-                        studio_clip_motion_edit = gr.Textbox(
-                            label="Video Motion Description (What happens in this 5-second clip)",
-                            lines=3,
-                            placeholder="Describe the character movement, action, and expression for this 5s clip...",
-                        )
-                        studio_clip_wan_prompt_edit = gr.Textbox(
-                            label="Full Compiled Director / Wan 2.2 Prompt (Editable)",
-                            lines=4,
-                        )
-                        studio_clip_rerundir_chk = gr.Checkbox(
-                            label="🪄 Ask Gemma 4: 31B Vision Director to re-plan this clip before animating",
-                            value=False,
-                        )
+                            with gr.Column(scale=1):
+                                studio_char_gallery = gr.Gallery(
+                                    label="👤 Generated Character Reference Sheets (9:16 Vertical Head-to-Toe · Click to inspect/redo)",
+                                    columns=[2],
+                                    height=460,
+                                    object_fit="contain",
+                                    preview=True,
+                                )
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🛠️ Individual Character Inspector & Redo")
+                                studio_char_selector = gr.Dropdown(
+                                    label="Select Character to Edit / Redo",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                studio_char_preview = gr.Image(
+                                    label="Selected Character Portrait (9:16 Full-Body)",
+                                    height=320,
+                                    interactive=False,
+                                )
+                                with gr.Row():
+                                    studio_char_name_edit = gr.Textbox(label="Character Name", scale=1)
+                                    studio_char_seed_edit = gr.Number(
+                                        label="Character Seed (Change to vary portrait)",
+                                        value=INITIAL_STUDIO_SEEDS["z_image_seed"],
+                                        precision=0,
+                                        scale=1,
+                                    )
+                                studio_char_face_edit = gr.Textbox(label="Face Details (eyes, expression, muzzle/features)")
+                                studio_char_hair_edit = gr.Textbox(label="Hair / Fur / Feathers Details")
+                                studio_char_cloth_edit = gr.Textbox(label="Clothing & Outfit Details")
+                                studio_char_sig_edit = gr.Textbox(label="Signature Props / Accessories")
+                                studio_char_prompt_edit = gr.Textbox(
+                                    label="Z-Image Prompt Override",
+                                    lines=2,
+                                )
+                                with gr.Row():
+                                    studio_char_save_btn = gr.Button("💾 Save Description Changes Only", variant="secondary")
+                                    studio_char_redo_btn = gr.Button(
+                                        "🔄 Redo This Character Image (9:16 Z-Image Turbo)",
+                                        variant="primary",
+                                    )
+
+                    # ══════════════════════════════════════════════════════════════════
+                    # PHASE 3: SCENE / SCENARIO IMAGES (QWEN MULTI-REF — FIRST + LAST FRAME)
+                    # ══════════════════════════════════════════════════════════════════
+                    with gr.TabItem("3️⃣ Phase 3: Scene / Scenario Images (Qwen Dual-Keyframe: First + Last Frame)", id="phase3") as phase3_tab:
                         with gr.Row():
-                            studio_clip_director_btn = gr.Button(
-                                "🪄 Re-Direct Only This Clip (Gemma Vision)",
-                                variant="secondary",
-                            )
-                            studio_clip_redo_btn = gr.Button(
-                                "🔄 Redo This 5s Video Clip & Re-Stitch Movie",
+                            studio_step3_single_btn = gr.Button(
+                                "🎯 Generate Selected Scene (Scene-by-Scene Mode)",
                                 variant="primary",
+                                size="lg",
+                                scale=2,
+                            )
+                            studio_step3_btn = gr.Button(
+                                "⚡ Generate ALL Scenes at Once (Batch Mode)",
+                                variant="secondary",
+                                size="lg",
+                                scale=2,
+                            )
+                            studio_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary", scale=1)
+                            studio_phase3_next_btn = gr.Button(
+                                "✅ Validate Scene Images & Next ➔ Phase 4: Video Clips",
+                                variant="primary",
+                                scale=2,
                             )
 
-    # ── Tool 1: Qwen Image Edit Rapid AIO Generator / Editor (Standalone) ─────
-    with gr.Accordion("🖼️ Standalone Tool 1 — Qwen Image Edit Rapid AIO (Image Generator & Editor)", open=False, elem_classes="tool-accordion qwen-panel") as qwen_accordion:
-        gr.Markdown("### 🖼️ Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
-        gr.Markdown(
-            "Upload an **image to edit** (or leave empty for text-to-image). "
-            "Optionally add **reference images** for character / style transfer. "
-            "Outputs save automatically to `./outputs/`.",
-            elem_classes="step-hint"
-        )
+                        with gr.Row():
+                            studio_scene_direct_end_chk = gr.Checkbox(
+                                label="🎬 Auto-Direct Last Frame with Gemma Vision (Ensures High-Delta Dynamic Pose at 5.0s)",
+                                value=True,
+                                info="Gemma 4: 31B Vision inspects the Start Frame (0.0s) and directs an explicit limb, weapon, and stance progression at 5.0s.",
+                            )
+                            studio_scene_qa_chk = gr.Checkbox(
+                                label="🔍 Auto-Verify & Self-Correct Scenes with Gemma 4: 31B Vision QA Critic (Scores 1-10, retries once if < 7)",
+                                value=False,
+                            )
+                            studio_scene_chain_chk = gr.Checkbox(
+                                label="🔗 Seamless Continuous Shot Chaining (Scene N End Frame ➔ Scene N+1 Start Frame — Zero Degradation)",
+                                value=False,
+                                info="Reuses previous scene's clean Qwen end frame as the next scene's start frame to guarantee 100% visual continuity and cut generation time.",
+                            )
 
-        with gr.Row():
-            # ── Left column: inputs ───────────────────────────────────────────
-            with gr.Column(scale=1):
-                qwen_base_image = gr.Image(
-                    type="pil", label="📷 Base Image (optional — for image editing)",
-                    sources=["upload", "clipboard"], elem_id="qwen-base-image"
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                studio_scenes_gallery = gr.Gallery(
+                                    label="🖼️ Generated Scene Keyframes — First (0.0s) & Last (5.0s) Frames (Click any frame to inspect/redo)",
+                                    columns=[2, 2],
+                                    height=500,
+                                    object_fit="contain",
+                                    preview=True,
+                                )
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🛠️ Individual Scene / Scenario Dual-Keyframe Inspector & Redo")
+                                studio_scene_selector = gr.Dropdown(
+                                    label="Select Scene to Edit / Redo",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    studio_scene_preview = gr.Image(
+                                        label="🟢 First Frame (Start @ 0.0s)",
+                                        height=200,
+                                        interactive=False,
+                                        scale=1,
+                                    )
+                                    studio_scene_end_preview = gr.Image(
+                                        label="🏁 Last Frame (End @ 5.0s — CIE-Lab Matched)",
+                                        height=200,
+                                        interactive=False,
+                                        scale=1,
+                                    )
+                                with gr.Row():
+                                    studio_scene_title_edit = gr.Textbox(label="Scene Title", scale=2)
+                                    studio_scene_seed_edit = gr.Number(
+                                        label="Start Frame (0.0s) Seed",
+                                        value=INITIAL_STUDIO_SEEDS["qwen_seed"],
+                                        precision=0,
+                                        scale=1,
+                                    )
+                                    studio_scene_end_seed_edit = gr.Number(
+                                        label="End Frame (5.0s) Seed",
+                                        value=INITIAL_STUDIO_SEEDS["qwen_seed"] + 10007,
+                                        precision=0,
+                                        scale=1,
+                                    )
+                                with gr.Row():
+                                    studio_scene_delta_badge = gr.Textbox(
+                                        label="🏃 Motion Delta Metric (Start vs End)",
+                                        value="Pending generation",
+                                        interactive=False,
+                                        scale=1,
+                                    )
+                                studio_scene_scenario_edit = gr.Textbox(
+                                    label="Scene Scenario / Story Beat Description",
+                                    lines=2,
+                                )
+                                studio_scene_prompt_edit = gr.Textbox(
+                                    label="🟢 First Frame Qwen Visual Prompt (Start Pose @ 0.0s)",
+                                    lines=2,
+                                )
+                                studio_scene_end_prompt_edit = gr.Textbox(
+                                    label="🏁 Last Frame Qwen Visual Prompt (End Pose @ 5.0s — Anchored on First Frame)",
+                                    lines=2,
+                                )
+                                with gr.Row():
+                                    studio_scene_chars_edit = gr.Textbox(
+                                        label="Character IDs in Scene (comma-separated, e.g. char_1, char_2)",
+                                        scale=2,
+                                    )
+                                    studio_scene_redo_mode = gr.Dropdown(
+                                        label="Frames to Redo",
+                                        choices=["both", "start", "end"],
+                                        value="both",
+                                        scale=1,
+                                    )
+                                with gr.Row():
+                                    studio_scene_save_btn = gr.Button("💾 Save Scene Description Only", variant="secondary")
+                                    studio_scene_direct_end_btn = gr.Button("🎬 Direct End Frame with Gemma Vision", variant="secondary")
+                                    studio_scene_qa_btn = gr.Button("🔍 Inspect Scene with Gemma Vision QA Critic", variant="secondary")
+                                    studio_scene_redo_btn = gr.Button(
+                                        "🎨 Generate / Redo Selected Scene Frame(s)",
+                                        variant="primary",
+                                    )
+                                    studio_scene_next_btn = gr.Button(
+                                        "⏭️ Next Scene ➔",
+                                        variant="secondary",
+                                    )
+
+                    # ══════════════════════════════════════════════════════════════════
+                    # PHASE 4: VIDEO CLIPS & FINAL MOVIE (GEMMA DIRECTOR + WAN 2.2 FLF2V)
+                    # ══════════════════════════════════════════════════════════════════
+                    with gr.TabItem("4️⃣ Phase 4: 5s Video Clips & Final Movie (Wan 2.2 FLF2V + 32fps RIFE)", id="phase4") as phase4_tab:
+                        with gr.Row():
+                            studio_step_director_btn = gr.Button(
+                                "🎬 Step 4A: Run Dual-Frame Gemma Vision Director on All Scenes",
+                                variant="secondary",
+                                scale=1,
+                            )
+                            studio_step4_btn = gr.Button(
+                                "🎥 Step 4B: Generate All 5s Video Clips & Stitch Final Movie (Locked Wan Seed)",
+                                variant="primary",
+                                size="lg",
+                                scale=2,
+                            )
+                            studio_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary", scale=1)
+
+                        with gr.Row():
+                            studio_use_last_frame_chk = gr.Checkbox(
+                                label="📌 Use First + Last Frame in Wan 2.2 (FLF2V Mode — Locks Start & End Poses)",
+                                value=True,
+                            )
+                            studio_rife_2x_chk = gr.Checkbox(
+                                label="✨ Enable 32fps RIFE 2x Smooth Motion Interpolation (16fps ➔ 32fps)",
+                                value=True,
+                            )
+                            studio_anti_noise_chk = gr.Checkbox(
+                                label="🛡️ Anti-Noise & Rotation Identity Guard (5s Noise Clamp & Turn Lock)",
+                                value=True,
+                                info="Clamps CFG <= 2.0 and sets FlowShift 4.5 on long clips to stop noise dissolution; locks facial identity during rotations.",
+                            )
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                studio_final_video = gr.Video(
+                                    label="🎬 Final Stitched Movie (All Clips Combined)",
+                                    autoplay=True,
+                                    interactive=False,
+                                    height=360,
+                                )
+                                studio_clip_preview = gr.Video(
+                                    label="🎞️ Selected Individual 5-Second Scene Clip Preview",
+                                    autoplay=False,
+                                    interactive=False,
+                                    height=260,
+                                )
+
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🛠️ Individual 5s Video Clip Inspector & Redo")
+                                studio_clip_selector = gr.Dropdown(
+                                    label="Select 5s Scene Clip to Inspect / Edit / Redo",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    studio_clip_camera_edit = gr.Textbox(
+                                        label="Camera Movement",
+                                        value="Slow Cinematic Push-In",
+                                        scale=1,
+                                    )
+                                    studio_clip_seed_edit = gr.Number(
+                                        label="Clip Seed (Change to vary motion trajectory)",
+                                        value=INITIAL_STUDIO_SEEDS["wan_seed"],
+                                        precision=0,
+                                        scale=1,
+                                    )
+                                studio_clip_motion_edit = gr.Textbox(
+                                    label="Video Motion Description (What happens in this 5-second clip)",
+                                    lines=3,
+                                    placeholder="Describe the character movement, action, and expression for this 5s clip...",
+                                )
+                                studio_clip_wan_prompt_edit = gr.Textbox(
+                                    label="Full Compiled Director / Wan 2.2 Prompt (Editable)",
+                                    lines=4,
+                                )
+                                studio_clip_rerundir_chk = gr.Checkbox(
+                                    label="🪄 Ask Gemma 4: 31B Vision Director to re-plan this clip before animating",
+                                    value=False,
+                                )
+                                with gr.Row():
+                                    studio_clip_director_btn = gr.Button(
+                                        "🪄 Re-Direct Only This Clip (Gemma Vision)",
+                                        variant="secondary",
+                                    )
+                                    studio_clip_redo_btn = gr.Button(
+                                        "🔄 Redo This 5s Video Clip & Re-Stitch Movie",
+                                        variant="primary",
+                                    )
+
+        # ── Tool 2: Universal 2D Game Sprites Creator Studio ──────────────────
+        with gr.TabItem("🎮 2D Game Sprites Engine", id="tab_sprites") as tab_sprites:
+            with gr.Group(elem_classes="sprites-panel") as sprites_accordion:
+                gr.HTML(
+                    """
+                    <div class="pipeline-progression-rail">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="background: linear-gradient(135deg, #10b981, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 800; font-size: 1.05em;">🎮 2D SPRITE PIPELINE:</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.88em; flex-wrap: wrap;">
+                            <span style="color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.3);">1️⃣ Concept Genesis</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #06b6d4; background: rgba(6, 182, 212, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(6, 182, 212, 0.3);">2️⃣ Move Choreography</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #8b5cf6; background: rgba(139, 92, 246, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(139, 92, 246, 0.3);">3️⃣ Wan Animation</span>
+                            <span style="color: #64748b;">➔</span>
+                            <span style="color: #f59e0b; background: rgba(245, 158, 11, 0.15); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3);">4️⃣ Transparent Atlas Export</span>
+                        </div>
+                    </div>
+                    """
                 )
-                with gr.Row():
-                    qwen_ref_image_1 = gr.Image(
-                        type="pil", label="🔗 Reference 1 (optional)",
-                        sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref1-image"
-                    )
-                    qwen_ref_image_2 = gr.Image(
-                        type="pil", label="🔗 Reference 2 (optional)",
-                        sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref2-image"
-                    )
-
-                qwen_prompt = gr.Textbox(
-                    label="Prompt / Instruction",
-                    value=default_prompt_qwen,
-                    placeholder="Describe how to edit the image or what to generate...",
-                    lines=3,
-                )
-
-                qwen_negative_prompt = gr.Textbox(
-                    label="Negative Prompt",
-                    value=default_negative_prompt,
-                    placeholder="Describe what to avoid in the edited image...",
-                    lines=3,
-                )
-
-                with gr.Accordion("Advanced Settings", open=False):
-                    with gr.Row():
-                        qwen_seed = gr.Slider(
-                            minimum=-1, maximum=MAX_SEED, step=1, value=-1,
-                            label="Seed (-1 = random)"
-                        )
-                        qwen_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
-                    qwen_num_images = gr.Slider(minimum=1, maximum=6, step=1, value=1, label="Number of Images (1–6)")
-                    qwen_steps = gr.Slider(minimum=1, maximum=50, step=1, value=20, label="Inference Steps")
-                    qwen_true_cfg = gr.Slider(minimum=1.0, maximum=10.0, step=0.5, value=4.0, label="True CFG Scale")
-                    qwen_guidance = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Guidance Scale")
-                    with gr.Row():
-                        qwen_custom_width = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Width (px)")
-                        qwen_custom_height = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Height (px)")
-
-                qwen_generate_btn = gr.Button("✨ Generate with Qwen Image Edit", variant="primary")
-
-            # ── Right column: output ─────────────────────────────────────────
-            with gr.Column(scale=1):
-                qwen_output_gallery = gr.Gallery(
-                    label="🖼️ Generated / Edited Result(s)",
-                    columns=[2, 3],
-                    rows=[1, 2],
-                    height=440,
-                    object_fit="contain",
-                    preview=True,
-                    interactive=False,
-                )
-                qwen_output_seed = gr.Textbox(label="Used Seed(s)", interactive=False)
-                qwen_selected_image = gr.State(value=None)
-                
                 gr.Markdown(
-                    "💡 **Drag & Drop:** You can drag any generated image directly into any input box across all tools, "
-                    "or click an image and use the transfer buttons below:",
+                    "### 🎮 Universal 2D Game Sprites Creator · Gemma 4: 31B ➔ Z-Image Turbo ➔ Wan 2.2 ➔ Transparent Sprite Sheet",
+                    elem_classes="section-header",
+                )
+
+                sprites_state_store = gr.State({})
+
+                with gr.Group():
+                    with gr.Row():
+                        sprites_genre = gr.Dropdown(
+                            label="🕹️ Game Genre / Perspective Archetype",
+                            choices=list(GENRE_PRESETS.keys()),
+                            value="Action Runner (Pepsiman / Crash Bandicoot)",
+                            scale=2,
+                        )
+                        sprites_art_style = gr.Dropdown(
+                            label="🎨 Art Aesthetic Style",
+                            choices=[
+                                "16-bit arcade pixel art style",
+                                "Hand-drawn 2D anime cel style",
+                                "2.5D stylized rendered sprite",
+                                "Classic retro 8-bit NES style",
+                                "High-res modern vector arcade style",
+                            ],
+                            value="16-bit arcade pixel art style",
+                            scale=1,
+                        )
+                        sprites_char_seed = gr.Number(
+                            value=42, precision=0, label="🎲 Character Seed", scale=1
+                        )
+                        sprites_anim_seed = gr.Number(
+                            value=8888, precision=0, label="🎲 Animation Seed", scale=1
+                        )
+
+                    with gr.Accordion("🔑 Gemma 4: 31B Cloud API Settings", open=False):
+                        with gr.Row():
+                            sprites_ollama_key = gr.Textbox(
+                                label="Ollama API Key",
+                                value=DEFAULT_OLLAMA_API_KEY,
+                                type="password",
+                                scale=3,
+                            )
+                            sprites_ollama_model = gr.Dropdown(
+                                label="🧠 Ollama Cloud Model",
+                                choices=VERIFIED_OLLAMA_MODELS,
+                                value=DEFAULT_OLLAMA_MODEL,
+                                allow_custom_value=True,
+                                scale=2,
+                            )
+
+                sprites_status = gr.Markdown("### 🕹️ Ready. Enter a character concept below to begin Phase 1.")
+
+                with gr.Tabs() as sprites_wizard_tabs:
+                    # ─────────────────────────────────────────────────────────────
+                    # Phase 1: Character Genesis
+                    # ─────────────────────────────────────────────────────────────
+                    with gr.TabItem("1️⃣ Phase 1: Character Genesis", id="sprites_phase1"):
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                sprites_user_concept = gr.Textbox(
+                                    label="Character Concept / Details",
+                                    placeholder="e.g. Silver metallic runner with blue logo on chest, athletic build, running sneakers, energetic hero personality",
+                                    lines=3,
+                                )
+                                with gr.Row():
+                                    sprites_refine_char_btn = gr.Button("✨ Refine Character with Gemma 4: 31B", variant="secondary")
+                                    sprites_gen_char_btn = gr.Button("🎨 Generate Master 2D Sprite", variant="primary")
+
+                                with gr.Row():
+                                    sprites_char_name = gr.Textbox(label="Character Name", value="Pepsi_Hero", scale=1)
+                                    sprites_char_title = gr.Textbox(label="Title / Archetype", value="Endless Obstacle Runner", scale=1)
+                                sprites_char_appearance = gr.Textbox(label="Visual Description & Outfit", lines=2)
+                                sprites_char_gear = gr.Textbox(label="Signature Gear / Item", lines=1)
+                                sprites_char_prompt = gr.Textbox(label="Z-Image Prompt (Chroma Key Green #00FF00)", lines=2)
+
+                            with gr.Column(scale=1):
+                                sprites_char_preview = gr.Image(
+                                    label="Master 2D Sprite Preview (Isolated on Solid Chroma Green)",
+                                    height=380,
+                                    interactive=False,
+                                )
+                                sprites_phase1_next_btn = gr.Button(
+                                    "✅ Validate Character & Proceed to Move Choreography ➔",
+                                    variant="primary",
+                                    size="lg",
+                                )
+
+                    # ─────────────────────────────────────────────────────────────
+                    # Phase 2: Move Choreography & Custom Animation Creator
+                    # ─────────────────────────────────────────────────────────────
+                    with gr.TabItem("2️⃣ Phase 2: Move Choreography & Custom Creator", id="sprites_phase2"):
+                        with gr.Group(elem_classes="director-panel"):
+                            gr.Markdown(
+                                "#### 🧠 Smart AI Character & Weapon Choreographer (Gemma 4: 31B)\n"
+                                "Automatically designs moves and pre-animation instructions tailored to your character's equipped weapon, gear, and silhouette "
+                                "(e.g., sword slashes & blade guard stances for a swordsman — never mismatched boxing or arm-cannon moves).",
+                            )
+                            with gr.Row():
+                                sprites_combat_notes = gr.Textbox(
+                                    label="⚔️ Character Weapon & Combat Style Directives (Auto-Detected or Custom)",
+                                    placeholder="e.g. Wields a glowing katana sword — use two-handed sword guard, swift blade dashes, and multi-hit slash combos (no unarmed boxing)...",
+                                    scale=3,
+                                )
+                                sprites_smart_choreograph_btn = gr.Button(
+                                    "🧠 Smart Choreograph All Moves with Gemma 4: 31B",
+                                    variant="primary",
+                                    scale=1,
+                                )
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📋 Active Character Move-Set & Pre-Animation Editor")
+                                sprites_move_selector = gr.Dropdown(
+                                    label="Select Move to Inspect / Edit Pre-Animation Instructions",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    sprites_edit_move_name = gr.Textbox(
+                                        label="Move Name",
+                                        placeholder="e.g. Katana Guard Idle, 3-Hit Sword Combo...",
+                                        scale=1,
+                                    )
+                                    sprites_edit_move_type = gr.Dropdown(
+                                        label="Motion Rule",
+                                        choices=["🎯 Action (Return to Idle Stance)", "🔁 Seamless Looping Cycle"],
+                                        value="🔁 Seamless Looping Cycle",
+                                        scale=1,
+                                    )
+                                sprites_edit_move_desc = gr.Textbox(
+                                    label="Pre-Animation Choreography Instructions (How Character & Weapon Move)",
+                                    lines=2,
+                                    placeholder="Detailed limb and weapon movement instructions...",
+                                )
+                                sprites_edit_move_prompt = gr.Textbox(
+                                    label="Compiled Wan 2.2 Pre-Animation Prompt (Weapon & Pose Anchored)",
+                                    lines=3,
+                                    placeholder="Temporally-staged Wan 2.2 prompt with character, weapon, and chroma-key locks...",
+                                )
+                                with gr.Row():
+                                    sprites_rechoreograph_move_btn = gr.Button(
+                                        "✨ Re-Direct Selected Move with Gemma",
+                                        variant="secondary",
+                                    )
+                                    sprites_save_move_btn = gr.Button(
+                                        "💾 Save Move Changes",
+                                        variant="primary",
+                                    )
+                                with gr.Accordion("📚 Full Move-Set Registry (JSON)", open=False):
+                                    sprites_moves_json = gr.JSON(label="Move-Set Registry")
+
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### ➕ Add Custom Animation (Weapon & Character Aware)")
+                                sprites_custom_name = gr.Textbox(
+                                    label="Custom Animation Name",
+                                    placeholder="e.g. Crescent Blade Wave, Shield Bash, Arcane Nova, Double Backflip...",
+                                )
+                                sprites_custom_desc = gr.Textbox(
+                                    label="Movement & Behavior Description",
+                                    placeholder="Describe what the character does with their weapon/body in plain natural language...",
+                                    lines=2,
+                                )
+                                sprites_custom_type = gr.Radio(
+                                    label="Animation Motion Rule",
+                                    choices=["🎯 Action (Return to Idle Stance)", "🔁 Seamless Looping Cycle"],
+                                    value="🎯 Action (Return to Idle Stance)",
+                                )
+                                sprites_custom_refined_prompt = gr.Textbox(
+                                    label="Refined Wan Choreography Prompt",
+                                    lines=3,
+                                    placeholder="Click 'Direct & Refine with Gemma' to compile weapon-aware micro-choreography prompt...",
+                                )
+                                with gr.Row():
+                                    sprites_refine_custom_btn = gr.Button("✨ Direct & Refine with Gemma", variant="secondary")
+                                    sprites_add_custom_btn = gr.Button("➕ Add to Character's Move-Set", variant="primary")
+
+                        with gr.Row():
+                            sprites_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary")
+                            sprites_phase2_next_btn = gr.Button("✅ Proceed to Phase 3: Wan 2.2 Animation Studio ➔", variant="primary")
+
+                    # ─────────────────────────────────────────────────────────────
+                    # Phase 3: Wan 2.2 Animation Studio
+                    # ─────────────────────────────────────────────────────────────
+                    with gr.TabItem("3️⃣ Phase 3: Wan 2.2 Animation Studio", id="sprites_phase3"):
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                sprites_anim_target_move = gr.Dropdown(
+                                    label="Select Move to Animate with Wan 2.2",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    sprites_animate_single_btn = gr.Button("🎬 Animate Selected Move (Wan 2.2)", variant="primary", size="lg")
+                                sprites_anim_info = gr.Markdown("Select a move and click animate.")
+
+                            with gr.Column(scale=1):
+                                sprites_anim_video_preview = gr.Video(
+                                    label="Synthesized Move Animation Clip (Looping MP4)",
+                                    height=360,
+                                    autoplay=True,
+                                    loop=True,
+                                )
+                        with gr.Row():
+                            sprites_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary")
+                            sprites_phase3_next_btn = gr.Button("✅ Proceed to Phase 4: Sprite Cutter & Sheet Exporter ➔", variant="primary")
+
+                    # ─────────────────────────────────────────────────────────────
+                    # Phase 4: Sprite Cutter & Sheet Exporter
+                    # ─────────────────────────────────────────────────────────────
+                    with gr.TabItem("4️⃣ Phase 4: Sprite Cutter & Sheet Exporter", id="sprites_phase4"):
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                sprites_cut_target_move = gr.Dropdown(
+                                    label="Select Move Animation to Slice into Sprite Sheet",
+                                    choices=[],
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    sprites_target_fps = gr.Dropdown(
+                                        label="Target Game Frame Rate",
+                                        choices=[8, 12, 16, 24],
+                                        value=12,
+                                        scale=1,
+                                    )
+                                    sprites_chroma_tol = gr.Slider(
+                                        label="Chroma Removal Tolerance",
+                                        minimum=15.0,
+                                        maximum=70.0,
+                                        value=38.0,
+                                        step=1.0,
+                                        scale=1,
+                                    )
+                                sprites_cut_sheet_btn = gr.Button("✂️ Cut Video to Transparent Sprite Sheet & JSON", variant="primary", size="lg")
+                                with gr.Row():
+                                    sprites_download_sheet = gr.File(label="💾 Download Sprite Sheet (.png)")
+                                    sprites_download_json = gr.File(label="📄 Download Engine Manifest (.json)")
+
+                            with gr.Column(scale=1):
+                                sprites_sheet_preview = gr.Image(
+                                    label="Packed Transparent Sprite Sheet Atlas (PNG)",
+                                    height=380,
+                                )
+                                sprites_json_preview = gr.JSON(label="Generated Engine Metadata (Unity / Godot / Unreal)")
+                        with gr.Row():
+                            sprites_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary")
+
+        # ── Tool 3: Qwen Image Edit Rapid AIO Generator / Editor (Standalone) ─
+        with gr.TabItem("🖼️ Image Generator & Editor", id="tab_qwen") as tab_qwen:
+            with gr.Group(elem_classes="qwen-panel") as qwen_accordion:
+                gr.Markdown("### 🖼️ Qwen Image Edit Rapid AIO · Image Generator & Editor", elem_classes="section-header")
+                gr.Markdown(
+                    "Upload an **image to edit** (or leave empty for text-to-image). "
+                    "Optionally add **reference images** for character / style transfer. "
+                    "Outputs save automatically to `./outputs/`.",
                     elem_classes="step-hint"
                 )
-                with gr.Row():
-                    use_as_base_btn = gr.Button("⬅️ Use as Base Image", variant="primary", scale=1)
-                    use_as_ref1_btn = gr.Button("🔗 Set as Ref 1", variant="secondary", scale=1)
-                    use_as_ref2_btn = gr.Button("🔗 Set as Ref 2", variant="secondary", scale=1)
 
                 with gr.Row():
-                    use_qwen_as_video_btn = gr.Button(
-                        "🎥 Send to Wan 2.2 (First Frame)",
-                        variant="secondary",
-                        scale=1
-                    )
-                    use_qwen_as_video_last_btn = gr.Button(
-                        "📌 Send to Wan 2.2 (Last Frame)",
-                        variant="secondary",
-                        scale=1
-                    )
+                    # ── Left column: inputs ───────────────────────────────────────────
+                    with gr.Column(scale=1):
+                        qwen_base_image = gr.Image(
+                            type="pil", label="📷 Base Image (optional — for image editing)",
+                            sources=["upload", "clipboard"], elem_id="qwen-base-image"
+                        )
+                        with gr.Row():
+                            qwen_ref_image_1 = gr.Image(
+                                type="pil", label="🔗 Reference 1 (optional)",
+                                sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref1-image"
+                            )
+                            qwen_ref_image_2 = gr.Image(
+                                type="pil", label="🔗 Reference 2 (optional)",
+                                sources=["upload", "clipboard"], scale=1, elem_id="qwen-ref2-image"
+                            )
 
-    # ── Tool 2: Wan 2.2 Video Generator (Standalone) ──────────────────────────
-    with gr.Accordion("🎥 Standalone Tool 2 — Wan 2.2 · High-Motion Video Generator", open=False, elem_classes="tool-accordion wan-panel") as wan_accordion:
-        gr.Markdown("### 🎥 Wan 2.2 Video Generator", elem_classes="section-header")
-        gr.Markdown(
-            "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.\n\n"
-            "💡 **Facial Consistency & Stability Tip:** To prevent the subject's face from altering after 3–4 seconds, "
-            "keep duration within **3.0s – 5.0s**, leave Guidance Scale at **1.5 – 2.5** so the negative prompt is actively enforced, "
-            "and use the **AI Video Director** below or provide a **Last Frame** to anchor facial identity.",
-            elem_classes="step-hint"
-        )
+                        qwen_prompt = gr.Textbox(
+                            label="Prompt / Instruction",
+                            value=default_prompt_qwen,
+                            placeholder="Describe how to edit the image or what to generate...",
+                            lines=3,
+                        )
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                input_image_component = gr.Image(
-                    type="pil", label="Input Image for Video (First Frame)",
-                    sources=["upload", "clipboard"], elem_id="wan-input-image"
+                        qwen_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value=default_negative_prompt,
+                            placeholder="Describe what to avoid in the edited image...",
+                            lines=3,
+                        )
+
+                        with gr.Accordion("Advanced Settings", open=False):
+                            with gr.Row():
+                                qwen_seed = gr.Slider(
+                                    minimum=-1, maximum=MAX_SEED, step=1, value=-1,
+                                    label="Seed (-1 = random)"
+                                )
+                                qwen_randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+                            qwen_num_images = gr.Slider(minimum=1, maximum=6, step=1, value=1, label="Number of Images (1–6)")
+                            qwen_steps = gr.Slider(minimum=1, maximum=50, step=1, value=20, label="Inference Steps")
+                            qwen_true_cfg = gr.Slider(minimum=1.0, maximum=10.0, step=0.5, value=4.0, label="True CFG Scale")
+                            qwen_guidance = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Guidance Scale")
+                            with gr.Row():
+                                qwen_custom_width = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Width (px)")
+                                qwen_custom_height = gr.Slider(minimum=512, maximum=2048, step=64, value=1024, label="Height (px)")
+
+                        qwen_generate_btn = gr.Button("✨ Generate with Qwen Image Edit", variant="primary")
+
+                    # ── Right column: output ─────────────────────────────────────────
+                    with gr.Column(scale=1):
+                        qwen_output_gallery = gr.Gallery(
+                            label="🖼️ Generated / Edited Result(s)",
+                            columns=[2, 3],
+                            rows=[1, 2],
+                            height=440,
+                            object_fit="contain",
+                            preview=True,
+                            interactive=False,
+                        )
+                        qwen_output_seed = gr.Textbox(label="Used Seed(s)", interactive=False)
+                        qwen_selected_image = gr.State(value=None)
+
+                        gr.Markdown(
+                            "💡 **Drag & Drop:** You can drag any generated image directly into any input box across all tools, "
+                            "or click an image and use the transfer buttons below:",
+                            elem_classes="step-hint"
+                        )
+                        with gr.Row():
+                            use_as_base_btn = gr.Button("⬅️ Use as Base Image", variant="primary", scale=1)
+                            use_as_ref1_btn = gr.Button("🔗 Set as Ref 1", variant="secondary", scale=1)
+                            use_as_ref2_btn = gr.Button("🔗 Set as Ref 2", variant="secondary", scale=1)
+
+                        with gr.Row():
+                            use_qwen_as_video_btn = gr.Button(
+                                "🎥 Send to Wan 2.2 (First Frame)",
+                                variant="secondary",
+                                scale=1
+                            )
+                            use_qwen_as_video_last_btn = gr.Button(
+                                "📌 Send to Wan 2.2 (Last Frame)",
+                                variant="secondary",
+                                scale=1
+                            )
+
+        # ── Tool 4: Wan 2.2 Video Generator (Standalone) ──────────────────────
+        with gr.TabItem("🎥 Cinematic Video Studio", id="tab_wan") as tab_wan:
+            with gr.Group(elem_classes="wan-panel") as wan_accordion:
+                gr.Markdown("### 🎥 Wan 2.2 Video Generator", elem_classes="section-header")
+                gr.Markdown(
+                    "Upload or route an image from Tool 1 (Qwen Image Edit). Add a motion prompt and click **Generate Video**.\n\n"
+                    "💡 **Facial Consistency & Stability Tip:** To prevent the subject's face from altering after 3–4 seconds, "
+                    "keep duration within **3.0s – 5.0s**, leave Guidance Scale at **1.5 – 2.5** so the negative prompt is actively enforced, "
+                    "and use the **AI Video Director** below or provide a **Last Frame** to anchor facial identity.",
+                    elem_classes="step-hint"
                 )
 
-                # ── AI Video Director & Prompt Reasoning Assistant ──
-                with gr.Accordion("🪄 AI Video Director & Prompt Reasoning (Zero-Drift Assistant)", open=False, elem_classes="director-panel"):
-                    gr.Markdown(
-                        "**The AI Director decomposes your prompt into a structured temporal script.** "
-                        "Diffusion Transformers (DiT) lock facial identity and prevent pixel degradation when guided by invariant anchors and multi-phase timelines.",
-                        elem_classes="step-hint"
-                    )
-                    with gr.Row():
-                        director_style = gr.Dropdown(
-                            label="Direction Focus / Style",
-                            choices=[
-                                "👤 Portrait & Identity Lock (Prevents face drift & morphing)",
-                                "✨ Expressive Head Turn & Smile (Gradual head turn, locked identity)",
-                                "🎬 Cinematic Camera Orbit (Locked subject, camera trajectory)",
-                                "🌬️ Micro-Motion Natural (Subtle breathing, wind, hair sway)",
-                                "🚀 Dynamic Action & Flow (Steady kinematics, no pixel tears)"
-                            ],
-                            value="👤 Portrait & Identity Lock (Prevents face drift & morphing)",
-                            scale=2
-                        )
-                        director_camera = gr.Dropdown(
-                            label="Camera Movement",
-                            choices=[
-                                "Static Tripod Shot (Highest facial stability)",
-                                "Slow Cinematic Push-In / Dolly",
-                                "Gentle Orbital Tracking",
-                                "Smooth Horizontal Pan",
-                                "Subtle Handheld Drift"
-                            ],
-                            value="Static Tripod Shot (Highest facial stability)",
-                            scale=1
-                        )
-                    with gr.Row():
-                        director_intensity = gr.Slider(
-                            minimum=1, maximum=5, step=1, value=2,
-                            label="Motion Intensity (1=Subtle, 5=Dynamic)",
-                            scale=1
-                        )
-                        director_apply_btn = gr.Button("✨ Synthesize Temporally-Anchored Prompt", variant="primary", scale=2)
-
-                prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v, lines=3)
-                duration_seconds_input = gr.Slider(
-                    minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=DEFAULT_DURATION,
-                    label="Duration (seconds)",
-                    info="Native Wan 2.2 window: 1.0s to 5.0s (17 to 81 frames at 16fps) to prevent pixel degradation and facial drift."
-                )
-                frame_multi = gr.Dropdown(
-                    choices=[FIXED_FPS, FIXED_FPS * 2, FIXED_FPS * 4, FIXED_FPS * 8],
-                    value=FIXED_FPS,
-                    label="Video Fluidity (FPS)",
-                    info="Extra frames generated using RIFE flow estimation."
-                )
-                safe_mode_checkbox = gr.Checkbox(
-                    label="Safe Mode", value=True,
-                    info="Requests extra processing-time safety margins."
-                )
-
-                with gr.Accordion("Advanced Settings", open=False):
-                    last_image_component = gr.Image(
-                        type="pil", label="Last Frame (Optional — Anchors End Pose)",
-                        sources=["upload", "clipboard"], elem_id="wan-last-image"
-                    )
-                    negative_prompt_input = gr.Textbox(
-                        label="Negative Prompt", value=default_negative_prompt, lines=3
-                    )
-                    quality_slider = gr.Slider(minimum=1, maximum=10, step=1, value=6, label="Video Quality")
-                    seed_input = gr.Slider(label="Seed", minimum=0, maximum=MAX_SEED, step=1, value=42, interactive=True)
-                    randomize_seed_checkbox = gr.Checkbox(label="Randomize seed", value=True, interactive=True)
-                    steps_slider = gr.Slider(
-                        minimum=4, maximum=24, step=1, value=8, label="Inference Steps",
-                        info="8–10 steps locks facial identity and prevents drift on Lightning models."
-                    )
-                    guidance_scale_input = gr.Slider(
-                        minimum=1.0, maximum=7.0, step=0.25, value=2.0, label="Guidance Scale (High Noise)",
-                        info="Controls prompt adherence. Values 1.5–2.5 activate negative prompt face-preservation."
-                    )
-                    guidance_scale_2_input = gr.Slider(
-                        minimum=1.0, maximum=7.0, step=0.25, value=1.5, label="Guidance Scale 2 (Low Noise)",
-                        info="Stabilizes fine facial features and surface textures in later denoising steps."
-                    )
-                    with gr.Row():
-                        lora_repo_or_path_input = gr.Textbox(
-                            label="LoRA Model (Hugging Face ID or path)",
-                            value="",
-                            placeholder="e.g. user/wan2.2-face-consistency (optional)",
-                            scale=2
-                        )
-                        lora_scale_slider = gr.Slider(
-                            minimum=0.0, maximum=1.5, step=0.05, value=0.8,
-                            label="LoRA Scale / Weight",
-                            scale=1
-                        )
-                    deflicker_checkbox = gr.Checkbox(
-                        label="✨ Temporal Face & Texture Deflicker",
-                        value=True,
-                        info="Applies edge-preserving temporal filtering to eliminate pixel micro-jitter and lock facial features across frames before RIFE."
-                    )
-                    anti_noise_checkbox = gr.Checkbox(
-                        label="🛡️ Anti-Noise & Rotation Identity Guard (5s Stabilization)",
-                        value=True,
-                        info="Stabilizes long clips (>= 4.5s) with FlowShift 4.5 & steps >= 10, clamps CFG <= 2.0 to prevent latent blowups, and locks facial proportions during head/body turns."
-                    )
-                    scheduler_dropdown = gr.Dropdown(label="Scheduler", choices=SCHEDULERS, value="UniPCMultistep")
-                    flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
-                    play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)
-
-                generate_button = gr.Button("🎬 Generate Video (Wan 2.2)", variant="primary")
-
-            with gr.Column(scale=1):
-                video_output = gr.Video(
-                    label="Generated Video", autoplay=True,
-                    sources=["upload"], interactive=True, elem_id="generated-video"
-                )
                 with gr.Row():
-                    grab_frame_btn = gr.Button("📸 Use Current Frame as Input", variant="secondary")
-                    grab_last_frame_btn = gr.Button("📌 Use Current Frame as Last Frame", variant="secondary")
-                    timestamp_box = gr.Number(value=0, label="Timestamp", visible=False, elem_id="hidden-timestamp")
-                    timestamp_last_box = gr.Number(value=0, label="Timestamp Last", visible=False, elem_id="hidden-timestamp-last")
-                file_output = gr.File(label="Download Video")
+                    with gr.Column(scale=1):
+                        input_image_component = gr.Image(
+                            type="pil", label="Input Image for Video (First Frame)",
+                            sources=["upload", "clipboard"], elem_id="wan-input-image"
+                        )
 
-    # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
+                        # ── AI Video Director & Prompt Reasoning Assistant ──
+                        with gr.Accordion("🪄 AI Video Director & Prompt Reasoning (Zero-Drift Assistant)", open=False, elem_classes="director-panel"):
+                            gr.Markdown(
+                                "**The AI Director decomposes your prompt into a structured temporal script.** "
+                                "Diffusion Transformers (DiT) lock facial identity and prevent pixel degradation when guided by invariant anchors and multi-phase timelines.",
+                                elem_classes="step-hint"
+                            )
+                            with gr.Row():
+                                director_style = gr.Dropdown(
+                                    label="Direction Focus / Style",
+                                    choices=[
+                                        "👤 Portrait & Identity Lock (Prevents face drift & morphing)",
+                                        "✨ Expressive Head Turn & Smile (Gradual head turn, locked identity)",
+                                        "🎬 Cinematic Camera Orbit (Locked subject, camera trajectory)",
+                                        "🌬️ Micro-Motion Natural (Subtle breathing, wind, hair sway)",
+                                        "🚀 Dynamic Action & Flow (Steady kinematics, no pixel tears)"
+                                    ],
+                                    value="👤 Portrait & Identity Lock (Prevents face drift & morphing)",
+                                    scale=2
+                                )
+                                director_camera = gr.Dropdown(
+                                    label="Camera Movement",
+                                    choices=[
+                                        "Static Tripod Shot (Highest facial stability)",
+                                        "Slow Cinematic Push-In / Dolly",
+                                        "Gentle Orbital Tracking",
+                                        "Smooth Horizontal Pan",
+                                        "Subtle Handheld Drift"
+                                    ],
+                                    value="Static Tripod Shot (Highest facial stability)",
+                                    scale=1
+                                )
+                            with gr.Row():
+                                director_intensity = gr.Slider(
+                                    minimum=1, maximum=5, step=1, value=2,
+                                    label="Motion Intensity (1=Subtle, 5=Dynamic)",
+                                    scale=1
+                                )
+                                director_apply_btn = gr.Button("✨ Synthesize Temporally-Anchored Prompt", variant="primary", scale=2)
+
+                        prompt_input = gr.Textbox(label="Motion Prompt", value=default_prompt_i2v, lines=3)
+                        duration_seconds_input = gr.Slider(
+                            minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=DEFAULT_DURATION,
+                            label="Duration (seconds)",
+                            info="Native Wan 2.2 window: 1.0s to 5.0s (17 to 81 frames at 16fps) to prevent pixel degradation and facial drift."
+                        )
+                        frame_multi = gr.Dropdown(
+                            choices=[FIXED_FPS, FIXED_FPS * 2, FIXED_FPS * 4, FIXED_FPS * 8],
+                            value=FIXED_FPS,
+                            label="Video Fluidity (FPS)",
+                            info="Extra frames generated using RIFE flow estimation."
+                        )
+                        safe_mode_checkbox = gr.Checkbox(
+                            label="Safe Mode", value=True,
+                            info="Requests extra processing-time safety margins."
+                        )
+
+                        with gr.Accordion("Advanced Settings", open=False):
+                            last_image_component = gr.Image(
+                                type="pil", label="Last Frame (Optional — Anchors End Pose)",
+                                sources=["upload", "clipboard"], elem_id="wan-last-image"
+                            )
+                            negative_prompt_input = gr.Textbox(
+                                label="Negative Prompt", value=default_negative_prompt, lines=3
+                            )
+                            quality_slider = gr.Slider(minimum=1, maximum=10, step=1, value=6, label="Video Quality")
+                            seed_input = gr.Slider(label="Seed", minimum=0, maximum=MAX_SEED, step=1, value=42, interactive=True)
+                            randomize_seed_checkbox = gr.Checkbox(label="Randomize seed", value=True, interactive=True)
+                            steps_slider = gr.Slider(
+                                minimum=4, maximum=24, step=1, value=8, label="Inference Steps",
+                                info="8–10 steps locks facial identity and prevents drift on Lightning models."
+                            )
+                            guidance_scale_input = gr.Slider(
+                                minimum=1.0, maximum=7.0, step=0.25, value=2.0, label="Guidance Scale (High Noise)",
+                                info="Controls prompt adherence. Values 1.5–2.5 activate negative prompt face-preservation."
+                            )
+                            guidance_scale_2_input = gr.Slider(
+                                minimum=1.0, maximum=7.0, step=0.25, value=1.5, label="Guidance Scale 2 (Low Noise)",
+                                info="Stabilizes fine facial features and surface textures in later denoising steps."
+                            )
+                            with gr.Row():
+                                lora_repo_or_path_input = gr.Textbox(
+                                    label="LoRA Model (Hugging Face ID or path)",
+                                    value="",
+                                    placeholder="e.g. user/wan2.2-face-consistency (optional)",
+                                    scale=2
+                                )
+                                lora_scale_slider = gr.Slider(
+                                    minimum=0.0, maximum=1.5, step=0.05, value=0.8,
+                                    label="LoRA Scale / Weight",
+                                    scale=1
+                                )
+                            deflicker_checkbox = gr.Checkbox(
+                                label="✨ Temporal Face & Texture Deflicker",
+                                value=True,
+                                info="Applies edge-preserving temporal filtering to eliminate pixel micro-jitter and lock facial features across frames before RIFE."
+                            )
+                            anti_noise_checkbox = gr.Checkbox(
+                                label="🛡️ Anti-Noise & Rotation Identity Guard (5s Stabilization)",
+                                value=True,
+                                info="Stabilizes long clips (>= 4.5s) with FlowShift 4.5 & steps >= 10, clamps CFG <= 2.0 to prevent latent blowups, and locks facial proportions during head/body turns."
+                            )
+                            scheduler_dropdown = gr.Dropdown(label="Scheduler", choices=SCHEDULERS, value="UniPCMultistep")
+                            flow_shift_slider = gr.Slider(minimum=0.5, maximum=15.0, step=0.1, value=3.0, label="Flow Shift")
+                            play_result_video = gr.Checkbox(label="Display result", value=True, interactive=True)
+
+                        generate_button = gr.Button("🎬 Generate Video (Wan 2.2)", variant="primary")
+
+                    with gr.Column(scale=1):
+                        video_output = gr.Video(
+                            label="Generated Video", autoplay=True,
+                            sources=["upload"], interactive=True, elem_id="generated-video"
+                        )
+                        with gr.Row():
+                            grab_frame_btn = gr.Button("📸 Use Current Frame as Input", variant="secondary")
+                            grab_last_frame_btn = gr.Button("📌 Use Current Frame as Last Frame", variant="secondary")
+                            timestamp_box = gr.Number(value=0, label="Timestamp", visible=False, elem_id="hidden-timestamp")
+                            timestamp_last_box = gr.Number(value=0, label="Timestamp Last", visible=False, elem_id="hidden-timestamp-last")
+                        file_output = gr.File(label="Download Video")
+
+    # ── Global Navigation Toolbar Events ─────────────────────────────────────
+    nav_studio_btn.click(fn=lambda: gr.update(selected="tab_studio"), inputs=[], outputs=[main_workspace_tabs])
+    nav_sprites_btn.click(fn=lambda: gr.update(selected="tab_sprites"), inputs=[], outputs=[main_workspace_tabs])
+    nav_qwen_btn.click(fn=lambda: gr.update(selected="tab_qwen"), inputs=[], outputs=[main_workspace_tabs])
+    nav_wan_btn.click(fn=lambda: gr.update(selected="tab_wan"), inputs=[], outputs=[main_workspace_tabs])
+
     expand_all_btn.click(
-        fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True), gr.update(open=True)),
+        fn=lambda: (gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)),
         inputs=[],
         outputs=[sprites_accordion, qwen_accordion, wan_accordion, studio_accordion],
     )
 
     collapse_all_btn.click(
-        fn=lambda: (gr.update(open=False), gr.update(open=False), gr.update(open=False), gr.update(open=False)),
+        fn=lambda: (gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)),
         inputs=[],
         outputs=[sprites_accordion, qwen_accordion, wan_accordion, studio_accordion],
     )
-
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
 
     def on_qwen_gallery_select(evt: gr.SelectData, gallery):
@@ -3097,6 +3610,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             sprites_char_gear, sprites_char_prompt, sprites_char_seed,
             sprites_genre, sprites_art_style,
             sprites_ollama_key, sprites_ollama_model, sprites_state_store,
+            sprites_user_concept,
         ],
         outputs=[
             sprites_char_preview,
@@ -3109,11 +3623,86 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
-    # Move Inspector: Show details when a move is selected in Phase 2 or Phase 3
+    # Phase 2: Smart AI Character & Weapon Choreographer (Full Move-Set via Gemma)
+    sprites_smart_choreograph_btn.click(
+        fn=sprites_ui_smart_choreograph_moveset,
+        inputs=[
+            sprites_state_store, sprites_genre, sprites_combat_notes,
+            sprites_char_name, sprites_char_title, sprites_char_appearance,
+            sprites_char_gear, sprites_ollama_key, sprites_ollama_model,
+        ],
+        outputs=[
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    # Move Inspector: Populate Phase 2 Pre-Animation Editor & Phase 3 Details when a move is selected
     sprites_move_selector.change(
-        fn=sprites_ui_load_move_details,
+        fn=sprites_ui_select_move_for_edit,
         inputs=[sprites_move_selector, sprites_state_store],
-        outputs=[sprites_anim_info, sprites_anim_video_preview],
+        outputs=[
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
+            sprites_anim_info,
+            sprites_anim_video_preview,
+        ],
+    )
+
+    # Phase 2: Re-Direct Selected Move with Gemma & Save Manual Edits
+    sprites_rechoreograph_move_btn.click(
+        fn=sprites_ui_rechoreograph_selected_move,
+        inputs=[
+            sprites_move_selector,
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_genre,
+            sprites_ollama_key,
+            sprites_ollama_model,
+            sprites_state_store,
+        ],
+        outputs=[
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    sprites_save_move_btn.click(
+        fn=sprites_ui_save_selected_move,
+        inputs=[
+            sprites_move_selector,
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
+            sprites_genre,
+            sprites_state_store,
+        ],
+        outputs=[
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_status,
+            sprites_state_store,
+        ],
     )
 
     sprites_anim_target_move.change(
@@ -3178,11 +3767,29 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
-    # Tab Wizard Navigation Buttons
+    # Tab Wizard Navigation Buttons (Phase 1 -> Phase 2 validates & populates smart weapon choreography)
     sprites_phase1_next_btn.click(
-        fn=lambda: gr.update(selected="sprites_phase2"),
-        inputs=[],
-        outputs=[sprites_wizard_tabs],
+        fn=sprites_ui_validate_phase1_to_phase2,
+        inputs=[
+            sprites_state_store, sprites_genre, sprites_art_style,
+            sprites_char_name, sprites_char_title, sprites_char_appearance,
+            sprites_char_gear, sprites_char_prompt, sprites_user_concept,
+            sprites_ollama_key, sprites_ollama_model,
+        ],
+        outputs=[
+            sprites_wizard_tabs,
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_combat_notes,
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
+            sprites_status,
+            sprites_state_store,
+        ],
     )
     sprites_phase2_back_btn.click(
         fn=lambda: gr.update(selected="sprites_phase1"),

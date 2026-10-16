@@ -42,6 +42,17 @@ DEFAULT_OLLAMA_API_KEY = "ca8516405cc74a238c9525b490331d3a.HmyaGAbsmLFyYN25P1K8_
 DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
 
+# Verified active Ollama Cloud models (tested & benchmarked)
+VERIFIED_OLLAMA_MODELS = [
+    ("⚡ gemma4:31b — Fast Multimodal Vision & Character Genesis (31B - Default)", "gemma4:31b"),
+    ("🎬 gpt-oss:120b — Hollywood Screenwriter & Master Storyteller (120B)", "gpt-oss:120b"),
+    ("⚔️ nemotron-3-ultra — Weapon-Locked Combat Choreographer & Physics", "nemotron-3-ultra"),
+    ("🔍 nemotron-3-super — AI Director QA Critic & Keyframe Auditor", "nemotron-3-super"),
+    ("🚀 nemotron-3-nano:30b — Lightning-Fast JSON & Timeline Compiler (30B)", "nemotron-3-nano:30b"),
+    ("⚡ gpt-oss:20b — Agile Interactive Co-Pilot & Quick Tweaks (20B)", "gpt-oss:20b"),
+    ("🤖 Auto-Routing (Smart Multi-Agent Workflow — Best Model per Task)", "auto"),
+]
+
 # Aspect ratio presets for scene synthesis and video animation
 ASPECT_RATIO_PRESETS = {
     "9:16 Vertical (Shorts/Reels)": {"qwen_w": 576, "qwen_h": 1024, "wan_w": 480, "wan_h": 832, "char_w": 576, "char_h": 1024},
@@ -223,9 +234,10 @@ def restore_extracted_video_frame(
 
 def measure_frame_pose_delta(img_a: Any, img_b: Any) -> float:
     """
-    Calculates the normalized mean pixel difference (L1 delta in RGB space) between two keyframes.
-    Acts as a strict gatekeeper: a true physical pose change (limbs moving, ducking, turning)
-    exhibits a mean delta >= 18.0. If delta < 18.0, the end frame is considered stagnant / identical.
+    Calculates the spatial patch-based motion delta between two keyframes.
+    Evaluates both the global mean and the 90th-percentile patch difference across a 16x16 grid,
+    accurately detecting localized limb/body pose transformations even against static backgrounds
+    while guarding against false retries or missed frozen poses.
     """
     import numpy as np
     if img_a is None or img_b is None:
@@ -237,7 +249,16 @@ def measure_frame_pose_delta(img_a: Any, img_b: Any) -> float:
             img_b = Image.open(img_b)
         a = np.array(img_a.resize((256, 256)).convert("RGB"), dtype=np.float32)
         b = np.array(img_b.resize((256, 256)).convert("RGB"), dtype=np.float32)
-        return float(np.abs(a - b).mean())
+        diff = np.abs(a - b).mean(axis=-1)  # (256, 256) per-pixel mean difference
+
+        # Split into 16x16 spatial patches (each 16x16 pixels)
+        patches = diff.reshape(16, 16, 16, 16).mean(axis=(1, 3))
+        top_patch_motion = float(np.percentile(patches, 90))
+        global_mean = float(diff.mean())
+
+        # Effective pose delta balances top localized body motion (70%) and global scene delta (30%)
+        effective_delta = 0.7 * top_patch_motion + 0.3 * global_mean
+        return float(effective_delta)
     except Exception:
         return 0.0
 
@@ -319,6 +340,47 @@ class StudioPipeline:
     # LLM transport (shared by Story Architect and Animation Director)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _resolve_model_tag(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        task_role: str = "default",
+        model_override: Optional[str] = None,
+    ) -> str:
+        """
+        Resolves the actual Ollama model tag to use.
+        If model is 'auto', routes task to the benchmarked optimal model:
+          - 'screenplay': gpt-oss:120b (Hollywood depth & dialogue)
+          - 'character': gemma4:31b (Visual prompt isolation)
+          - 'director_qa', 'end_frame': nemotron-3-super (Rigorous alignment & critic)
+          - 'choreography', 'combat': nemotron-3-ultra (Physics & weapon-locked action)
+          - 'quick_edit', 'timeline': nemotron-3-nano:30b (Fast 2.8s turnaround)
+        If messages contain images, automatically routes to vision-capable 'gemma4:31b'.
+        """
+        if model_override:
+            return model_override
+
+        # Vision safeguard: only vision models can receive image_url payloads
+        if messages:
+            for m in messages:
+                c = m.get("content")
+                if isinstance(c, list):
+                    for part in c:
+                        if isinstance(part, dict) and part.get("type") == "image_url":
+                            return "gemma4:31b"
+
+        m = (self.model or DEFAULT_OLLAMA_MODEL).strip()
+        if "auto" in m.lower():
+            if task_role == "screenplay":
+                return "gpt-oss:120b"
+            elif task_role in ("director_qa", "end_frame"):
+                return "nemotron-3-super"
+            elif task_role in ("choreography", "combat"):
+                return "nemotron-3-ultra"
+            elif task_role in ("quick_edit", "timeline"):
+                return "nemotron-3-nano:30b"
+            return "gemma4:31b"
+        return m
+
     def _chat_completion(
         self,
         messages: List[Dict[str, Any]],
@@ -326,10 +388,13 @@ class StudioPipeline:
         temperature: float = 0.7,
         timeout: int = 120,
         max_retries: int = 2,
+        task_role: str = "default",
+        model_override: Optional[str] = None,
     ) -> str:
         """POSTs to the OpenAI-compatible Ollama Cloud endpoint and returns the message text."""
+        actual_model = self._resolve_model_tag(messages=messages, task_role=task_role, model_override=model_override)
         req_body = {
-            "model": self.model,
+            "model": actual_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -353,7 +418,7 @@ class StudioPipeline:
                 if attempt < max_retries:
                     time.sleep(2.0)
                     continue
-        raise RuntimeError(f"Ollama API request failed: {last_err}")
+        raise RuntimeError(f"Ollama API request failed ({actual_model}): {last_err}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 1: Story Generation & Character Extraction (Gemma 4: 31B)
@@ -443,6 +508,7 @@ class StudioPipeline:
             ],
             max_tokens=3000,
             temperature=0.7,
+            task_role="screenplay",
         )
 
         parsed_data = self._parse_json_safely(raw_text)

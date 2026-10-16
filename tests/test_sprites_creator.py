@@ -261,6 +261,133 @@ class TestSpritesUIHandlers(unittest.TestCase):
         self.assertIn("Mega Can Wave", info)
         self.assertIn("Action & Combo", info)
 
+    def test_sword_character_never_gets_boxing_moves(self):
+        """Ensure a character wielding a sword in Beat 'em Up or Platformer gets sword moves, never boxing jabs."""
+        sword_char = {
+            "name": "Kensei_Valen",
+            "title": "Crimson Ronin",
+            "appearance": "Samurai warrior in obsidian armor holding a glowing katana sword",
+            "signature_gear": "Crimson Katana Sword",
+        }
+        arch = SpritesPipeline.detect_character_combat_archetype(
+            sword_char, genre="Beat 'em Up (Streets of Rage / Final Fight)"
+        )
+        self.assertEqual(arch["archetype"], "blade")
+        self.assertIn("katana", arch["weapon_label"].lower())
+
+        moves = SpritesPipeline.get_smart_contextual_moves(
+            sword_char, genre="Beat 'em Up (Streets of Rage / Final Fight)"
+        )
+        self.assertGreaterEqual(len(moves), 5)
+        move_names_blob = " ".join(m["name"].lower() for m in moves)
+        move_descs_blob = " ".join(m["description"].lower() for m in moves)
+
+        # Must have sword/blade choreography
+        self.assertTrue("sword" in move_names_blob or "slash" in move_names_blob or "blade" in move_names_blob)
+        # Must NOT have boxing jab or arm cannon in move names or descriptions
+        self.assertNotIn("jab-cross-hook", move_names_blob)
+        self.assertNotIn("boxing", move_descs_blob)
+        self.assertNotIn("arm cannon", move_descs_blob)
+
+        # Every move must have pre-animation Wan 2.2 instructions with timeline & weapon invariants
+        for m in moves:
+            self.assertIn("[Character & Weapon Invariants]:", m["refined_prompt"])
+            self.assertIn("[Pre-Animation Timeline]:", m["refined_prompt"])
+            self.assertIn("Crimson Katana Sword", m["refined_prompt"])
+
+    @patch.object(SpritesPipeline, "_chat_completion")
+    def test_generate_smart_moveset_with_gemma(self, mock_chat):
+        mock_chat.return_value = json.dumps({
+            "combat_archetype_summary": "Master swordsman using rapid katana iaijutsu slashes",
+            "moves": [
+                {
+                    "id": "sword_idle",
+                    "name": "Katana Guard Idle",
+                    "type": "loop",
+                    "description": "[Start] Poised two-handed katana guard -> [Peak] Subtle breathing and blade glint -> [Cycle] Seamless loop.",
+                    "wan_prompt": "2D sprite of Ronin in katana guard idle on chroma key green #00FF00",
+                },
+                {
+                    "id": "sword_sprint",
+                    "name": "Blade-Low Dash",
+                    "type": "loop",
+                    "description": "[Start] Low forward sprint with katana held at hip -> [Peak] Full stride extension -> [Cycle] Seamless loop.",
+                    "wan_prompt": "2D sprite of Ronin sprinting with katana on chroma key green #00FF00",
+                },
+                {
+                    "id": "iaijutsu_slash",
+                    "name": "Iaijutsu Cross Slash",
+                    "type": "action",
+                    "description": "[Anticipation] Crouch hand on hilt -> [Strike] Lightning cross slash -> [Recovery] Sheathe and return to exact Frame 1 guard.",
+                    "wan_prompt": "2D sprite of Ronin executing Iaijutsu Cross Slash returning to idle on chroma key green #00FF00",
+                },
+            ],
+        })
+        pipeline = SpritesPipeline(api_key="test_key")
+        sword_char = {
+            "name": "Ronin",
+            "appearance": "Samurai with katana sword",
+            "signature_gear": "Katana Sword",
+        }
+        moves = pipeline.generate_smart_moveset_with_gemma(
+            character_data=sword_char,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            combat_notes="Fast iaijutsu sword slashes",
+            use_llm=True,
+        )
+        self.assertGreaterEqual(len(moves), 3)
+        self.assertEqual(moves[0]["name"], "Katana Guard Idle")
+        self.assertEqual(moves[0]["type"], "loop")
+        self.assertEqual(moves[2]["name"], "Iaijutsu Cross Slash")
+        self.assertEqual(moves[2]["type"], "action")
+        self.assertIn("Iaijutsu Cross Slash", moves[2]["refined_prompt"])
+
+    def test_phase2_smart_choreograph_and_move_editor_handlers(self):
+        state = {
+            "character": {
+                "name": "Arthur",
+                "title": "Paladin",
+                "appearance": "Knight in silver plate armor",
+                "signature_gear": "Excalibur Broadsword & Kite Shield",
+                "genre": "Beat 'em Up (Streets of Rage / Final Fight)",
+            }
+        }
+        # 1. Trigger Smart Choreograph Move-Set
+        (
+            sel1, sel2, sel3, moves,
+            edit_name, edit_type, edit_desc, edit_prompt,
+            status, state
+        ) = app.sprites_ui_smart_choreograph_moveset(
+            char_state=state,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            combat_notes="Heavy broadsword slashes and shield bash",
+            name="Arthur",
+            title="Paladin",
+            appearance="Knight in silver plate armor",
+            gear="Excalibur Broadsword & Kite Shield",
+            api_key=None,
+            model=None,
+        )
+        self.assertGreaterEqual(len(moves), 5)
+        self.assertIn("Sword", edit_name)
+        self.assertIn("Excalibur Broadsword", edit_prompt)
+        self.assertIn("Smart Choreography Complete", status)
+
+        # 2. Save manual edits to a move's pre-animation instructions
+        target_label = f"{moves[1]['name']} ({moves[1]['type'].upper()})"
+        s1, s2, s3, updated_moves, save_status, state = app.sprites_ui_save_selected_move(
+            choice_label=target_label,
+            edit_name="Excalibur Sky Cleave",
+            edit_type="🎯 Action (Return to Idle Stance)",
+            edit_desc="[Anticipation] Raise broadsword overhead -> [Apex] Cleave downward with golden arc -> [Recovery] Return to Frame 1 sword guard.",
+            edit_prompt="",
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            char_state=state,
+        )
+        self.assertEqual(updated_moves[1]["name"], "Excalibur Sky Cleave")
+        self.assertIn("[Pre-Animation Timeline]:", updated_moves[1]["refined_prompt"])
+        self.assertIn("Saved Pre-Animation Instructions", save_status)
+
 
 if __name__ == "__main__":
     unittest.main()

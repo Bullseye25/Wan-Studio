@@ -174,10 +174,8 @@ class QwenImageEditModel:
         if pipe is None:
             raise RuntimeError("Could not load any Qwen Image Edit pipeline model.")
 
-        self.pipe = pipe
-        self.pipe.enable_model_cpu_offload()
-
-        print("[QwenImageEditModel] Pipeline loaded successfully with CPU offloading.")
+        self.pipe = pipe.to("cuda")
+        print("[QwenImageEditModel] Pipeline loaded successfully in GPU VRAM (48GB L40S native execution).")
 
     @modal.method()
     def generate(
