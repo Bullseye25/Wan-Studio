@@ -392,8 +392,8 @@ class SpritesPipeline:
             "1. Readability: High-contrast color blocking, exaggerated iconic silhouette recognizable at low resolutions.\n"
             "2. Weapon & Gear Clarity: Explicitly identify the character's held weapon, tool, or signature gear (e.g., katana sword, broadsword, arcane staff, bow, twin daggers, plasma blaster, shield, or bare martial-arts gauntlets) and ensure it is clearly held in a natural combat-ready idle posture.\n"
             "3. Orientation: Full body head-to-toe vertical 9:16 overview, strictly standing on a neutral ground plane.\n"
-            "4. Background: The character MUST be placed on a flat, solid, uniform bright lime green chroma key background (#00FF00) "
-            "with zero ground shadows, zero gradient, and zero scenery, ensuring flawless alpha cutout.\n\n"
+            "4. Background: The character MUST be placed on a pure flat, solid, uniform white studio background (#FFFFFF) "
+            "with high-key studio lighting, zero ground shadows, zero gradient, and zero scenery, ensuring flawless alpha cutout and VFX preservation.\n\n"
             "Respond ONLY with valid JSON following this exact schema:\n"
             "{\n"
             '  "name": "Character Name",\n'
@@ -404,7 +404,7 @@ class SpritesPipeline:
             '  "signature_gear": "Exact weapon, blade, staff, bow, blaster, prop, or equipment held by the character",\n'
             '  "combat_style": "Brief description of how this character moves and fights using their signature_gear",\n'
             '  "palette": ["Color 1", "Color 2", "Color 3"],\n'
-            '  "z_image_prompt": "Complete prompt for Z-Image Turbo specifying isolated 2D game sprite, 9:16 vertical full-body portrait, standing head-to-toe holding their signature weapon/gear in ready idle stance, complete outfit and footwear visible, front/side game view, on flat solid bright lime green chroma key studio background #00FF00, no floor shadows, clean crisp outline"\n'
+            '  "z_image_prompt": "Complete prompt for Z-Image Turbo specifying isolated 2D game sprite, 9:16 vertical full-body portrait, standing head-to-toe holding their signature weapon/gear in ready idle stance, complete outfit and footwear visible, front/side game view, on pure flat solid white studio background #FFFFFF, high-key studio lighting, no floor shadows, clean crisp outline"\n'
             "}"
         )
 
@@ -443,7 +443,7 @@ class SpritesPipeline:
                     f"2D game sprite character sheet of {user_input}, holding {detected_gear} in ready stance, "
                     f"9:16 vertical full-body portrait, standing head-to-toe, "
                     f"complete outfit and footwear visible, front-side game view, {art_style}, "
-                    f"on flat solid bright lime green chroma key studio background #00FF00, no floor shadows, clean crisp outline"
+                    f"on pure flat solid white studio background #FFFFFF, high-key studio lighting, no floor shadows, clean crisp outline"
                 ),
             }
 
@@ -459,8 +459,8 @@ class SpritesPipeline:
         Synthesizes the master reference sprite image using Z-Image Turbo on Modal.
         """
         prompt = character_data.get("z_image_prompt") or f"2D game character sheet of {character_data.get('name', 'Hero')}"
-        if "#00FF00" not in prompt and "green" not in prompt.lower():
-            prompt += ", on flat solid bright lime green chroma key background #00FF00, no shadows, clean outline"
+        if "#FFFFFF" not in prompt and "white" not in prompt.lower():
+            prompt += ", on pure flat solid white studio background #FFFFFF, high-key studio lighting, no shadows, clean outline"
 
         save_folder = output_dir or str(self.char_dir)
         name_clean = "".join(c for c in character_data.get("name", "hero") if c.isalnum() or c in "_-")
@@ -723,8 +723,8 @@ class SpritesPipeline:
                 f"Phase 3 (3.6s-5.0s): follows through and cleanly recovers back into the exact starting {idle_posture} by t=5.0s."
             )
         camera_clause = (
-            f"[Camera & Chroma Key]: {genre_info['camera']}, {genre_info['perspective']}, "
-            "isolated on flat solid bright lime green chroma key background #00FF00, zero floor shadows, crisp 2D sprite outline."
+            f"[Camera & Studio Background]: {genre_info['camera']}, {genre_info['perspective']}, "
+            "on pure flat seamless solid white studio background #FFFFFF, high-key studio lighting, zero floor shadows, crisp 2D sprite outline."
         )
         return f"{invariant_clause} {timeline_clause} {camera_clause}"
 
@@ -946,7 +946,7 @@ class SpritesPipeline:
             "3. MOTION LAWS:\n"
             "   - For 'loop' moves: Seamless cycle where t=5.0s matches t=0.0s.\n"
             f"   - For 'action' moves: Starts in the character's idle stance ({arch_info['idle_posture']}), executes the move with '{gear}', and cleanly recovers back to the exact idle stance by t=5.0s.\n"
-            "   - Fixed static camera, zero camera pan/zoom, solid bright lime green chroma key background (#00FF00).\n\n"
+            "   - Fixed static camera, zero camera pan/zoom, pure flat solid white studio background (#FFFFFF), high-key studio lighting, no shadows.\n\n"
             "Respond ONLY with a valid JSON object following this exact schema:\n"
             "{\n"
             '  "combat_summary": "1-sentence summary of the character\'s tailored animation style",\n'
@@ -955,7 +955,7 @@ class SpritesPipeline:
             '      "name": "Move Name (e.g. Katana Guard Idle, 3-Hit Blade Combo)",\n'
             '      "type": "loop or action",\n'
             '      "description": "Clear pre-animation choreography instructions describing how the character and their weapon move",\n'
-            '      "wan_prompt": "Complete temporally-staged Wan 2.2 prompt on flat solid bright lime green background #00FF00"\n'
+            '      "wan_prompt": "Complete temporally-staged Wan 2.2 prompt on pure flat solid white studio background #FFFFFF"\n'
             "    }\n"
             "  ]\n"
             "}"
@@ -988,7 +988,7 @@ class SpritesPipeline:
                 m_type = "loop" if str(item.get("type", "")).lower() == "loop" else "action"
                 m_desc = str(item.get("description") or item.get("action_summary") or m_name).strip()
                 m_prompt = str(item.get("wan_prompt") or item.get("refined_prompt") or "").strip()
-                if not m_prompt or "#00ff00" not in m_prompt.lower():
+                if not m_prompt or ("#ffffff" not in m_prompt.lower() and "white" not in m_prompt.lower()):
                     m_prompt = self.build_pre_animation_wan_prompt(
                         character_data=character_data,
                         genre=genre,
@@ -1048,7 +1048,7 @@ class SpritesPipeline:
             "ANIMATION LAWS:\n"
             f"1. WEAPON & CHARACTER CONSISTENCY: {arch_info['forbidden_actions']} Ensure {char_name} properly holds/uses {weapon_label}.\n"
             f"2. Camera: {genre_info['camera']}. The camera must NEVER pan, tilt, shake, or zoom.\n"
-            "3. Background: Must remain fixed solid flat bright lime green chroma key background #00FF00.\n"
+            "3. Background: Must remain fixed pure solid flat white studio background #FFFFFF, high-key studio lighting, zero shadows.\n"
             + (
                 f"4. LOOPING RULE: This animation is an endless loop. The character's motion and {weapon_label} position at t=5.0s must seamlessly match their starting pose at t=0.0s."
                 if is_loop
@@ -1058,7 +1058,7 @@ class SpritesPipeline:
             "{\n"
             '  "action_summary": "One sentence summary of the movement incorporating the character\'s weapon/gear",\n'
             '  "choreography_prompt": "Micro-level limb, body, and weapon action breakdown: start posture, acceleration, peak action, recovery",\n'
-            '  "wan_prompt": "Complete prompt for Wan 2.2 specifying 2D sprite animation, weapon consistency, fixed static camera, zero camera movement, on flat solid lime green background #00FF00",\n'
+            '  "wan_prompt": "Complete prompt for Wan 2.2 specifying 2D sprite animation, weapon consistency, fixed static camera, zero camera movement, on pure flat solid white studio background #FFFFFF",\n'
             '  "motion_intensity": 3\n'
             "}"
         )
@@ -1148,7 +1148,7 @@ class SpritesPipeline:
         full_wan_prompt = (
             f"2D game sprite animation of {char_name} executing {anim_name}: {refined_wan}. "
             f"{loop_clause}. Fixed tripod shot, static arcade 2D camera plane, zero camera pan, zero zoom, "
-            f"on flat solid bright lime green chroma key background #00FF00, no floor shadows, clean outline"
+            f"on pure flat solid seamless white studio background #FFFFFF, high-key studio lighting, no floor shadows, clean outline"
         )
 
         if progress_cb:
@@ -1179,7 +1179,8 @@ class SpritesPipeline:
             steps=8,
             negative_prompt=(
                 "camera motion, camera pan, camera tilt, zoom, dynamic background, complex background, "
-                "scenery, floor shadows, ground clutter, perspective shift, rotation, 3d camera orbit"
+                "scenery, floor shadows, ground clutter, perspective shift, rotation, 3d camera orbit, "
+                "dark background, colored background, green screen, chroma green"
             ),
             num_frames=81,  # 81 frames @ 16 fps ≈ 5.06s
             guidance_scale=2.0,
@@ -1214,6 +1215,7 @@ class SpritesPipeline:
         move_data: Dict[str, Any],
         target_fps: int = 12,
         chroma_tolerance: float = 38.0,
+        bg_color: Optional[Tuple[int, int, int]] = (255, 255, 255),
         output_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -1236,6 +1238,7 @@ class SpritesPipeline:
             genre=genre,
             target_fps=target_fps,
             is_loop=is_loop,
+            bg_color=bg_color,
             tolerance=chroma_tolerance,
             output_dir=save_dir,
         )

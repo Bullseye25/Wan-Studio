@@ -20,32 +20,48 @@ from PIL import Image, ImageFilter
 
 def auto_detect_background_color(img_np: np.ndarray) -> np.ndarray:
     """
-    Samples the 4 corners of an image (RGB) to determine the dominant background color.
+    Samples the outer borders and corners of an image (RGB) to determine the dominant background color.
+    Detects pure white studio backgrounds (#FFFFFF) and green chroma key (#00FF00).
     """
     h, w = img_np.shape[:2]
-    corner_size = max(2, min(10, min(h, w) // 10))
+    corner_size = max(2, min(12, min(h, w) // 10))
     corners = [
         img_np[0:corner_size, 0:corner_size],                    # Top-Left
         img_np[0:corner_size, w - corner_size : w],              # Top-Right
         img_np[h - corner_size : h, 0:corner_size],              # Bottom-Left
         img_np[h - corner_size : h, w - corner_size : w],        # Bottom-Right
+        img_np[0:2, :],                                          # Top Border strip
+        img_np[h - 2 : h, :],                                    # Bottom Border strip
+        img_np[:, 0:2],                                          # Left Border strip
+        img_np[:, w - 2 : w],                                    # Right Border strip
     ]
-    corner_pixels = np.concatenate([c.reshape(-1, 3) for c in corners], axis=0)
-    # Median is robust against rogue corner noise
-    bg_median = np.median(corner_pixels, axis=0).astype(np.uint8)
+    border_pixels = np.concatenate([c.reshape(-1, 3) for c in corners], axis=0)
+    bg_median = np.median(border_pixels, axis=0).astype(np.uint8)
+
+    # If samples are high-luminance white/near-white (RGB >= 230), snap to pure white #FFFFFF
+    if np.mean(bg_median) >= 230 or np.all(bg_median >= 220):
+        return np.array([255, 255, 255], dtype=np.uint8)
+
+    # If samples are dominant green chroma
+    if bg_median[1] > 175 and bg_median[0] < 120 and bg_median[2] < 120:
+        return np.array([0, 255, 0], dtype=np.uint8)
+
     return bg_median
 
 
 def remove_background_alpha(
     image: Union[Image.Image, np.ndarray],
-    bg_color: Optional[Tuple[int, int, int]] = None,
+    bg_color: Optional[Tuple[int, int, int]] = (255, 255, 255),
     tolerance: float = 38.0,
-    feather_radius: int = 2,
+    feather_radius: int = 1,
     spill_suppression: bool = True,
+    defringe: bool = True,
+    preserve_vfx: bool = True,
 ) -> Image.Image:
     """
-    Removes the solid or chroma background from an image, producing an RGBA image with smooth alpha.
-    Uses HSV & RGB Euclidean color distance with morphological closing and Gaussian edge feathering.
+    Removes the solid white studio or chroma key background from an image, producing an RGBA
+    image with smooth alpha, full VFX preservation (slashes, magic glow, particle trails, sparks),
+    border flood-fill protection for white character clothing/eyes, and anti-halo defringing.
     """
     if isinstance(image, Image.Image):
         img_pil = image.convert("RGB")
@@ -66,64 +82,153 @@ def remove_background_alpha(
     else:
         target_bg = np.array(bg_color[:3], dtype=np.float32)
 
-    # Compute Euclidean distance in RGB color space
-    diff_rgb = np.linalg.norm(img_np.astype(np.float32) - target_bg, axis=2)
+    is_white_bg = bool(np.mean(target_bg) >= 220 or np.all(target_bg >= 210))
 
-    # Also compute distance in HSV space to handle lighting gradients on green screen
-    img_hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV).astype(np.float32)
-    target_bg_u8 = np.clip(target_bg, 0, 255).astype(np.uint8).reshape(1, 1, 3)
-    target_hsv = cv2.cvtColor(target_bg_u8, cv2.COLOR_RGB2HSV)[0, 0].astype(np.float32)
+    if is_white_bg:
+        # ─────────────────────────────────────────────────────────────────────
+        # High-Fidelity White Studio Background Matting with VFX Preservation
+        # ─────────────────────────────────────────────────────────────────────
+        # Compute departure from pure white:
+        diff_rgb = np.linalg.norm(target_bg - img_np.astype(np.float32), axis=2)
+        min_channel = np.min(img_np, axis=2).astype(np.float32)
+        whiteness_delta = 255.0 - min_channel  # 0 for pure white, 255 for black or pure primary
 
-    # Hue difference on 0..180 circle
-    hue_diff = np.abs(img_hsv[:, :, 0] - target_hsv[0])
-    hue_diff = np.minimum(hue_diff, 180.0 - hue_diff)
-    sat_diff = np.abs(img_hsv[:, :, 1] - target_hsv[1])
+        # Combined metric capturing both dark character shapes and vibrant pure-color VFX
+        departure = np.maximum(diff_rgb * (255.0 / 441.67), whiteness_delta)
 
-    # If background is high saturation (e.g. green screen chroma), weight hue heavily
-    is_chroma = target_hsv[1] > 60.0
-    if is_chroma:
-        match_mask = (hue_diff < 18.0) & (diff_rgb < (tolerance * 2.2))
+        # Thresholds:
+        # - bg_tol: flat white studio background threshold
+        # - solid_tol: threshold above which pixel is 100% opaque
+        bg_tol = max(8.0, tolerance * 0.45)
+        solid_tol = max(tolerance * 4.0, 180.0)
+
+        # 1. Identify pure background candidates
+        cand_bg = (departure <= bg_tol).astype(np.uint8)
+
+        # 2. Flood fill from ALL 4 borders to find true exterior background
+        flood_map = cand_bg.copy()
+        mask_for_flood = np.zeros((h + 2, w + 2), np.uint8)
+
+        for x in range(w):
+            if flood_map[0, x] == 1:
+                cv2.floodFill(flood_map, mask_for_flood, (x, 0), 2)
+            if flood_map[h - 1, x] == 1:
+                cv2.floodFill(flood_map, mask_for_flood, (x, h - 1), 2)
+        for y in range(h):
+            if flood_map[y, 0] == 1:
+                cv2.floodFill(flood_map, mask_for_flood, (0, y), 2)
+            if flood_map[y, w - 1] == 1:
+                cv2.floodFill(flood_map, mask_for_flood, (w - 1, y), 2)
+
+        is_ext_bg = (flood_map == 2)
+
+        # 3. Calculate Alpha:
+        # - Exterior background reached from border -> 0.0 alpha
+        # - Interior white features (cand_bg is True but NOT reached by border flood fill) -> 255.0 (protected!)
+        # - Foreground / VFX (cand_bg is False):
+        final_alpha = np.full((h, w), 255.0, dtype=np.float32)
+        final_alpha[is_ext_bg] = 0.0
+
+        # Non-background pixels (cand_bg == 0)
+        fg_mask = (cand_bg == 0)
+        if preserve_vfx:
+            # Semi-transparent VFX and soft anti-aliased edges
+            soft_mask = fg_mask & (departure < solid_tol)
+            proportional_alpha = (departure - bg_tol) / max(1.0, (solid_tol - bg_tol))
+            final_alpha[soft_mask] = np.clip(proportional_alpha[soft_mask], 0.0, 1.0) * 255.0
+            # Solid core
+            solid_mask = fg_mask & (departure >= solid_tol)
+            final_alpha[solid_mask] = 255.0
+        else:
+            final_alpha[fg_mask] = 255.0
+
+        # Edge feathering if requested
+        if feather_radius > 0:
+            ksize = feather_radius * 2 + 1
+            final_alpha = cv2.GaussianBlur(final_alpha, (ksize, ksize), 0)
+
+        out_rgb = img_np.copy().astype(np.float32)
+
+        # White defringing (anti-halo / un-premultiply against pure white)
+        # Prevents milky/white halos around character silhouettes and glowing energy effects
+        if defringe:
+            alpha_norm = np.clip(final_alpha / 255.0, 0.0, 1.0)
+            edge_or_vfx = (alpha_norm > 0.01) & (alpha_norm < 0.99)
+
+            # Un-premultiply: C_fg = (C_obs - (1 - a) * C_bg) / a
+            a_denom = np.maximum(alpha_norm, 0.12)
+            for c in range(3):
+                bg_val = target_bg[c]
+                unpremul = (out_rgb[:, :, c] - (1.0 - alpha_norm) * bg_val) / a_denom
+                out_rgb[:, :, c] = np.where(
+                    edge_or_vfx,
+                    np.clip(unpremul, 0.0, 255.0),
+                    out_rgb[:, :, c]
+                )
+
+        final_rgb_u8 = np.clip(out_rgb, 0, 255).astype(np.uint8)
+        final_alpha_u8 = np.clip(final_alpha, 0, 255).astype(np.uint8)
+        rgba = np.dstack([final_rgb_u8, final_alpha_u8])
+        return Image.fromarray(rgba, mode="RGBA")
+
     else:
-        match_mask = diff_rgb < tolerance
+        # ─────────────────────────────────────────────────────────────────────
+        # Universal Chroma Key (Green Screen / Arbitrary Color) Matting
+        # ─────────────────────────────────────────────────────────────────────
+        # Compute Euclidean distance in RGB color space
+        diff_rgb = np.linalg.norm(img_np.astype(np.float32) - target_bg, axis=2)
 
-    # Convert to alpha mask (0 = background transparent, 255 = foreground opaque)
-    alpha = np.where(match_mask, 0, 255).astype(np.uint8)
+        # Also compute distance in HSV space to handle lighting gradients on green screen
+        img_hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV).astype(np.float32)
+        target_bg_u8 = np.clip(target_bg, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+        target_hsv = cv2.cvtColor(target_bg_u8, cv2.COLOR_RGB2HSV)[0, 0].astype(np.float32)
 
-    # Morphological clean-up: remove specks inside character, smooth outlines
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, kernel, iterations=1)
+        hue_diff = np.abs(img_hsv[:, :, 0] - target_hsv[0])
+        hue_diff = np.minimum(hue_diff, 180.0 - hue_diff)
 
-    # Floodfill from edges to prevent hollowing out inside of character with similar color
-    mask_for_flood = np.zeros((h + 2, w + 2), np.uint8)
-    bg_clean = np.zeros((h, w), np.uint8)
-    # Seed floodfill at all 4 corners
-    corners = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
-    flood_img = (~alpha).copy()
-    for cx, cy in corners:
-        if flood_img[cy, cx] > 0:
-            cv2.floodFill(flood_img, mask_for_flood, (cx, cy), 128)
-    # Only pixels connected to the outer corners are true background
-    final_alpha = np.where(flood_img == 128, 0, 255).astype(np.uint8)
+        is_chroma = bool(target_hsv[1] > 60.0)
+        if is_chroma:
+            match_mask = (hue_diff < 18.0) & (diff_rgb < (tolerance * 2.2))
+        else:
+            match_mask = diff_rgb < tolerance
 
-    # Smooth the alpha boundary
-    if feather_radius > 0:
-        ksize = feather_radius * 2 + 1
-        final_alpha = cv2.GaussianBlur(final_alpha, (ksize, ksize), 0)
+        alpha = np.where(match_mask, 0, 255).astype(np.uint8)
 
-    # Spill suppression: reduce greenish/background color cast on character edge fringes
-    out_rgb = img_np.copy()
-    if spill_suppression and is_chroma and target_hsv[0] > 35 and target_hsv[0] < 85:
-        # Green spill suppression
-        edge_zone = (final_alpha > 0) & (final_alpha < 240)
-        r = out_rgb[:, :, 0].astype(np.float32)
-        g = out_rgb[:, :, 1].astype(np.float32)
-        b = out_rgb[:, :, 2].astype(np.float32)
-        avg_rb = (r + b) / 2.0
-        g_spill = np.maximum(0.0, g - avg_rb)
-        out_rgb[:, :, 1] = np.where(edge_zone, np.clip(g - g_spill * 0.7, 0, 255), g).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    rgba = np.dstack([out_rgb, final_alpha])
-    return Image.fromarray(rgba, mode="RGBA")
+        # Flood fill from ALL border edges to protect interior green elements
+        mask_for_flood = np.zeros((h + 2, w + 2), np.uint8)
+        flood_img = (~alpha).copy()
+        for x in range(w):
+            if flood_img[0, x] > 0:
+                cv2.floodFill(flood_img, mask_for_flood, (x, 0), 128)
+            if flood_img[h - 1, x] > 0:
+                cv2.floodFill(flood_img, mask_for_flood, (x, h - 1), 128)
+        for y in range(h):
+            if flood_img[y, 0] > 0:
+                cv2.floodFill(flood_img, mask_for_flood, (0, y), 128)
+            if flood_img[y, w - 1] > 0:
+                cv2.floodFill(flood_img, mask_for_flood, (w - 1, y), 128)
+
+        final_alpha = np.where(flood_img == 128, 0, 255).astype(np.uint8)
+
+        if feather_radius > 0:
+            ksize = feather_radius * 2 + 1
+            final_alpha = cv2.GaussianBlur(final_alpha, (ksize, ksize), 0)
+
+        out_rgb = img_np.copy()
+        if spill_suppression and is_chroma and target_hsv[0] > 35 and target_hsv[0] < 85:
+            edge_zone = (final_alpha > 0) & (final_alpha < 240)
+            r = out_rgb[:, :, 0].astype(np.float32)
+            g = out_rgb[:, :, 1].astype(np.float32)
+            b = out_rgb[:, :, 2].astype(np.float32)
+            avg_rb = (r + b) / 2.0
+            g_spill = np.maximum(0.0, g - avg_rb)
+            out_rgb[:, :, 1] = np.where(edge_zone, np.clip(g - g_spill * 0.7, 0, 255), g).astype(np.uint8)
+
+        rgba = np.dstack([out_rgb, final_alpha])
+        return Image.fromarray(rgba, mode="RGBA")
 
 
 def extract_video_frames(video_path: str, target_fps: int = 12) -> List[Image.Image]:
@@ -336,7 +441,7 @@ def process_video_to_sprite_sheet(
     genre: str = "Action Platformer",
     target_fps: int = 12,
     is_loop: bool = True,
-    bg_color: Optional[Tuple[int, int, int]] = None,
+    bg_color: Optional[Tuple[int, int, int]] = (255, 255, 255),
     tolerance: float = 38.0,
     output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:

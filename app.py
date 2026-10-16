@@ -2064,7 +2064,7 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
         return None, gr.update(), err_msg, err_msg, char_state
 
 
-def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state):
+def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state, bg_color_choice=None):
     char_state = char_state or {}
     character_data = char_state.get("character", {})
     moves = character_data.get("moves", [])
@@ -2082,6 +2082,16 @@ def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state
     if not video_path or not os.path.exists(video_path):
         return None, {}, None, None, f"### ⚠️ Please animate `{target_move['name']}` in Phase 3 first.", char_state
 
+    # Resolve background color
+    bg_choice_str = str(bg_color_choice or "").lower()
+    if "green" in bg_choice_str or "#00ff00" in bg_choice_str:
+        bg_color = (0, 255, 0)
+    elif "auto" in bg_choice_str:
+        bg_color = None
+    else:
+        # Default is pure white studio background #FFFFFF (protects interior white & preserves VFX)
+        bg_color = (255, 255, 255)
+
     pipeline = SpritesPipeline()
     try:
         res = pipeline.cut_and_export_sprite_sheet(
@@ -2089,13 +2099,16 @@ def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state
             move_data=target_move,
             target_fps=int(target_fps),
             chroma_tolerance=float(chroma_tol),
+            bg_color=bg_color,
         )
         moves[idx] = target_move
         character_data["moves"] = moves
         char_state["character"] = character_data
 
+        bg_mode_text = "Pure White Studio (#FFFFFF)" if bg_color == (255, 255, 255) else ("Chroma Green (#00FF00)" if bg_color == (0, 255, 0) else "Auto-Detected")
         status = (
             f"### ✂️ Sprite Sheet Packed: `{target_move['name']}` ({res['frame_count']} frames @ {target_fps} FPS)\n"
+            f"- **Background Matting:** `{bg_mode_text}` (VFX & soft transparency preserved)\n"
             f"- **PNG Atlas:** `{pathlib.Path(res['sheet_path']).name}`\n"
             f"- **Engine Manifest:** `{pathlib.Path(res['json_path']).name}`"
         )
@@ -2650,11 +2663,11 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     sprites_char_title = gr.Textbox(label="Title / Archetype", value="Endless Obstacle Runner", scale=1)
                                 sprites_char_appearance = gr.Textbox(label="Visual Description & Outfit", lines=2)
                                 sprites_char_gear = gr.Textbox(label="Signature Gear / Item", lines=1)
-                                sprites_char_prompt = gr.Textbox(label="Z-Image Prompt (Chroma Key Green #00FF00)", lines=2)
+                                sprites_char_prompt = gr.Textbox(label="Z-Image Prompt (Pure Solid White Studio Background #FFFFFF)", lines=2)
 
                             with gr.Column(scale=1):
                                 sprites_char_preview = gr.Image(
-                                    label="Master 2D Sprite Preview (Isolated on Solid Chroma Green)",
+                                    label="Master 2D Sprite Preview (Pure White Studio Background #FFFFFF)",
                                     height=380,
                                     interactive=False,
                                 )
@@ -2802,12 +2815,22 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                         scale=1,
                                     )
                                     sprites_chroma_tol = gr.Slider(
-                                        label="Chroma Removal Tolerance",
+                                        label="Matting Tolerance",
                                         minimum=15.0,
                                         maximum=70.0,
                                         value=38.0,
                                         step=1.0,
                                         scale=1,
+                                    )
+                                    sprites_bg_color_choice = gr.Dropdown(
+                                        label="Studio Background Keying",
+                                        choices=[
+                                            "Pure White Studio (#FFFFFF) [Preserves VFX & anti-halo]",
+                                            "Auto-Detect Background Color",
+                                            "Chroma Key Green (#00FF00)",
+                                        ],
+                                        value="Pure White Studio (#FFFFFF) [Preserves VFX & anti-halo]",
+                                        scale=2,
                                     )
                                 sprites_cut_sheet_btn = gr.Button("✂️ Cut Video to Transparent Sprite Sheet & JSON", variant="primary", size="lg")
                                 with gr.Row():
@@ -3819,7 +3842,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         fn=sprites_ui_cut_sprite_sheet,
         inputs=[
             sprites_cut_target_move, sprites_target_fps, sprites_chroma_tol,
-            sprites_state_store,
+            sprites_state_store, sprites_bg_color_choice,
         ],
         outputs=[
             sprites_sheet_preview,

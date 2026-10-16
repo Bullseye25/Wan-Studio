@@ -48,6 +48,67 @@ class TestSpriteCutter(unittest.TestCase):
         self.assertEqual(center_alpha, 255)
         self.assertEqual(rgba.getpixel((32, 32))[:3], (255, 0, 0))
 
+    def test_remove_white_background_alpha_with_vfx_and_interior_white(self):
+        """
+        Tests pure white studio background (#FFFFFF) keying:
+        1. Exterior white background is made transparent (alpha == 0).
+        2. Interior white features (e.g. white eyes/shirt/teeth) inside the character are NOT hollowed out (alpha == 255).
+        3. Semi-transparent glowing VFX (e.g. energy slash / magic trail) preserves smooth alpha (0 < alpha < 255).
+        4. White defringing removes white background bleed from the VFX.
+        """
+        # 64x64 solid pure white studio background
+        img = Image.new("RGB", (64, 64), (255, 255, 255))
+        
+        # Draw character body (dark armor/costume) from (20, 20) to (44, 44)
+        for x in range(20, 45):
+            for y in range(20, 45):
+                img.putpixel((x, y), (40, 40, 60))
+                
+        # Draw interior pure white shirt/chest emblem inside the character from (28, 28) to (36, 36)
+        for x in range(28, 37):
+            for y in range(28, 37):
+                img.putpixel((x, y), (255, 255, 255))
+
+        # Draw semi-transparent cyan magic slash VFX extending to the right from (45, 28) to (55, 36)
+        # composited over white (e.g. 50% opacity cyan (0, 240, 255) over (255, 255, 255) = (128, 248, 255))
+        for x in range(45, 56):
+            for y in range(28, 37):
+                img.putpixel((x, y), (128, 248, 255))
+
+        rgba = remove_background_alpha(img, bg_color=(255, 255, 255), tolerance=38.0, defringe=True, preserve_vfx=True)
+        self.assertEqual(rgba.mode, "RGBA")
+
+        # 1. Exterior canvas corners must be 100% transparent (alpha == 0)
+        self.assertEqual(rgba.getpixel((2, 2))[3], 0)
+        self.assertEqual(rgba.getpixel((60, 2))[3], 0)
+        self.assertEqual(rgba.getpixel((2, 60))[3], 0)
+        self.assertEqual(rgba.getpixel((60, 60))[3], 0)
+
+        # 2. Character body must be fully opaque (alpha == 255)
+        self.assertEqual(rgba.getpixel((22, 22))[3], 255)
+
+        # 3. INTERIOR WHITE FEATURE (shirt/emblem) must be PROTECTED and fully opaque (alpha == 255)
+        # (Must NOT be hollowed out or transparent!)
+        self.assertEqual(rgba.getpixel((32, 32))[3], 255)
+        self.assertEqual(rgba.getpixel((32, 32))[:3], (255, 255, 255))
+
+        # 4. VFX REGION: glowing cyan slash must preserve semi-transparency (0 < alpha < 255)
+        vfx_alpha = rgba.getpixel((50, 32))[3]
+        self.assertGreater(vfx_alpha, 0)
+        self.assertLess(vfx_alpha, 255)
+
+        # 5. Anti-halo Defringing: the cyan color should have white un-premultiplied
+        vfx_rgb = rgba.getpixel((50, 32))[:3]
+        # Red channel should be lower than green/blue (defringed back towards pure cyan)
+        self.assertLess(vfx_rgb[0], vfx_rgb[1])
+        self.assertGreater(vfx_rgb[1], 200)
+
+    def test_auto_detect_white_background(self):
+        img_np = np.full((64, 64, 3), 255, dtype=np.uint8)
+        img_np[20:40, 20:40] = [100, 50, 20]
+        detected = sprite_cutter.auto_detect_background_color(img_np)
+        np.testing.assert_array_equal(detected, [255, 255, 255])
+
     def test_find_union_bounding_box(self):
         # Frame 1: sprite at (10, 10, 30, 30)
         f1 = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
@@ -139,7 +200,7 @@ class TestSpritesPipeline(unittest.TestCase):
             "title": "Arcade Defender",
             "appearance": "Metallic azure armor with lightning emblems",
             "signature_gear": "Plasma Buster Gauntlet",
-            "z_image_prompt": "2D game sprite of Spark_Knight on chroma key green #00FF00",
+            "z_image_prompt": "2D game sprite of Spark_Knight on pure flat solid white studio background #FFFFFF",
             "idle_stance": "Ready bounce posture",
         })
         res = self.pipeline.refine_character_with_gemma(
@@ -149,7 +210,7 @@ class TestSpritesPipeline(unittest.TestCase):
         )
         self.assertEqual(res["name"], "Spark_Knight")
         self.assertIn("z_image_prompt", res)
-        self.assertIn("chroma key green", res["z_image_prompt"].lower())
+        self.assertIn("white", res["z_image_prompt"].lower())
 
     @patch.object(SpritesPipeline, "_chat_completion")
     def test_refine_custom_animation_with_gemma(self, mock_chat):
