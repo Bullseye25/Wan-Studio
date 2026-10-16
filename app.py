@@ -1939,38 +1939,85 @@ def sprites_ui_load_move_details(choice_label, char_state):
     char_state = char_state or {}
     character_data = char_state.get("character", {})
     moves = character_data.get("moves", [])
-    if not moves or not choice_label:
-        return "No move selected.", None
-    for m in moves:
-        label = f"{m['name']} ({m['type'].upper()})"
-        if choice_label == label or m["name"] in str(choice_label):
-            v_path = m.get("video_path")
-            rule = "🔁 Infinite Seamless Loop" if m["type"] == "loop" else "🎯 Action & Combo (Returns to Idle Posture @ Final Frame)"
-            info = (
-                f"### 🎯 Selected Move: `{m['name']}` ({m['type'].upper()})\n"
-                f"- **Motion Rule:** {rule}\n"
-                f"- **Choreography:** {m.get('description', '')}\n"
-                f"- **Prompt:** `{m.get('refined_prompt', '')}`\n"
-                f"- **Animation Status:** {'✅ Rendered (' + os.path.basename(v_path) + ')' if (v_path and os.path.exists(v_path)) else '⏳ Not yet animated'}"
-            )
-            return info, v_path if (v_path and os.path.exists(v_path)) else None
-    return "Move details not found.", None
+    if not moves:
+        return "No moves found. Please generate a character in Phase 1.", None
+
+    target_move = moves[0]
+    if choice_label:
+        for m in moves:
+            label = f"{m['name']} ({m['type'].upper()})"
+            if choice_label == label or m["name"] in str(choice_label):
+                target_move = m
+                break
+
+    v_path = target_move.get("video_path")
+    rule = "🔁 Infinite Seamless Loop" if target_move.get("type") == "loop" else "🎯 Action & Combo (Returns to Idle Posture @ Final Frame)"
+    info = (
+        f"### 🎯 Selected Move: `{target_move['name']}` ({target_move.get('type', 'action').upper()})\n"
+        f"- **Motion Rule:** {rule}\n"
+        f"- **Choreography:** {target_move.get('description', '')}\n"
+        f"- **Wan 2.2 Prompt:** `{target_move.get('refined_prompt', '')}`\n"
+        f"- **Animation Status:** {'✅ Rendered (' + os.path.basename(v_path) + ')' if (v_path and os.path.exists(v_path)) else '⏳ Not yet animated (Click Animate below)'}"
+    )
+    return info, v_path if (v_path and os.path.exists(v_path)) else None
+
+
+def sprites_ui_transition_phase2_to_phase3(char_state, current_choice):
+    """Smoothly transitions to Phase 3, ensuring dropdown and info are populated."""
+    char_state = char_state or {}
+    character_data = char_state.get("character") or {}
+    moves = character_data.get("moves") or []
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    selected_val = current_choice if (current_choice in move_choices) else (move_choices[0] if move_choices else None)
+    info, vpath = sprites_ui_load_move_details(selected_val, char_state)
+    return (
+        gr.update(selected="sprites_phase3"),
+        gr.update(choices=move_choices, value=selected_val),
+        info,
+        vpath,
+    )
+
+
+def sprites_ui_transition_phase3_to_phase4(char_state, current_choice):
+    """Smoothly transitions to Phase 4, ensuring cut dropdown is populated."""
+    char_state = char_state or {}
+    character_data = char_state.get("character") or {}
+    moves = character_data.get("moves") or []
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    selected_val = current_choice if (current_choice in move_choices) else (move_choices[0] if move_choices else None)
+    return (
+        gr.update(selected="sprites_phase4"),
+        gr.update(choices=move_choices, value=selected_val),
+    )
 
 
 def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Progress(track_tqdm=True)):
     char_state = char_state or {}
-    character_data = char_state.get("character", {})
-    moves = character_data.get("moves", [])
-    if not character_data or not moves:
-        return None, "### ⚠️ Please complete Phase 1 and Phase 2 first.", char_state
+    character_data = char_state.get("character") or {}
+    moves = character_data.get("moves") or []
 
+    # Auto-heal: if character_data exists but has no moves, generate contextual moves
+    if character_data and not moves:
+        genre = character_data.get("genre", "Action Runner (Pepsiman / Crash Bandicoot)")
+        pipeline = SpritesPipeline()
+        moves = pipeline.get_smart_contextual_moves(character_data, genre=genre)
+        character_data["moves"] = moves
+        char_state["character"] = character_data
+
+    if not character_data or not moves:
+        msg = "### ⚠️ Please complete Phase 1 and Phase 2 first.\nEnsure you have configured a character concept and move-set."
+        return None, gr.update(), msg, msg, char_state
+
+    # Resolve selected move index
     idx = 0
-    for i, m in enumerate(moves):
-        label = f"{m['name']} ({m['type'].upper()})"
-        if choice_label == label or m["name"] in str(choice_label):
-            idx = i
-            break
+    if choice_label:
+        for i, m in enumerate(moves):
+            label = f"{m['name']} ({m['type'].upper()})"
+            if choice_label == label or m["name"] in str(choice_label):
+                idx = i
+                break
     target_move = moves[idx]
+    actual_label = f"{target_move['name']} ({target_move['type'].upper()})"
 
     pipeline = SpritesPipeline()
     try:
@@ -1980,25 +2027,37 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
             except Exception:
                 pass
 
+        seed_val = int(anim_seed) if (anim_seed is not None and str(anim_seed).strip() != "") else 42
         video_path = pipeline.synthesize_animation_clip(
             character_data=character_data,
             move_data=target_move,
-            wan_seed=int(anim_seed),
+            wan_seed=seed_val,
             progress_cb=cb,
         )
+        target_move["video_path"] = video_path
         moves[idx] = target_move
         character_data["moves"] = moves
         char_state["character"] = character_data
 
-        mode_str = "Seamless Infinite Loop" if target_move["type"] == "loop" else "Return-to-Idle Recovery (FLF2V)"
-        status = (
+        move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+        mode_str = "🔁 Seamless Infinite Loop" if target_move["type"] == "loop" else "🎯 Return-to-Idle Recovery (FLF2V Anchor)"
+        info = (
             f"### 🎬 Synthesized Move Animation: `{target_move['name']}` ({target_move['type'].upper()})\n"
-            f"- **Motion Mode:** `{mode_str}` | **Seed:** `{anim_seed}`\n"
-            f"- **Saved Video:** `{pathlib.Path(video_path).name}`"
+            f"- **Motion Mode:** `{mode_str}` | **Wan Seed:** `{seed_val}`\n"
+            f"- **Saved Video:** `{pathlib.Path(video_path).name}`\n"
+            f"- **Choreography:** {target_move.get('description', '')}\n"
+            f"- **Ready for Export:** Proceed to **Phase 4** to cut into transparent sprite sheet!"
         )
-        return video_path, gr.update(value=choice_label), status, char_state
+        return (
+            video_path,
+            gr.update(choices=move_choices, value=actual_label),
+            info,
+            info,
+            char_state,
+        )
     except Exception as e:
-        return None, gr.update(), f"### ❌ Animation Synthesis Error\n`{e}`", char_state
+        err_msg = f"### ❌ Animation Synthesis Error\n`{e}`"
+        return None, gr.update(), err_msg, err_msg, char_state
 
 
 def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state):
@@ -3745,6 +3804,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[
             sprites_anim_video_preview,
             sprites_cut_target_move,
+            sprites_anim_info,
             sprites_status,
             sprites_state_store,
         ],
@@ -3797,9 +3857,14 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[sprites_wizard_tabs],
     )
     sprites_phase2_next_btn.click(
-        fn=lambda: gr.update(selected="sprites_phase3"),
-        inputs=[],
-        outputs=[sprites_wizard_tabs],
+        fn=sprites_ui_transition_phase2_to_phase3,
+        inputs=[sprites_state_store, sprites_move_selector],
+        outputs=[
+            sprites_wizard_tabs,
+            sprites_anim_target_move,
+            sprites_anim_info,
+            sprites_anim_video_preview,
+        ],
     )
     sprites_phase3_back_btn.click(
         fn=lambda: gr.update(selected="sprites_phase2"),
@@ -3807,9 +3872,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         outputs=[sprites_wizard_tabs],
     )
     sprites_phase3_next_btn.click(
-        fn=lambda: gr.update(selected="sprites_phase4"),
-        inputs=[],
-        outputs=[sprites_wizard_tabs],
+        fn=sprites_ui_transition_phase3_to_phase4,
+        inputs=[sprites_state_store, sprites_anim_target_move],
+        outputs=[
+            sprites_wizard_tabs,
+            sprites_cut_target_move,
+        ],
     )
     sprites_phase4_back_btn.click(
         fn=lambda: gr.update(selected="sprites_phase3"),

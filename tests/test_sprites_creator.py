@@ -388,6 +388,55 @@ class TestSpritesUIHandlers(unittest.TestCase):
         self.assertIn("[Pre-Animation Timeline]:", updated_moves[1]["refined_prompt"])
         self.assertIn("Saved Pre-Animation Instructions", save_status)
 
+    @patch("sprites_pipeline.run_remote_inference")
+    def test_phase3_animate_move_and_wizard_transitions(self, mock_wan):
+        mock_wan.return_value = ("output/wan_move_clip.mp4", 9999)
+        dummy_img = Image.new("RGB", (64, 64), (0, 255, 0))
+
+        state = {
+            "character": {
+                "name": "Arthur",
+                "master_sprite_pil": dummy_img,
+                "master_sprite_path": "output/arthur_master.png",
+                "genre": "Beat 'em Up (Streets of Rage / Final Fight)",
+                "moves": [
+                    {
+                        "id": "move_1",
+                        "name": "Sword Slash",
+                        "type": "action",
+                        "description": "Clean sword slash",
+                        "refined_prompt": "Arthur executes sword slash on chroma key green",
+                    }
+                ],
+            }
+        }
+
+        # 1. Test Phase 2 -> Phase 3 transition
+        tab_update, move_drop, info, vpath = app.sprites_ui_transition_phase2_to_phase3(
+            char_state=state, current_choice="Sword Slash (ACTION)"
+        )
+        self.assertEqual(tab_update["selected"], "sprites_phase3")
+        self.assertEqual(move_drop["value"], "Sword Slash (ACTION)")
+        self.assertIn("Sword Slash", info)
+
+        # 2. Test Phase 3: Animate Selected Move
+        v_out, cut_drop, anim_info, status, out_state = app.sprites_ui_animate_move(
+            choice_label="Sword Slash (ACTION)",
+            anim_seed=42,
+            char_state=state,
+        )
+        self.assertEqual(v_out, "output/wan_move_clip.mp4")
+        self.assertIn("wan_move_clip.mp4", anim_info)
+        self.assertIn("Synthesized Move Animation", status)
+        self.assertEqual(out_state["character"]["moves"][0]["video_path"], "output/wan_move_clip.mp4")
+
+        # 3. Test Phase 3 -> Phase 4 transition
+        tab_update4, cut_drop4 = app.sprites_ui_transition_phase3_to_phase4(
+            char_state=out_state, current_choice="Sword Slash (ACTION)"
+        )
+        self.assertEqual(tab_update4["selected"], "sprites_phase4")
+        self.assertEqual(cut_drop4["value"], "Sword Slash (ACTION)")
+
 
 if __name__ == "__main__":
     unittest.main()

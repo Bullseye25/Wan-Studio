@@ -1119,12 +1119,20 @@ class SpritesPipeline:
         master_sprite_path = character_data.get("master_sprite_path")
         master_sprite_pil = character_data.get("master_sprite_pil")
         if master_sprite_pil is None:
-            if not master_sprite_path or not os.path.exists(master_sprite_path):
-                raise FileNotFoundError(
-                    f"Master character sprite is missing at '{master_sprite_path}'. Please run Phase 1 first."
+            if master_sprite_path and os.path.exists(str(master_sprite_path)):
+                master_sprite_pil = Image.open(master_sprite_path).convert("RGB")
+                character_data["master_sprite_pil"] = master_sprite_pil
+            else:
+                # Auto-synthesize master character sprite on the fly if not yet generated
+                seed_val = int(character_data.get("master_seed", 42))
+                if progress_cb:
+                    progress_cb(0.05, f"Synthesizing master sprite for '{char_name}' on Z-Image Turbo...")
+                master_sprite_pil, master_sprite_path = self.synthesize_master_character_sprite(
+                    character_data, seed=seed_val
                 )
-            master_sprite_pil = Image.open(master_sprite_path).convert("RGB")
-        elif not master_sprite_path or not os.path.exists(master_sprite_path):
+                character_data["master_sprite_pil"] = master_sprite_pil
+                character_data["master_sprite_path"] = master_sprite_path
+        elif not master_sprite_path or not os.path.exists(str(master_sprite_path)):
             temp_path = self.char_dir / f"{char_name}_master.png"
             master_sprite_pil.save(str(temp_path))
             master_sprite_path = str(temp_path)
