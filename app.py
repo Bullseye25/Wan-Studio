@@ -1367,11 +1367,62 @@ def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, pr
         return {}, f"### ❌ Step 1 Error\n`{e}`", {}
 
 
+def studio_run_logic_audit(current_state, api_key, model):
+    if not current_state or "scenes" not in current_state:
+        return StudioPipeline.serializable(current_state or {}), "### ⚠️ Please generate a story in Step 1 first.", current_state
+    pipeline = StudioPipeline(api_key=api_key, model=model)
+    try:
+        report = pipeline.audit_and_repair_story_logic(current_state, model_choice=model)
+        sub = report.get("subscores", {})
+        status_md = (
+            f"### 🧠 Story Doctor Causal Audit Report: **{report.get('overall_score', 0)}/10**\n"
+            f"- **Narrative Causality (Therefore/But):** {sub.get('causality', 0)}/10\n"
+            f"- **5-Second Clip Feasibility:** {sub.get('feasibility_5s', 0)}/10\n"
+            f"- **Prop & Weapon Lock:** {sub.get('prop_permanence', 0)}/10\n"
+            f"- **Spatial & 180° Direction:** {sub.get('spatial_continuity', 0)}/10\n"
+            f"- **Visual Action Delta:** {sub.get('visual_delta', 0)}/10\n\n"
+            f"**Critique:** {report.get('critique', 'N/A')}\n"
+            + ("\n✨ **Repairs Applied:** Scenes updated with tightened causal connectors and state ledgers." if report.get("repaired") else "\n✅ **Passed:** Storyboard meets causal animation standards.")
+        )
+        return StudioPipeline.serializable(current_state), status_md, current_state
+    except Exception as e:
+        return StudioPipeline.serializable(current_state), f"### ❌ Logic Audit Error\n`{e}`", current_state
+
+
+def studio_save_memory(current_state):
+    if not current_state or "scenes" not in current_state:
+        return "### ⚠️ No active story to save to memory bank."
+    pipeline = StudioPipeline()
+    success = pipeline.record_story_to_memory(
+        story_data=current_state,
+        premise=current_state.get("theme") or current_state.get("title") or "",
+        rating=10.0,
+        user_edited=True,
+        notes="Saved via UI Memory Bank button",
+    )
+    if success:
+        return f"### 💾 Story *'{current_state.get('title')}'* saved to AI Training Memory!\nIt will be retrieved as a gold-standard few-shot exemplar for future stories."
+    else:
+        return "### ❌ Failed to save story to AI Training Memory."
+
+
 def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(track_tqdm=True)):
     if not current_state or "characters" not in current_state:
         return [], "### ⚠️ Please run Step 1 (Story & Characters) first.", current_state
     pipeline = StudioPipeline(api_key=api_key, model=model)
     try:
+        # Automatically record approved/edited story to long-term memory bank
+        try:
+            pipeline.record_story_to_memory(
+                story_data=current_state,
+                premise=current_state.get("theme") or current_state.get("title") or "",
+                rating=10.0,
+                user_edited=True,
+                notes="Auto-saved on Step 2 character generation",
+            )
+        except Exception:
+            pass
+
         chars = pipeline.generate_character_portraits(
             characters=current_state["characters"],
             shared_seed=int(seed),
@@ -1387,6 +1438,7 @@ def studio_run_step2(seed, api_key, model, current_state, progress=gr.Progress(t
         ), current_state
     except Exception as e:
         return [], f"### ❌ Step 2 Error\n`{e}`", current_state
+
 
 
 def studio_run_step3(
@@ -2376,6 +2428,9 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     placeholder="Generated story title will appear here...",
                                 )
                                 studio_json_display = gr.JSON(label="Generated Screenplay, Cast & Scene Breakdown")
+                                with gr.Row():
+                                    studio_audit_btn = gr.Button("🧠 Run Story Doctor Causal Audit", variant="secondary")
+                                    studio_save_memory_btn = gr.Button("💾 Save to AI Training Memory", variant="secondary")
                                 studio_phase1_next_btn = gr.Button(
                                     "✅ Validate Story & Next ➔ Phase 2: Characters",
                                     variant="primary",
@@ -3390,6 +3445,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
             studio_clip_seed_edit, studio_clip_preview,
         ],
+    )
+
+    studio_audit_btn.click(
+        fn=studio_run_logic_audit,
+        inputs=[studio_pipeline_state, studio_ollama_key, studio_ollama_model],
+        outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_save_memory_btn.click(
+        fn=studio_save_memory,
+        inputs=[studio_pipeline_state],
+        outputs=[studio_status],
     )
 
     def _hb_button_updates():

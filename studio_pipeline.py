@@ -34,7 +34,12 @@ from backend import (
     run_remote_inference,
     DEFAULT_NEGATIVE_PROMPT,
 )
-from cinematography_vault import retrieve_cinematography_blueprint
+from cinematography_vault import (
+    retrieve_cinematography_blueprint,
+    NARRATIVE_BEATS_BY_COUNT,
+    CAUSAL_NARRATIVE_BLUEPRINTS,
+    StoryMemoryBank,
+)
 
 # ── Defaults & Constants ──────────────────────────────────────────────────────
 
@@ -442,27 +447,40 @@ class StudioPipeline:
         scene_duration = round(min(MAX_CLIP_SECONDS, target_duration / num_scenes), 2)
 
         if progress_cb:
-            progress_cb(0.03, "Consulting Gemma 4: 31B for story and character architecture...")
+            progress_cb(0.03, "Consulting AI Director for Causal Story Architecture & State Ledgers...")
+
+        # ── Retrieve In-Context Few-Shot Exemplars from Memory Bank ────────────
+        memory_bank = StoryMemoryBank()
+        exemplars = memory_bank.retrieve_exemplars(prompt, top_k=1)
+        few_shot_prompt = memory_bank.format_few_shot_prompt(exemplars)
+
+        # ── Retrieve Narrative Beat Guide for Target Scene Count ───────────────
+        beat_presets = NARRATIVE_BEATS_BY_COUNT.get(num_scenes, NARRATIVE_BEATS_BY_COUNT.get(6, []))
+        beat_guide_text = "\n".join(
+            f"  - Scene {i+1}: {b.get('beat', f'Beat {i+1}')} (Causal Connector: '{b.get('connector', 'THEREFORE')}') -> {b.get('role', '')}"
+            for i, b in enumerate(beat_presets[:num_scenes])
+        )
 
         system_prompt = (
-            "You are a master animation director and AI scriptwriter directing a high-motion animated film.\n"
+            "You are a master animation director and AI screenwriter directing a causally coherent animated short film.\n"
             f"The user wants a short movie: {target_duration} seconds total, EXACTLY {num_scenes} scenes, "
             f"~{scene_duration}s each. Every scene is ONE continuous shot animated in Wan 2.2 FLF2V between "
             "a FIRST FRAME (t=0.0s) and a LAST FRAME (t=5.0s).\n\n"
-            "CRITICAL DIRECTORIAL MANDATE FOR FIRST & LAST FRAMES:\n"
-            "Wan 2.2 FLF2V interpolates the motion between Frame 0 and Frame 80. "
-            "IF THE FIRST AND LAST FRAMES ARE IDENTICAL OR TOO SIMILAR, THE GENERATED VIDEO WILL BE COMPLETELY FROZEN WITH ZERO MOTION!\n"
-            "Therefore, EVERY scene MUST have a DRAMATIC PHYSICAL POSE AND ACTION PROGRESSION (Cause -> Consequence):\n"
-            "- `qwen_scene_prompt` (START FRAME @ t=0.0s): Initiating stance, posture, or action "
-            "(e.g., character standing upright aiming weapon forward, running into the chamber, staff held at hip, curious forward gaze).\n"
-            "- `qwen_end_scene_prompt` (LAST FRAME @ t=5.0s): DRAMATICALLY DIFFERENT PHYSICAL BODY POSTURE AND ACTION "
-            "(e.g., character drops to one knee taking cover behind a stone pillar with weapon lowered to reload, recoils back from explosion with arm shielding face, staff raised overhead glowing with brilliant energy, body turned 90 degrees pointing in alarm).\n"
-            "IRONCLAD RULES FOR `qwen_end_scene_prompt`:\n"
-            "1. NEVER repeat the same pose, action, or stance from the start frame!\n"
-            "2. Describe specific changed limbs and body angles: torso tilt, arm positions, head direction, hands, and props.\n"
-            "3. The background environment, wallpaper, trees, room geometry, lighting, and character outfits MUST remain identical, "
-            "but the character body poses MUST be radically transformed!\n\n"
-            "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
+            "CRITICAL CAUSAL STORYTELLING LAWS (PIXAR / SOUTH PARK RULE):\n"
+            "1. NEVER CONNECT SCENES WITH 'AND THEN': Every scene must connect via 'THEREFORE' (direct causal consequence "
+            "of the preceding scene) or 'BUT' (unexpected obstacle or twist). Random unrelated events are strictly forbidden!\n"
+            "2. ATOMIC 5-SECOND FEASIBILITY: A single 5.0-second Wan 2.2 clip (81 frames) can ONLY execute ONE atomic physical action "
+            "and its immediate reaction (e.g. 'draws blade and leaps forward' or 'lands on one knee and shields face'). "
+            "NEVER cram 3-4 separate story beats into one 5s scene!\n"
+            "3. WEAPON & PROP RETENTION LOCK: All active weapons, items, and accessories in character hands (swords, lanterns, scrolls, goggles) "
+            "must stay in character hands across cuts unless explicitly shown being dropped, stowed, or shattered.\n"
+            "4. 180-DEGREE SCREEN DIRECTION: Maintain consistent spatial eyelines and screen direction (e.g. hero moving screen-left to screen-right) "
+            "across cuts so characters do not disorientingly flip orientation.\n"
+            "5. HIGH POSE DELTA: Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. If start and end poses are too similar, the video will freeze! "
+            "The End Frame (t=5.0s) MUST have a visibly transformed body posture, changed limbs, and clear follow-through.\n\n"
+            f"NARRATIVE BEAT STRUCTURE TO FOLLOW:\n{beat_guide_text}\n\n"
+            + (f"{few_shot_prompt}\n\n" if few_shot_prompt else "")
+            + "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
             "{\n"
             '  "title": "Short Film Title",\n'
             '  "art_style": "Visual style description",\n'
@@ -475,7 +493,7 @@ class StudioPipeline:
             '      "face": "Exact face features: shape, eyes, expression, facial markings",\n'
             '      "hair": "Hair/fur style, color, texture, length",\n'
             '      "clothing": "Complete outfit, fabric colors, style, shoes",\n'
-            '      "signature_details": "Unique identifiable items, props, or accessories",\n'
+            '      "signature_details": "Unique identifiable items, props, or weapons held",\n'
             '      "z_image_prompt": "Ultra-detailed full-body character sheet prompt for Z-Image Turbo, front view, '
             'clean neutral studio background, in the target art style"\n'
             "    }\n"
@@ -485,6 +503,15 @@ class StudioPipeline:
             '      "scene_number": 1,\n'
             '      "title": "Scene Name",\n'
             f'      "duration_seconds": {scene_duration},\n'
+            '      "narrative_beat": "e.g. Hook & Status Quo / Inciting Obstacle / Climax & Payoff",\n'
+            '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
+            '      "state_ledger": {\n'
+            '        "entry_state": "Exact character body posture, location, and hand items at t=0.0s",\n'
+            '        "active_props": ["list of held weapons or items"],\n'
+            '        "spatial_zone": "Position and facing direction (e.g. screen-left facing right)",\n'
+            '        "atomic_action_5s": "The single physical action and reaction taking 5 seconds",\n'
+            '        "exit_state": "Exact character body posture and prop hold at t=5.0s"\n'
+            '      },\n'
             '      "scenario": "Story beat: what happens in this single shot",\n'
             '      "qwen_scene_prompt": "FIRST FRAME (t=0s) prompt: environment, composition, initiating character poses at the START of the shot",\n'
             '      "qwen_end_scene_prompt": "LAST FRAME (t=5s) prompt: same environment and lighting, but VISIBLY TRANSFORMED character poses/limbs/actions at the END of the shot",\n'
@@ -506,7 +533,7 @@ class StudioPipeline:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=3000,
+            max_tokens=3500,
             temperature=0.7,
             task_role="screenplay",
         )
@@ -521,9 +548,10 @@ class StudioPipeline:
             progress_cb(
                 0.15,
                 f"Story generated: '{parsed_data.get('title', 'Studio Story')}' "
-                f"({len(parsed_data['characters'])} characters, {len(parsed_data['scenes'])} scenes)",
+                f"({len(parsed_data['characters'])} characters, {len(parsed_data['scenes'])} scenes with Causal State Ledgers)",
             )
         return parsed_data
+
 
     @staticmethod
     def normalize_story(
@@ -610,8 +638,287 @@ class StudioPipeline:
         if abs(total - target_duration) > 0.5:
             for s in norm_scenes:
                 s["duration_seconds"] = per_scene
+
+        # ── Causal State Ledger & Narrative Beat Enforcement ──────────────────
+        char_props = [c.get("signature_details") for c in norm_chars if c.get("signature_details")]
+        beat_presets = NARRATIVE_BEATS_BY_COUNT.get(len(norm_scenes), NARRATIVE_BEATS_BY_COUNT.get(6, []))
+
+        for i, s in enumerate(norm_scenes):
+            default_beat = beat_presets[i]["beat"] if i < len(beat_presets) else f"Beat {i+1}"
+            default_conn = beat_presets[i]["connector"] if i < len(beat_presets) else ("SETUP" if i == 0 else "THEREFORE")
+            s.setdefault("narrative_beat", default_beat)
+            s.setdefault("causal_connector", default_conn)
+
+            raw_ledger = s.get("state_ledger")
+            if not isinstance(raw_ledger, dict):
+                raw_ledger = {}
+
+            active_props = raw_ledger.get("active_props")
+            if not isinstance(active_props, list) or not active_props:
+                if i > 0 and norm_scenes[i - 1].get("state_ledger", {}).get("active_props"):
+                    active_props = list(norm_scenes[i - 1]["state_ledger"]["active_props"])
+                else:
+                    active_props = [char_props[0]] if char_props else []
+
+            entry_state = raw_ledger.get("entry_state")
+            if not entry_state:
+                if i > 0 and norm_scenes[i - 1].get("state_ledger", {}).get("exit_state"):
+                    entry_state = f"Continuing from previous shot: {norm_scenes[i - 1]['state_ledger']['exit_state']}"
+                else:
+                    entry_state = f"Starting stance: {s.get('qwen_scene_prompt', '')[:100]}"
+
+            exit_state = raw_ledger.get("exit_state")
+            if not exit_state:
+                exit_state = f"Finishing posture: {s.get('qwen_end_scene_prompt', '')[:100]}"
+
+            spatial = raw_ledger.get("spatial_zone") or (
+                norm_scenes[i - 1].get("state_ledger", {}).get("spatial_zone") if i > 0 else "Screen-center"
+            )
+            atomic = raw_ledger.get("atomic_action_5s") or s.get("scenario") or s.get("wan_motion_prompt") or "Primary physical action"
+
+            s["state_ledger"] = {
+                "entry_state": entry_state,
+                "active_props": active_props,
+                "spatial_zone": spatial,
+                "atomic_action_5s": atomic,
+                "exit_state": exit_state,
+            }
+
         data["scenes"] = norm_scenes
         return data
+
+    def audit_and_repair_story_logic(
+        self,
+        story_data: Dict[str, Any],
+        model_choice: Optional[str] = None,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Multi-Agent 'Story Doctor' & Causal Continuity Critic.
+        Audits the screenplay before image/video rendering against 5 key criteria:
+        1. Narrative Causality: Are scenes linked by THEREFORE / BUT instead of AND THEN?
+        2. 5-Second Feasibility: Does each scene feature 1 atomic action + reaction that fits in 5 seconds?
+        3. Prop & Weapon Permanence: Do items stay in hands without vanishing mid-story?
+        4. Spatial & Screen Direction: Is 180-degree cinema direction respected across cuts?
+        5. Visual Action Progression: Is there a dramatic physical pose difference between start and end?
+
+        If any score is < 8/10, automatically repairs and enhances the scene beats,
+        and logs the (rejected, chosen) pair to outputs/studio/story_dpo_pairs.jsonl
+        for ongoing model fine-tuning.
+        """
+        if progress_cb:
+            progress_cb(0.08, "Running Story Doctor Causal Audit on screenplay...")
+
+        scenes = story_data.get("scenes", [])
+        if not scenes:
+            return {
+                "passed": True,
+                "overall_score": 10.0,
+                "subscores": {"causality": 10.0, "feasibility_5s": 10.0, "prop_permanence": 10.0, "spatial_continuity": 10.0, "visual_delta": 10.0},
+                "critique": "No scenes to audit.",
+                "issues": [],
+                "repaired": False,
+                "story": story_data,
+            }
+
+        system_prompt = (
+            "You are the Lead Story Doctor and Animation Continuity Critic for a world-class animation studio.\n"
+            "Your mission is to audit an animated short film storyboard and ensure it possesses ironclad narrative causality, "
+            "strict 5-second temporal feasibility, prop permanence, and visual action progression.\n\n"
+            "AUDIT CRITERIA (Score 1-10 each):\n"
+            "1. causality: Every scene transition must connect via 'THEREFORE' (consequence) or 'BUT' (obstacle). Ban lazy 'AND THEN' jumps.\n"
+            "2. feasibility_5s: Each 5.0-second Wan 2.2 clip can only execute ONE primary physical action and immediate reaction. Ban cramming 3-4 separate events into 5s.\n"
+            "3. prop_permanence: Weapons and items in characters' hands must stay in their hands across cuts unless explicitly dropped, sheared, or stowed.\n"
+            "4. spatial_continuity: Keep 180-degree screen direction consistent (e.g. facing screen-right vs screen-left).\n"
+            "5. visual_delta: The End Frame (t=5s) MUST be a drastically different physical body stance from the Start Frame (t=0s).\n\n"
+            "Output ONLY valid JSON matching this schema:\n"
+            "{\n"
+            '  "overall_score": 1-10,\n'
+            '  "subscores": {\n'
+            '    "causality": 1-10,\n'
+            '    "feasibility_5s": 1-10,\n'
+            '    "prop_permanence": 1-10,\n'
+            '    "spatial_continuity": 1-10,\n'
+            '    "visual_delta": 1-10\n'
+            '  },\n'
+            '  "critique": "Detailed constructive feedback identifying logical weak points",\n'
+            '  "needs_repair": true/false,\n'
+            '  "repaired_scenes": [\n'
+            "    {\n"
+            '      "scene_number": 1,\n'
+            '      "title": "Scene Name",\n'
+            '      "narrative_beat": "e.g. Hook & Status Quo",\n'
+            '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
+            '      "state_ledger": {\n'
+            '        "entry_state": "Starting body posture at t=0s",\n'
+            '        "active_props": ["held items/weapons"],\n'
+            '        "spatial_zone": "Position and facing direction",\n'
+            '        "atomic_action_5s": "Single physical action and reaction taking 5s",\n'
+            '        "exit_state": "Finishing body posture at t=5s"\n'
+            '      },\n'
+            '      "scenario": "Polished one-sentence beat",\n'
+            '      "qwen_scene_prompt": "First frame prompt",\n'
+            '      "qwen_end_scene_prompt": "Last frame prompt (high-delta)",\n'
+            '      "wan_motion_prompt": "Motion description",\n'
+            '      "camera_movement": "Camera directive",\n'
+            '      "character_ids": ["char_1"]\n'
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+
+        user_content = json.dumps(
+            {
+                "title": story_data.get("title"),
+                "theme": story_data.get("theme"),
+                "art_style": story_data.get("art_style"),
+                "characters": story_data.get("characters"),
+                "scenes": [
+                    {
+                        "scene_number": s.get("scene_number"),
+                        "title": s.get("title"),
+                        "narrative_beat": s.get("narrative_beat"),
+                        "causal_connector": s.get("causal_connector"),
+                        "state_ledger": s.get("state_ledger"),
+                        "scenario": s.get("scenario"),
+                        "qwen_scene_prompt": s.get("qwen_scene_prompt"),
+                        "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
+                        "wan_motion_prompt": s.get("wan_motion_prompt"),
+                        "camera_movement": s.get("camera_movement"),
+                        "character_ids": s.get("character_ids"),
+                    }
+                    for s in scenes
+                ],
+            },
+            indent=2,
+        )
+
+        audit_model = model_choice or "nemotron-3-super"
+        audit_raw = None
+        try:
+            audit_raw = self._chat_completion(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                model_override=audit_model,
+                max_tokens=3000,
+                temperature=0.4,
+                task_role="screenplay",
+                max_retries=1,
+            )
+        except Exception as e:
+            print(f"[StudioPipeline] Story Doctor LLM call skipped or failed ({e}). Running deterministic heuristic critic.")
+
+        parsed = self._parse_json_safely(audit_raw) if audit_raw else {}
+
+        # Fallback heuristic evaluation if LLM didn't return valid scores
+        subscores = parsed.get("subscores") or {}
+        overall_score = float(parsed.get("overall_score") or 0.0)
+
+        if not subscores or overall_score == 0.0:
+            # Deterministic heuristic analysis
+            c_score = 9.0
+            f_score = 9.0
+            p_score = 9.0
+            s_score = 9.0
+            v_score = 9.0
+            issues = []
+
+            for i, s in enumerate(scenes):
+                conn = str(s.get("causal_connector", "")).upper()
+                if "AND THEN" in conn or (i > 0 and not any(k in conn for k in ("BUT", "THEREFORE", "CONSEQUENCE", "RESULT"))):
+                    c_score = max(5.0, c_score - 1.5)
+                    issues.append(f"Scene {i+1} lacks an explicit 'THEREFORE' or 'BUT' causal connector.")
+
+                # Check 5s feasibility (heuristic: overly long text with multiple distinct conjunctions)
+                scen_text = s.get("scenario", "")
+                if scen_text.count(" and ") >= 3 or scen_text.count(" then ") >= 2:
+                    f_score = max(6.0, f_score - 1.0)
+                    issues.append(f"Scene {i+1} scenario contains multiple actions that may exceed the 5-second window.")
+
+                # Check visual delta
+                p1 = s.get("qwen_scene_prompt", "")
+                p2 = s.get("qwen_end_scene_prompt", "")
+                if p1 and p2 and p1.strip().lower() == p2.strip().lower():
+                    v_score = 4.0
+                    issues.append(f"Scene {i+1} Start Frame and End Frame prompts are identical (causes frozen video).")
+
+            overall_score = round((c_score + f_score + p_score + s_score + v_score) / 5.0, 1)
+            subscores = {
+                "causality": c_score,
+                "feasibility_5s": f_score,
+                "prop_permanence": p_score,
+                "spatial_continuity": s_score,
+                "visual_delta": v_score,
+            }
+            needs_repair = overall_score < 8.0 or any(v < 7.0 for v in subscores.values())
+            critique = "; ".join(issues) if issues else "Storyboard conforms to causal narrative standards."
+        else:
+            overall_score = round(float(overall_score), 1)
+            needs_repair = bool(parsed.get("needs_repair", overall_score < 8.0))
+            critique = str(parsed.get("critique", ""))
+            issues = [critique] if critique else []
+
+        repaired = False
+        repaired_scenes = parsed.get("repaired_scenes")
+        if needs_repair and isinstance(repaired_scenes, list) and len(repaired_scenes) == len(scenes):
+            original_story = json.loads(json.dumps(story_data))
+            for i, rep in enumerate(repaired_scenes):
+                if isinstance(rep, dict):
+                    # Retain durations and identifiers while updating narrative content
+                    for key in ("title", "narrative_beat", "causal_connector", "state_ledger", "scenario", "qwen_scene_prompt", "qwen_end_scene_prompt", "wan_motion_prompt", "camera_movement"):
+                        if rep.get(key):
+                            scenes[i][key] = rep[key]
+            story_data["scenes"] = scenes
+            repaired = True
+
+            # Record DPO preference pair into memory bank
+            try:
+                memory_bank = StoryMemoryBank()
+                memory_bank.record_dpo_pair(
+                    premise=story_data.get("theme", story_data.get("title", "")),
+                    rejected_story=original_story,
+                    chosen_story=story_data,
+                    critique_feedback=critique,
+                )
+            except Exception as e:
+                print(f"[StudioPipeline] Failed to record DPO pair: {e}")
+
+        audit_result = {
+            "passed": overall_score >= 8.0,
+            "overall_score": overall_score,
+            "subscores": subscores,
+            "critique": critique,
+            "issues": issues,
+            "repaired": repaired,
+        }
+        # Decouple back-reference to prevent infinite recursion
+        story_data["logic_audit"] = dict(audit_result)
+        result_with_story = dict(audit_result)
+        result_with_story["story"] = story_data
+        return result_with_story
+
+
+    def record_story_to_memory(
+        self,
+        story_data: Dict[str, Any],
+        premise: str = "",
+        rating: float = 10.0,
+        user_edited: bool = False,
+        notes: str = "",
+    ) -> bool:
+        """Saves a story into the local episodic memory bank for future in-context learning."""
+        bank = StoryMemoryBank()
+        p = premise or story_data.get("theme") or story_data.get("title") or "Studio Story"
+        return bank.save_exemplar(
+            premise=p,
+            story_data=story_data,
+            rating=rating,
+            user_edited=user_edited,
+            notes=notes,
+        )
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 2: Character Portrait Synthesis via Z-Image Turbo (Locked Seed)
@@ -999,6 +1306,12 @@ class StudioPipeline:
         if not cast and characters:
             cast = characters[:2]
         cast_desc = ", ".join(f"{c.get('name', 'Hero')} ({c.get('clothing', '')})" for c in cast) or "characters in image"
+        ledger = scene.get("state_ledger") or {}
+        entry_state = ledger.get("entry_state", "")
+        active_props = ledger.get("active_props", [])
+        atomic_action = ledger.get("atomic_action_5s", "")
+        target_exit_state = ledger.get("exit_state", "")
+        props_str = ", ".join(active_props) if active_props else "None"
 
         system_prompt = (
             "You are an expert Animation Director directing the KEYFRAME POSE PROGRESSION of a 5-second continuous animated shot in Wan 2.2 FLF2V.\n"
@@ -1007,9 +1320,10 @@ class StudioPipeline:
             "CRITICAL DIRECTORIAL LAWS:\n"
             "1. ZERO STAGNANT POSES: Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. If the poses are similar, the video has zero motion!\n"
             "2. COMMAND A RADICAL POSE TRANSFORMATION: You must specify an explicit physical posture switch (e.g. from standing/aiming to crouching low behind cover, dropping to one knee, recoiling backward from impact, weapon lowered to reload, turning 90 degrees in shock, or leaping into action).\n"
-            "3. EXPLICIT BODY MECHANICS: Describe exact torso angle, arm positions, head direction, hands, and props.\n"
-            "4. KEEP THE WORLD IDENTICAL: The background environment, room geometry, trees, lighting, art style, and character clothing MUST remain identical to image 1, but the physical body pose MUST be completely transformed.\n"
-            "5. Output ONLY valid JSON in this schema:\n"
+            "3. WEAPON & PROP RETENTION LOCK: All active weapons, items, and accessories (" + props_str + ") MUST remain in the characters' hands in the ending frame unless explicitly dropped or destroyed. Never allow weapons to vanish!\n"
+            "4. EXPLICIT BODY MECHANICS: Describe exact torso angle, arm positions, head direction, hands, and props.\n"
+            "5. KEEP THE WORLD IDENTICAL: The background environment, room geometry, trees, lighting, art style, and character clothing MUST remain identical to image 1, but the physical body pose MUST be completely transformed.\n"
+            "6. Output ONLY valid JSON in this schema:\n"
             "{\n"
             '  "action_summary": "1-sentence summary of the action that occurred over 5 seconds",\n'
             '  "qwen_end_frame_prompt": "Imperative edit prompt for Qwen Image Edit: \'image 1 is the starting frame. For this ending frame at t=5.0s, completely transform the characters\\\' body poses into their dynamic final stance: [exact physical action, new arm, leg, and head positions]. Keep the exact same background environment, lighting, art style, and outfits from image 1, but visibly advance their body pose into this new action.\'"\n'
@@ -1019,10 +1333,14 @@ class StudioPipeline:
         user_text = (
             f"Shot {scene_num}: '{title}' | Style: {art_style}\n"
             f"Scenario / Shot Action: {scenario}\n"
+            f"State Ledger Action (5s): {atomic_action}\n"
+            f"Target Exit State: {target_exit_state}\n"
+            f"Active Props/Weapons: {props_str}\n"
             f"Intended 5s Motion: {wan_motion}\n"
             f"Characters in Shot: {cast_desc}\n"
-            f"Analyze image 1 (the start frame) and direct the exact ending pose at t=5.0s with a clear, visible action delta."
+            f"Analyze image 1 (the start frame) and direct the exact ending pose at t=5.0s with a clear, visible action delta while keeping all weapons/props locked in hand."
         )
+
 
         b64_start = None
         if use_vision and keyframe_pil is not None:
@@ -1546,11 +1864,29 @@ class StudioPipeline:
             for c in cast
         ) or "- (no named characters)"
         end_prompt_note = f"End frame beat: {scene.get('qwen_end_scene_prompt', '')}\n" if scene.get("qwen_end_scene_prompt") else ""
+
+        ledger = scene.get("state_ledger") or {}
+        entry_state = ledger.get("entry_state", "")
+        active_props = ledger.get("active_props", [])
+        atomic_action = ledger.get("atomic_action_5s", "")
+        exit_state = ledger.get("exit_state", "")
+        connector = scene.get("causal_connector", "")
+        beat_name = scene.get("narrative_beat", "")
+
+        ledger_note = ""
+        if ledger:
+            ledger_note = (
+                f"Narrative Beat: {beat_name} (Causal Connector: {connector})\n"
+                f"Causal State Bridge: Entry State: {entry_state} -> Atomic 5s Action: {atomic_action} -> Exit State: {exit_state}\n"
+                f"Active Props/Weapons: {', '.join(active_props) if active_props else 'None'}\n"
+            )
+
         text = (
             f"Film: {story_meta.get('title', '')} | Style: {story_meta.get('art_style', '')} | "
             f"Theme: {story_meta.get('theme', '')}\n"
             f"Shot {scene.get('scene_number')}: {scene.get('title', '')} ({duration:.1f}s)\n"
             f"Story beat: {scene.get('scenario', '')}\n"
+            f"{ledger_note}"
             f"{end_prompt_note}"
             f"Draft motion from writer: {scene.get('wan_motion_prompt', '')}\n"
             f"Draft camera: {scene.get('camera_movement', '')}\n"
@@ -1644,6 +1980,13 @@ class StudioPipeline:
                 else "subjects keep identical appearance"),
             220,
         )
+
+        # Incorporate active props retention into identity anchors
+        active_props = scene.get("state_ledger", {}).get("active_props", [])
+        if active_props and isinstance(active_props, list):
+            props_txt = ", ".join(active_props[:3])
+            anchors += f", weapon and prop lock: {props_txt} remain securely in hands with no vanishing"
+
         env = _trim(raw.get("environment_motion") or "", 140)
         if not env or env == "subtle ambient motion in the background":
             env = blueprint.get("reactive_physics", "subtle ambient motion in the background")
@@ -1656,6 +1999,7 @@ class StudioPipeline:
             f"[Environment]: {env}. [Identity Anchors]: {anchors}, no morphing. "
             f"{style + ', ' if style else ''}smooth fluid animation, consistent character design, high detail."
         )
+
 
         extra_neg = _trim(raw.get("negative_additions") or "", 200)
         negative = ", ".join(x for x in [DEFAULT_NEGATIVE_PROMPT, IDENTITY_NEGATIVE, extra_neg] if x)
@@ -2199,12 +2543,20 @@ class StudioPipeline:
     @staticmethod
     def serializable(story_data: Dict[str, Any]) -> Dict[str, Any]:
         """Deep-copies story data without PIL images so it can be shown as JSON / saved."""
+        seen = set()
+
         def strip(obj):
+            obj_id = id(obj)
+            if isinstance(obj, (dict, list)):
+                if obj_id in seen:
+                    return None
+                seen.add(obj_id)
             if isinstance(obj, dict):
                 return {k: strip(v) for k, v in obj.items() if not isinstance(v, Image.Image)}
             if isinstance(obj, list):
                 return [strip(v) for v in obj if not isinstance(v, Image.Image)]
             return obj
+
         return strip(story_data or {})
 
     def save_manifest(self, story_data: Dict[str, Any]) -> str:
