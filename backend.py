@@ -88,6 +88,8 @@ def run_remote_inference(
     last_frame_image=None,
     width=None,
     height=None,
+    save_dir=None,
+    output_filename=None,
 ):
     """
     Forwards the video generation request to the Modal backend.
@@ -166,9 +168,10 @@ def run_remote_inference(
                     elif etype == "error":
                         raise RuntimeError(f"Remote execution failed: {event['message']}\n{event['traceback']}")
                     elif etype == "output":
-                        local_dir = pathlib.Path(__file__).parent / "outputs"
+                        local_dir = pathlib.Path(save_dir) if save_dir else (pathlib.Path(__file__).parent / "outputs")
                         local_dir.mkdir(parents=True, exist_ok=True)
-                        local_path = local_dir / event["filename"]
+                        target_filename = output_filename if output_filename else event["filename"]
+                        local_path = local_dir / target_filename
                         print(f"[local-backend] Writing output video: {local_path} ({len(event['video_bytes'])} bytes)")
                         with open(local_path, "wb") as f_out:
                             f_out.write(event["video_bytes"])

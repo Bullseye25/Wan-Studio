@@ -1793,6 +1793,66 @@ def sprites_ui_save_selected_move(
     )
 
 
+def sprites_ui_delete_selected_move(choice_label, char_state):
+    """Deletes the selected move/action/behavior from the active character move-set."""
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = list(character_data.get("moves", []))
+    if not character_data or not moves:
+        return (
+            gr.update(), gr.update(), gr.update(), [],
+            "", "🎯 Action (Return to Idle Stance)", "", "",
+            "### ⚠️ No active move-set found to delete.", char_state,
+        )
+
+    idx = 0
+    for i, m in enumerate(moves):
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            idx = i
+            break
+
+    if len(moves) <= 1:
+        first_m = moves[0]
+        t_label = "🔁 Seamless Looping Cycle" if first_m.get("type") == "loop" else "🎯 Action (Return to Idle Stance)"
+        return (
+            gr.update(), gr.update(), gr.update(), moves,
+            first_m.get("name", ""), t_label, first_m.get("description", ""), first_m.get("refined_prompt", ""),
+            "### ⚠️ Cannot delete the only remaining move. Characters must keep at least one animation.", char_state,
+        )
+
+    deleted_move = moves.pop(idx)
+    del_name = deleted_move.get("name", "Move")
+    del_type = deleted_move.get("type", "action")
+    character_data["moves"] = moves
+    char_state["character"] = character_data
+
+    next_idx = min(idx, len(moves) - 1)
+    next_move = moves[next_idx]
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    next_choice = move_choices[next_idx]
+    next_type_label = (
+        "🔁 Seamless Looping Cycle" if next_move.get("type") == "loop" else "🎯 Action (Return to Idle Stance)"
+    )
+    status = (
+        f"### 🗑️ Deleted Move: `{del_name}` ({del_type.upper()})\n"
+        f"- **Remaining Moves:** `{len(moves)}` active animations\n"
+        f"- **Now Inspecting:** `{next_move.get('name')}`"
+    )
+    return (
+        gr.update(choices=move_choices, value=next_choice),
+        gr.update(choices=move_choices, value=next_choice),
+        gr.update(choices=move_choices, value=next_choice),
+        moves,
+        next_move.get("name", ""),
+        next_type_label,
+        next_move.get("description", ""),
+        next_move.get("refined_prompt", ""),
+        status,
+        char_state,
+    )
+
+
 def sprites_ui_validate_phase1_to_phase2(
     char_state, genre, art_style, name, title, appearance, gear, z_prompt, user_concept, api_key, model
 ):
@@ -1847,9 +1907,20 @@ def sprites_ui_validate_phase1_to_phase2(
     )
     combat_directive_default = f"{arch['role_title']} wielding {arch['weapon_label']} — {arch['combat_style_summary']}"
 
+    p_weapon = arch.get("primary_heavy_weapon")
+    s_weapon = arch.get("secondary_light_weapon")
+    is_dual = arch.get("damage_tiers", {}).get("is_dual_wield", False) if isinstance(arch.get("damage_tiers"), dict) else False
+
+    weapon_breakdown = f"- **Primary Heavy Weapon:** `{p_weapon}`\n" if p_weapon else ""
+    if s_weapon:
+        weapon_breakdown += f"- **Secondary Light Weapon:** `{s_weapon}`\n"
+    if is_dual:
+        weapon_breakdown += "- **Combat Kinematics:** Streets of Rage 4 Asymmetric Dual-Wield (Heavy Poise Knockdown + Light Rapid Flurry)\n"
+
     status = (
         f"### ⚔️ Phase 2 Ready: Smart Choreography Loaded for `{character_data.get('name', 'Hero')}`\n"
-        f"- **Detected Weapon / Gear:** `{arch['weapon_label']}` (`{arch['role_title']}`)\n"
+        f"{weapon_breakdown}"
+        f"- **Equipped Gear:** `{arch['weapon_label']}` (`{arch['role_title']}`)\n"
         f"- **Pre-Animation Instructions:** `{len(moves)}` moves tailored to `{arch['weapon_label']}` (no mismatched animations)."
     )
     return (
@@ -1954,9 +2025,17 @@ def sprites_ui_load_move_details(choice_label, char_state):
 
     v_path = target_move.get("video_path")
     rule = "🔁 Infinite Seamless Loop" if target_move.get("type") == "loop" else "🎯 Action & Combo (Returns to Idle Posture @ Final Frame)"
+    fw_style = target_move.get("footwork_style", "")
+    fw_reason = target_move.get("footwork_reasoning", "")
+    fw_block = (
+        f"- **Advancing Footwork Kinematics:** `{fw_style}`\n"
+        f"- **AI Combat Reasoning (SoR4 & Shinobi Canon):** {fw_reason}\n"
+        if (fw_style or fw_reason) else ""
+    )
     info = (
         f"### 🎯 Selected Move: `{target_move['name']}` ({target_move.get('type', 'action').upper()})\n"
         f"- **Motion Rule:** {rule}\n"
+        f"{fw_block}"
         f"- **Choreography:** {target_move.get('description', '')}\n"
         f"- **Wan 2.2 Prompt:** `{target_move.get('refined_prompt', '')}`\n"
         f"- **Animation Status:** {'✅ Rendered (' + os.path.basename(v_path) + ')' if (v_path and os.path.exists(v_path)) else '⏳ Not yet animated (Click Animate below)'}"
@@ -2048,7 +2127,7 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
         info = (
             f"### 🎬 Synthesized Move Animation: `{target_move['name']}` ({target_move['type'].upper()})\n"
             f"- **Motion Mode:** `{mode_str}` | **Wan Seed:** `{seed_val}`\n"
-            f"- **Saved Video:** `{pathlib.Path(video_path).name}`\n"
+            f"- **Saved Video Clip:** `{video_path}`\n"
             f"- **Choreography:** {target_move.get('description', '')}\n"
             f"- **Ready for Export:** Proceed to **Phase 4** to cut into transparent sprite sheet!"
         )
@@ -2105,10 +2184,14 @@ def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state
         character_data["moves"] = moves
         char_state["character"] = character_data
 
-        bg_mode_text = "Pure White Studio (#FFFFFF)" if bg_color == (255, 255, 255) else ("Chroma Green (#00FF00)" if bg_color == (0, 255, 0) else "Auto-Detected")
+        bg_mode_text = (
+            "Pure White Studio (#FFFFFF) [AI Neural Matting]"
+            if bg_color == (255, 255, 255)
+            else ("Chroma Green (#00FF00)" if bg_color == (0, 255, 0) else "Auto-Detected")
+        )
         status = (
             f"### ✂️ Sprite Sheet Packed: `{target_move['name']}` ({res['frame_count']} frames @ {target_fps} FPS)\n"
-            f"- **Background Matting:** `{bg_mode_text}` (VFX & soft transparency preserved)\n"
+            f"- **Background Matting:** `{bg_mode_text}` (Negative-space cavities extracted & metallic weapon vibrancy active)\n"
             f"- **PNG Atlas:** `{pathlib.Path(res['sheet_path']).name}`\n"
             f"- **Engine Manifest:** `{pathlib.Path(res['json_path']).name}`"
         )
@@ -2737,6 +2820,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     sprites_save_move_btn = gr.Button(
                                         "💾 Save Move Changes",
                                         variant="primary",
+                                    )
+                                    sprites_delete_move_btn = gr.Button(
+                                        "🗑️ Delete Selected Move",
+                                        variant="stop",
                                     )
                                 with gr.Accordion("📚 Full Move-Set Registry (JSON)", open=False):
                                     sprites_moves_json = gr.JSON(label="Move-Set Registry")
@@ -3786,6 +3873,23 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             sprites_anim_target_move,
             sprites_cut_target_move,
             sprites_moves_json,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    sprites_delete_move_btn.click(
+        fn=sprites_ui_delete_selected_move,
+        inputs=[sprites_move_selector, sprites_state_store],
+        outputs=[
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_edit_move_name,
+            sprites_edit_move_type,
+            sprites_edit_move_desc,
+            sprites_edit_move_prompt,
             sprites_status,
             sprites_state_store,
         ],

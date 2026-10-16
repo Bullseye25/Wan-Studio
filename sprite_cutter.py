@@ -49,6 +49,49 @@ def auto_detect_background_color(img_np: np.ndarray) -> np.ndarray:
     return bg_median
 
 
+_REMBG_SESSION = None
+
+
+def get_rembg_session():
+    """Returns a singleton rembg session using the u2net segmentation architecture for fast, studio-quality matting."""
+    global _REMBG_SESSION
+    if _REMBG_SESSION is None:
+        try:
+            import rembg
+            _REMBG_SESSION = rembg.new_session("u2net")
+        except Exception as e:
+            print(f"[sprite_cutter] Notice: rembg neural session could not be initialized ({e}), will use algorithmic fallback.")
+            _REMBG_SESSION = False
+    return _REMBG_SESSION if _REMBG_SESSION is not False else None
+
+
+def enhance_metallic_weapons(img_np: np.ndarray, alpha_np: np.ndarray) -> np.ndarray:
+    """
+    Enhances the specular shine, edge contrast, and luminosity of metallic weapons (swords, blades)
+    without affecting skin, clothes, or background, making blades gleaming silver in 2D sprite sheets.
+    """
+    if alpha_np is None or not np.any(alpha_np > 30):
+        return img_np
+
+    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+
+    # Metallic pixels: low saturation (gray/silver/steel), medium-high brightness, inside foreground
+    is_metal = (alpha_np > 128) & (sat < 40) & (val > 70) & (val < 250)
+    if not np.any(is_metal):
+        return img_np
+
+    out = img_np.copy().astype(np.float32)
+    val_norm = val.astype(np.float32) / 255.0
+    boost = np.where(val_norm > 0.45, (val_norm - 0.45) * 60.0, (val_norm - 0.45) * 15.0)
+
+    for c in range(3):
+        out[:, :, c] = np.where(is_metal, np.clip(out[:, :, c] + boost, 0, 255), out[:, :, c])
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def remove_background_alpha(
     image: Union[Image.Image, np.ndarray],
     bg_color: Optional[Tuple[int, int, int]] = (255, 255, 255),
@@ -57,11 +100,13 @@ def remove_background_alpha(
     spill_suppression: bool = True,
     defringe: bool = True,
     preserve_vfx: bool = True,
+    use_ai: bool = True,
+    enhance_weapons: bool = True,
 ) -> Image.Image:
     """
     Removes the solid white studio or chroma key background from an image, producing an RGBA
-    image with smooth alpha, full VFX preservation (slashes, magic glow, particle trails, sparks),
-    border flood-fill protection for white character clothing/eyes, and anti-halo defringing.
+    image with smooth alpha, full negative-space cavity extraction (between legs, under arms, around swords),
+    VFX preservation (slashes, magic glow, particle trails, sparks), and anti-halo defringing.
     """
     if isinstance(image, Image.Image):
         img_pil = image.convert("RGB")
@@ -85,30 +130,40 @@ def remove_background_alpha(
     is_white_bg = bool(np.mean(target_bg) >= 220 or np.all(target_bg >= 210))
 
     if is_white_bg:
+        final_alpha = None
+
         # ─────────────────────────────────────────────────────────────────────
-        # High-Fidelity White Studio Background Matting with VFX Preservation
+        # 1. Primary AI Neural Matting Engine (rembg / ONNX dichotomous matting)
         # ─────────────────────────────────────────────────────────────────────
-        # Compute departure from pure white:
+        if use_ai and max(h, w) > 128:
+            session = get_rembg_session()
+            if session is not None:
+                try:
+                    import rembg
+                    ai_cutout = rembg.remove(img_pil, session=session)
+                    ai_arr = np.array(ai_cutout)
+                    if ai_arr.ndim == 3 and ai_arr.shape[2] == 4:
+                        final_alpha = ai_arr[:, :, 3].astype(np.float32)
+                except Exception as e:
+                    print(f"[sprite_cutter] AI matting exception ({e}), using enhanced algorithmic fallback...")
+                    final_alpha = None
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 2. Cavity Component Analysis & Algorithmic Matting
+        # ─────────────────────────────────────────────────────────────────────
         diff_rgb = np.linalg.norm(target_bg - img_np.astype(np.float32), axis=2)
         min_channel = np.min(img_np, axis=2).astype(np.float32)
-        whiteness_delta = 255.0 - min_channel  # 0 for pure white, 255 for black or pure primary
-
-        # Combined metric capturing both dark character shapes and vibrant pure-color VFX
+        whiteness_delta = 255.0 - min_channel
         departure = np.maximum(diff_rgb * (255.0 / 441.67), whiteness_delta)
 
-        # Thresholds:
-        # - bg_tol: flat white studio background threshold
-        # - solid_tol: threshold above which pixel is 100% opaque
         bg_tol = max(8.0, tolerance * 0.45)
         solid_tol = max(tolerance * 4.0, 180.0)
 
-        # 1. Identify pure background candidates
         cand_bg = (departure <= bg_tol).astype(np.uint8)
 
-        # 2. Flood fill from ALL 4 borders to find true exterior background
+        # Border flood fill for exterior background
         flood_map = cand_bg.copy()
         mask_for_flood = np.zeros((h + 2, w + 2), np.uint8)
-
         for x in range(w):
             if flood_map[0, x] == 1:
                 cv2.floodFill(flood_map, mask_for_flood, (x, 0), 2)
@@ -122,27 +177,57 @@ def remove_background_alpha(
 
         is_ext_bg = (flood_map == 2)
 
-        # 3. Calculate Alpha:
-        # - Exterior background reached from border -> 0.0 alpha
-        # - Interior white features (cand_bg is True but NOT reached by border flood fill) -> 255.0 (protected!)
-        # - Foreground / VFX (cand_bg is False):
-        final_alpha = np.full((h, w), 255.0, dtype=np.float32)
-        final_alpha[is_ext_bg] = 0.0
+        # Cavity Analysis: detect enclosed empty negative spaces (between legs, coat, sword)
+        # while protecting small interior white details (eyes, teeth, chest emblems < 400px)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(cand_bg, connectivity=8)
+        is_cavity_bg = np.zeros((h, w), dtype=bool)
+        hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+        sat = hsv[:, :, 1]
+        min_cavity_area = max(400, int(0.08 * h * w)) if max(h, w) <= 128 else 400
 
-        # Non-background pixels (cand_bg == 0)
-        fg_mask = (cand_bg == 0)
-        if preserve_vfx:
-            # Semi-transparent VFX and soft anti-aliased edges
-            soft_mask = fg_mask & (departure < solid_tol)
-            proportional_alpha = (departure - bg_tol) / max(1.0, (solid_tol - bg_tol))
-            final_alpha[soft_mask] = np.clip(proportional_alpha[soft_mask], 0.0, 1.0) * 255.0
-            # Solid core
-            solid_mask = fg_mask & (departure >= solid_tol)
-            final_alpha[solid_mask] = 255.0
+        for i in range(1, num_labels):
+            mask_i = (labels == i)
+            if not np.any(mask_i & is_ext_bg):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area >= min_cavity_area:
+                    mean_sat = np.mean(sat[mask_i])
+                    mean_val = np.mean(img_np[mask_i])
+                    if mean_sat < 25 and mean_val > 235:
+                        is_cavity_bg |= mask_i
+
+        is_true_bg = is_ext_bg | is_cavity_bg
+
+        if final_alpha is not None:
+            # Hybrid AI + Cavity Polish: ensure any enclosed pure-white studio cavity is 100% excised
+            final_alpha[is_cavity_bg] = 0.0
         else:
-            final_alpha[fg_mask] = 255.0
+            final_alpha = np.full((h, w), 255.0, dtype=np.float32)
+            final_alpha[is_true_bg] = 0.0
 
-        # Edge feathering if requested
+            fg_mask = ~is_true_bg
+            if preserve_vfx:
+                soft_mask = fg_mask & (departure > bg_tol) & (departure < solid_tol)
+                proportional_alpha = (departure - bg_tol) / max(1.0, (solid_tol - bg_tol))
+                final_alpha[soft_mask] = np.clip(proportional_alpha[soft_mask], 0.0, 1.0) * 255.0
+                solid_mask = fg_mask & ((departure >= solid_tol) | (departure <= bg_tol))
+                final_alpha[solid_mask] = 255.0
+            else:
+                final_alpha[fg_mask] = 255.0
+
+        # Snap high opacity to solid 255 and near-zero opacity to 0
+        final_alpha = np.where(final_alpha >= 240.0, 255.0, final_alpha)
+        final_alpha = np.where(final_alpha <= 8.0, 0.0, final_alpha)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 3. Soft VFX Preservation & Anti-Halo Defringing
+        # ─────────────────────────────────────────────────────────────────────
+        if preserve_vfx:
+            # Preserve bright glowing particles and magic sparkles that might have low opacity
+            hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+            diff_rgb = np.linalg.norm(target_bg - img_np.astype(np.float32), axis=2)
+            is_vivid_magic = (hsv[:, :, 1] > 60) & (diff_rgb > 35.0)
+            final_alpha = np.where(is_vivid_magic, np.maximum(final_alpha, 210.0), final_alpha)
+
         if feather_radius > 0:
             ksize = feather_radius * 2 + 1
             final_alpha = cv2.GaussianBlur(final_alpha, (ksize, ksize), 0)
@@ -150,12 +235,9 @@ def remove_background_alpha(
         out_rgb = img_np.copy().astype(np.float32)
 
         # White defringing (anti-halo / un-premultiply against pure white)
-        # Prevents milky/white halos around character silhouettes and glowing energy effects
         if defringe:
             alpha_norm = np.clip(final_alpha / 255.0, 0.0, 1.0)
             edge_or_vfx = (alpha_norm > 0.01) & (alpha_norm < 0.99)
-
-            # Un-premultiply: C_fg = (C_obs - (1 - a) * C_bg) / a
             a_denom = np.maximum(alpha_norm, 0.12)
             for c in range(3):
                 bg_val = target_bg[c]
@@ -168,6 +250,11 @@ def remove_background_alpha(
 
         final_rgb_u8 = np.clip(out_rgb, 0, 255).astype(np.uint8)
         final_alpha_u8 = np.clip(final_alpha, 0, 255).astype(np.uint8)
+
+        # Enhance specular highlights on metallic weapons (swords, blades)
+        if enhance_weapons:
+            final_rgb_u8 = enhance_metallic_weapons(final_rgb_u8, final_alpha_u8)
+
         rgba = np.dstack([final_rgb_u8, final_alpha_u8])
         return Image.fromarray(rgba, mode="RGBA")
 

@@ -174,8 +174,26 @@ class QwenImageEditModel:
         if pipe is None:
             raise RuntimeError("Could not load any Qwen Image Edit pipeline model.")
 
-        self.pipe = pipe.to("cuda")
-        print("[QwenImageEditModel] Pipeline loaded successfully in GPU VRAM (48GB L40S native execution).")
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # NEVER call pipe.to("cuda") here: the full Qwen-Image-Edit-2511 pipeline
+        # (20B transformer + 7B text encoder in bf16) exceeds the 44 GiB L40S VRAM.
+        try:
+            pipe.enable_model_cpu_offload()
+            print("[QwenImageEditModel] Pipeline loaded with enable_model_cpu_offload() (prevents CUDA OOM).")
+        except Exception as offload_err:
+            print(f"[QwenImageEditModel] enable_model_cpu_offload failed: {offload_err}; using enable_sequential_cpu_offload()...")
+            gc.collect()
+            torch.cuda.empty_cache()
+            pipe.enable_sequential_cpu_offload()
+        self.pipe = pipe
+        try:
+            self.pipe.vae.enable_tiling()
+        except Exception:
+            pass
+        print("[QwenImageEditModel] Pipeline ready for inference.")
 
     @modal.method()
     def generate(
