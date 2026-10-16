@@ -2072,7 +2072,13 @@ def sprites_ui_transition_phase3_to_phase4(char_state, current_choice):
     )
 
 
-def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Progress(track_tqdm=True)):
+def sprites_ui_animate_move(
+    choice_label,
+    anim_seed,
+    char_state,
+    resolution="832x832",
+    progress=gr.Progress(track_tqdm=True),
+):
     char_state = char_state or {}
     character_data = char_state.get("character") or {}
     moves = character_data.get("moves") or []
@@ -2116,6 +2122,7 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
             move_data=target_move,
             wan_seed=seed_val,
             progress_cb=cb,
+            resolution=resolution,
         )
         target_move["video_path"] = video_path
         moves[idx] = target_move
@@ -2124,9 +2131,10 @@ def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Pro
 
         move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
         mode_str = "🔁 Seamless Infinite Loop" if target_move["type"] == "loop" else "🎯 Return-to-Idle Recovery (FLF2V Anchor)"
+        res_str = target_move.get("resolution", "832x832")
         info = (
             f"### 🎬 Synthesized Move Animation: `{target_move['name']}` ({target_move['type'].upper()})\n"
-            f"- **Motion Mode:** `{mode_str}` | **Wan Seed:** `{seed_val}`\n"
+            f"- **Motion Mode:** `{mode_str}` | **Wan Seed:** `{seed_val}` | **VFX Canvas:** `{res_str}`\n"
             f"- **Saved Video Clip:** `{video_path}`\n"
             f"- **Choreography:** {target_move.get('description', '')}\n"
             f"- **Ready for Export:** Proceed to **Phase 4** to cut into transparent sprite sheet!"
@@ -2868,6 +2876,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     choices=[],
                                     interactive=True,
                                 )
+                                with gr.Row():
+                                    sprites_anim_resolution = gr.Dropdown(
+                                        label="📐 Animation Resolution & VFX Canvas (Divisible by 16)",
+                                        choices=[
+                                            "832x832 (1:1 Native Square — Recommended for Wide VFX & Combat Range)",
+                                            "1024x1024 (1:1 HD Square — Maximum VFX Resolution)",
+                                            "512x512 (1:1 Fast Square — Fast Iteration)",
+                                            "480x832 (9:16 Vertical Portrait)",
+                                        ],
+                                        value="832x832 (1:1 Native Square — Recommended for Wide VFX & Combat Range)",
+                                        interactive=True,
+                                    )
                                 with gr.Row():
                                     sprites_animate_single_btn = gr.Button("🎬 Animate Selected Move (Wan 2.2)", variant="primary", size="lg")
                                 sprites_anim_info = gr.Markdown("Select a move and click animate.")
@@ -3931,7 +3951,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     # Phase 3: Animate Selected Move with Wan 2.2
     sprites_animate_single_btn.click(
         fn=sprites_ui_animate_move,
-        inputs=[sprites_anim_target_move, sprites_anim_seed, sprites_state_store],
+        inputs=[sprites_anim_target_move, sprites_anim_seed, sprites_state_store, sprites_anim_resolution],
         outputs=[
             sprites_anim_video_preview,
             sprites_cut_target_move,

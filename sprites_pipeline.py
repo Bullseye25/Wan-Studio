@@ -233,28 +233,33 @@ GENRE_PRESETS: Dict[str, Dict[str, Any]] = {
                 "name": "3-Hit Light Attack Combo",
                 "type": "action",
                 "description": (
-                    "Shinobi: Art of Vengeance & SoR4 advancing 3-hit light flurry: "
-                    "(Hit 1) explosive darting slip-step forward with rapid slash -> "
-                    "(Hit 2) cross-stepping hip pivot into reverse-grip stab -> "
-                    "(Hit 3) low lunging spin-slice with magic sparks, followed by nimble backstep recovery to guard"
+                    "Fast-paced arcade 3-hit light flurry (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery): "
+                    "(Step 1, 0.0s-0.5s) explosive darting slip-step forward -> "
+                    "(Step 2, 0.5s-1.8s) rapid diagonal slash -> "
+                    "(Step 3, 1.8s-3.0s) cross-stepping hip pivot into reverse stab -> "
+                    "(Step 4, 3.0s-4.0s) lunging spin-cut finisher with magic sparks -> "
+                    "(Step 5, 4.0s-5.0s) nimble backstep recovery to guard"
                 ),
             },
             {
                 "name": "3-Hit Heavy Attack Combo",
                 "type": "action",
                 "description": (
-                    "Streets of Rage 4 & Shinobi advancing 3-hit heavy cleave combo: "
-                    "(Hit 1) heavy power step-in driving horizontal cleave -> "
-                    "(Hit 2) deep cross-step torso torque into crushing overhead slam -> "
-                    "(Hit 3) full-body advancing 360-degree whirlwind pivot cut causing knockdown, stepping back into guard"
+                    "Fast-paced arcade 3-hit heavy cleave combo (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery): "
+                    "(Step 1, 0.0s-0.5s) heavy power step-in advance -> "
+                    "(Step 2, 0.5s-1.8s) heavy horizontal cleave -> "
+                    "(Step 3, 1.8s-3.0s) deep cross-step torso torque into crushing overhead slam -> "
+                    "(Step 4, 3.0s-4.0s) full-body advancing 360-degree whirlwind cleave with flaming shockwaves -> "
+                    "(Step 5, 4.0s-5.0s) planted boot recovery backstep into guard"
                 ),
             },
             {
                 "name": "Heavy Double-Damage Charge Hit",
                 "type": "action",
                 "description": (
-                    "Deep crouched kinetic/magical charge windup followed by an explosive advancing power-lunge "
-                    "double-damage breaker cleave with shockwave and planted recovery step"
+                    "Classic Beat 'em Up 1.5s Hold-to-Charge Super Attack: (0.0s-1.5s) holds crouched charge gathering pulsating kinetic energy and flame aura -> "
+                    "(1.5s-4.0s) erupts forward into an explosive double-damage breaker hit with shockwaves -> "
+                    "(4.0s-5.0s) slides to a halt and recovers to idle guard"
                 ),
             },
             {
@@ -330,6 +335,72 @@ class SpritesPipeline:
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.sheets_dir = self.base_dir / "sheets"
         self.sheets_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def parse_resolution(resolution_input: Any) -> Tuple[int, int]:
+        """
+        Parses resolution string or tuple into standard (width, height) divisible by 16.
+        E.g. '832x832', '1080x1080', '1024x1024', '512x512', (832, 832).
+        """
+        if isinstance(resolution_input, (tuple, list)) and len(resolution_input) >= 2:
+            w, h = int(resolution_input[0]), int(resolution_input[1])
+        elif isinstance(resolution_input, str):
+            match = re.search(r'(\d+)\s*[xX*×]\s*(\d+)', resolution_input)
+            if match:
+                w, h = int(match.group(1)), int(match.group(2))
+            else:
+                w, h = 832, 832
+        else:
+            w, h = 832, 832
+
+        # Round to nearest multiple of 16 (minimum 256)
+        w = max(256, (w // 16) * 16)
+        h = max(256, (h // 16) * 16)
+        return w, h
+
+    @staticmethod
+    def pad_sprite_to_square_canvas(
+        pil_img: Image.Image,
+        target_size: Tuple[int, int] = (832, 832),
+        bg_color: Tuple[int, int, int] = (255, 255, 255),
+    ) -> Image.Image:
+        """
+        Intelligently places and scales a character sprite onto a square canvas (e.g. 832x832, 1024x1024, 512x512)
+        on pure seamless white studio background #FFFFFF with ample horizontal and vertical padding.
+        Leaves generous breathing room horizontally and vertically so sweeping sword arcs, advancing lunges,
+        and tall rising flaming dragon uppercuts never clip against the canvas boundaries.
+        """
+        target_w, target_h = target_size
+        canvas = Image.new("RGB", (target_w, target_h), bg_color)
+
+        img_w, img_h = pil_img.size
+        # Allow character to fill up to 72% of height and 60% of width
+        max_h = int(target_h * 0.72)
+        max_w = int(target_w * 0.60)
+        scale = min(max_w / max(1, img_w), max_h / max(1, img_h))
+        new_w = max(16, int(img_w * scale))
+        new_h = max(16, int(img_h * scale))
+
+        # Align dimensions to multiple of 16 for clean video diffusion
+        new_w = (new_w // 16) * 16
+        new_h = (new_h // 16) * 16
+        if new_w <= 0:
+            new_w = 16
+        if new_h <= 0:
+            new_h = 16
+
+        scaled = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        paste_x = (target_w - new_w) // 2
+        # Ground feet at ~88% of canvas height
+        paste_y = int(target_h * 0.88) - new_h
+        if paste_y < 16:
+            paste_y = max(0, (target_h - new_h) // 2)
+
+        if scaled.mode == "RGBA":
+            canvas.paste(scaled, (paste_x, paste_y), scaled)
+        else:
+            canvas.paste(scaled, (paste_x, paste_y))
+        return canvas
 
     def _resolve_model_tag(
         self,
@@ -871,24 +942,29 @@ class SpritesPipeline:
             )
         )
 
+        is_heavy = any(k in move_name.lower() for k in ("heavy", "cleave", "slam", "power", "crush")) or (
+            "heavy" in m_blob and not any(k in move_name.lower() for k in ("light", "quick", "iaido", "dash"))
+        )
+
         # 1. Light / Agile / Shinobi Combo Footwork (Shinobi: Art of Vengeance Canon)
-        if is_combo_or_strike and any(k in m_blob for k in ("light", "dagger", "kunai", "shinobi", "flurry", "twin", "iaido", "quick", "sprint dash")):
+        if is_combo_or_strike and not is_heavy and any(k in m_blob for k in ("light", "dagger", "kunai", "shinobi", "flurry", "twin", "iaido", "quick", "sprint dash")):
             active_w = s_weapon if ("light" in m_blob or "dagger" in m_blob) else arch_info["weapon_label"]
             steps = [
-                f"Step 1 (0.0s-1.2s — Shinobi Slip-Step & Opening Cut): Character explodes from guard with a low-crouch darting front-foot slip-step forward, closing distance while snapping {active_w} in a fast diagonal slash ({vfx_tag})",
-                f"Step 2 (1.2s-2.4s — Cross-Pivot Rotational Strike): Rear foot crosses aggressively ahead in a tight 180-degree hip-pivot step, propelling torso forward into a reverse-grip cross-slash/stab with {active_w}",
-                f"Step 3 (2.4s-3.7s — Acrobatic Lunge / Rising Somersault Finisher): Launches off the lead foot into a 'Shinobi: Art of Vengeance' lunging spin-slice or low-profile blitz thrust with {active_w} at peak extension",
-                f"Step 4 (3.7s-5.0s — Nimble Shadow-Hop Recovery): Executes a crisp athletic backstep hop, returning feet and weapons to the exact starting coordinate and {arch_info['idle_posture']} at t=5.0s",
+                f"Step 1 (0.0s-0.5s — Shinobi Slip-Step Advance): Character bursts from guard with an instantaneous darting front-foot slip-step forward, closing distance into point-blank range with zero delay",
+                f"Step 2 (0.5s-1.8s — Rapid High-Speed Flurry): Instantly snaps {active_w} in a blistering diagonal slash ({vfx_tag})",
+                f"Step 3 (1.8s-3.0s — Rotational Cross-Pivot Strike): Rear foot steps aggressively across in a tight 180-degree hip-pivot, driving torso forward into a reverse-grip cross-slice with {active_w}",
+                f"Step 4 (3.0s-4.0s — High-Impact Acrobatic Finisher): Launches off lead foot into a 'Shinobi: Art of Vengeance' lunging spin-slice or rising somersault blitz cut with {active_w} at peak extension, emitting bright energy bursts",
+                f"Step 5 (4.0s-5.0s — Nimble Shadow-Hop Recovery): Executes a crisp athletic backstep hop, returning feet and weapons to exact starting coordinates and {arch_info['idle_posture']} at t=5.0s",
             ]
             return {
                 "is_advancing_combo": True,
-                "combat_reference": "Shinobi: Art of Vengeance & Streets of Rage 4 (High-Speed Advancing Footwork)",
-                "footwork_style": "Agile darting slip-step -> rotational cross-pivot -> acrobatic lunge finisher -> nimble backstep recovery",
+                "combat_reference": "Shinobi: Art of Vengeance & Streets of Rage 4 (Fast-Paced Advancing Footwork)",
+                "footwork_style": "Agile darting slip-step -> rapid flurry -> rotational cross-pivot -> acrobatic lunge finisher -> nimble backstep recovery",
                 "active_weapon": active_w,
                 "ai_decision_reasoning": (
                     f"Light/agile attacks with {active_w} require high-velocity forward momentum and evasive agility. "
-                    "Instead of standing still and swinging arms, the AI pairs each strike with a 'Shinobi: Art of Vengeance' "
-                    "advancing slip-step, cross-pivot, and lunging finisher before hopping back to the origin anchor."
+                    "Following fast-paced arcade pacing (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery), the AI drives each strike with a "
+                    "'Shinobi: Art of Vengeance' advancing slip-step, cross-pivot, and lunging finisher before hopping back to the origin anchor."
                 ),
                 "step_sequence": steps,
             }
@@ -896,21 +972,30 @@ class SpritesPipeline:
         # 2. Heavy / Power / Sword / Brawler Combo Footwork (Streets of Rage 4 Canon)
         if is_combo_or_strike:
             active_w = p_weapon if ("heavy" in m_blob or "sword" in m_blob or "cleave" in m_blob) else arch_info["weapon_label"]
+            w_lower = (active_w or "").lower()
+            if any(k in w_lower for k in ("sword", "blade", "katana", "cleaver")):
+                climax_step = f"Step 4 (3.0s-4.0s — Flaming Blade Whirlwind Cleave): Commits full body torque into an advancing 360-degree whirlwind cleave with {active_w}, unleashing a blazing flaming blade wave and knockdown shockwaves"
+            elif any(k in w_lower for k in ("fist", "glove", "knuckle", "brawler", "bare")):
+                climax_step = f"Step 4 (3.0s-4.0s — Super Power Flaming Uppercut): Launches off lead boot into a classic Streets of Rage 4 'Grand Upper' rising flaming dragon uppercut with fire erupting skyward"
+            else:
+                climax_step = f"Step 4 (3.0s-4.0s — Devastating Breaker Finisher): Commits full body weight into an advancing 360-degree whirlwind pivot slam with {active_w} that detonates ground-cracking shockwaves"
+
             steps = [
-                f"Step 1 (0.0s-1.2s — Advancing Power Step & Cleave): Character stomps lead boot forward in a heavy 'Streets of Rage 4' power step-in, driving shoulder and hip weight into a wide opening cleave with {active_w}",
-                f"Step 2 (1.2s-2.4s — Torque Cross-Step & Crushing Follow-Up): Rear leg steps through across the centerline in an aggressive advancing cross-step, torquing the spine to haul {active_w} into a brutal second strike",
-                f"Step 3 (2.4s-3.7s — 360-Degree Whirlwind Pivot Step / Lunging Breaker): Commits full body weight into an advancing 360-degree tornado pivot step or deep lunging slam with {active_w} that unleashes knockdown shockwaves",
-                f"Step 4 (3.7s-5.0s — Planted Boot Recovery Step): Draws the lead boot back in a disciplined recovery step, re-centering weight at the exact origin coordinate and {arch_info['idle_posture']} at t=5.0s",
+                f"Step 1 (0.0s-0.5s — Advancing Power Step-In): Stomps lead boot forward in a heavy 'Streets of Rage 4' power step-in, instantly closing striking distance with zero sluggishness",
+                f"Step 2 (0.5s-1.8s — Crushing Opening Cleave): Drives shoulder and hip weight into a high-speed opening cleave with {active_w} ({vfx_tag})",
+                f"Step 3 (1.8s-3.0s — Torque Cross-Step Hammer): Rear leg steps through across centerline in an aggressive advancing cross-step, torquing torso to whip {active_w} into a brutal second strike",
+                climax_step,
+                f"Step 5 (4.0s-5.0s — Planted Boot Recovery Step): Draws lead boot back in a disciplined athletic recovery step, re-centering weight at exact origin coordinates and {arch_info['idle_posture']} at t=5.0s",
             ]
             return {
                 "is_advancing_combo": True,
-                "combat_reference": "Streets of Rage 4 & Shinobi: Art of Vengeance (Heavy Kinetic Step-and-Hit)",
-                "footwork_style": "Grounded power step-in -> torque cross-step -> 360 advancing pivot lunge -> planted recovery backstep",
+                "combat_reference": "Streets of Rage 4 & Shinobi: Art of Vengeance (Fast-Paced Heavy Step-and-Hit)",
+                "footwork_style": "Grounded power step-in -> opening cleave -> torque cross-step -> 360 advancing pivot lunge -> planted recovery backstep",
                 "active_weapon": active_w,
                 "ai_decision_reasoning": (
                     f"Heavy melee combos with {active_w} demand visible weight transfer and forward momentum. "
-                    "Following 'Streets of Rage 4' and 'Shinobi: Art of Vengeance' animation principles, every swing is propelled "
-                    "by a grounded power step-in, cross-step hip torque, and 360 pivot lunge so the character moves and hits dynamically."
+                    "Following Streets of Rage 4 & Shinobi fast-paced arcade pacing (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery), every swing is propelled "
+                    "by a grounded power step-in, cross-step hip torque, and 360 pivot lunge so the character moves and hits dynamically with zero delay."
                 ),
                 "step_sequence": steps,
             }
@@ -947,9 +1032,24 @@ class SpritesPipeline:
         idle_posture = arch["idle_posture"]
         is_loop = str(move_type).lower() == "loop"
 
+        weapon_tiers = cls.parse_weapons_and_combat_tiers(character_data)
+        p_weapon = weapon_tiers.get("primary_heavy_weapon") or weapon_label
+        s_weapon = weapon_tiers.get("secondary_light_weapon")
+
+        if s_weapon and s_weapon.lower() not in p_weapon.lower():
+            weapon_lock_text = (
+                f"strictly gripping {p_weapon} firmly in primary hand and {s_weapon} in off-hand across all frames. "
+                f"Both weapons are permanently locked in character's hands and MUST NEVER disappear, holster, or morph into bare fists"
+            )
+        else:
+            weapon_lock_text = (
+                f"strictly gripping {p_weapon} firmly in hand across all frames. "
+                f"The weapon is permanently locked in character's grip and MUST NEVER disappear, holster, or morph into bare hands"
+            )
+
         invariant_clause = (
             f"[Character & Weapon Invariants]: 2D game sprite of {char_name} ({appearance}, {art_style}), "
-            f"strictly preserving exact costume proportions, silhouette, and equipped {weapon_label} without morphing or vanishing."
+            f"strictly preserving exact costume proportions, silhouette, and {weapon_lock_text}."
         )
         m_lower = move_name.lower()
         footwork_info = cls.reason_combo_footwork_choreography(
@@ -975,11 +1075,21 @@ class SpritesPipeline:
                 f"Phase 3 (3.5s-5.0s): Seamlessly completes the step cycle so final frame at t=5.0s matches the initial contact stride pose perfectly for zero frame skipping."
             )
         elif "charge" in m_lower or "double damage" in m_lower:
+            w_lower = weapon_label.lower()
+            if any(k in w_lower for k in ("sword", "blade", "katana", "cleaver", "axe", "saber")):
+                climax_action = f"unleashing a colossal flaming blade cleave with fiery arc shockwave trails"
+            elif any(k in w_lower for k in ("fist", "glove", "knuckle", "brawler", "bare")):
+                climax_action = f"unleashing a super power rising flaming dragon uppercut with blazing vertical shockwaves"
+            elif s_weapon:
+                climax_action = f"unleashing an explosive dual-weapon cross-breaker slash combining {p_weapon} and {s_weapon} with blazing shockwaves"
+            else:
+                climax_action = f"unleashing a devastating double-damage breaker impact with radial ground shockwaves"
+
             timeline_clause = (
-                f"[Pre-Animation Timeline]: (Charged Advancing Breaker Attack — Streets of Rage 4 Canon) "
-                f"Phase 1 (0.0s-1.4s): Deep crouch windup anticipation, sliding back foot to brace as glowing energy gathers along {weapon_label}; "
-                f"Phase 2 (1.4s-3.6s): Explosive forward power-step lunge driving full body weight into a devastating double-damage breaker cleave with shockwave; "
-                f"Phase 3 (3.6s-5.0s): Crisp recovery backstep returning feet and weapon smoothly into starting {idle_posture}."
+                f"[Pre-Animation Timeline]: (Classic Beat 'em Up 1.5s Hold-to-Charge Super Attack) "
+                f"Phase 1 (0.0s-1.5s — The 1.5s Button-Hold Charge): Character plants boots in a deep grounded crouch, holding {weapon_label} cocked back in ready stance; glowing kinetic energy, crackling sparks, and heat aura gather and pulsate along the weapon, surging in visual power for 1.5 full seconds; "
+                f"Phase 2 (1.5s-4.0s — Explosive Super Hit Release): At t=1.5s, the charge erupts! Character explodes forward in a blinding dash, {climax_action}; "
+                f"Phase 3 (4.0s-5.0s — Athletic Recovery): Decisively slides to a halt, absorbs recoil, and steps back smoothly into exact starting {idle_posture}."
             )
         elif "dodge" in m_lower:
             timeline_clause = (
@@ -991,8 +1101,9 @@ class SpritesPipeline:
         elif not is_loop and footwork_info["is_advancing_combo"]:
             steps_joined = "; ".join(footwork_info["step_sequence"])
             timeline_clause = (
-                f"[Pre-Animation Timeline]: (Kinetic Advancing Combo Footwork — {footwork_info['combat_reference']}) "
-                f"CRITICAL MOVE-AND-HIT RULE: NEVER stand still with glued feet while swinging; every hit in {move_name} MUST propel the body with dynamic footwork ({move_description}). "
+                f"[Pre-Animation Timeline]: (Fast-Paced Kinetic Advancing Combo — {footwork_info['combat_reference']}) "
+                f"FAST-PACED ARCADE CADENCE (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery): "
+                f"CRITICAL MOVE-AND-HIT RULE: NEVER stand still with glued feet while swinging; every strike in {move_name} MUST dynamically propel the body forward ({move_description}) with zero sluggishness or slow-motion. "
                 f"{steps_joined}."
             )
         elif is_loop:
@@ -1064,19 +1175,23 @@ class SpritesPipeline:
                 (
                     "3-Hit Light Attack Combo",
                     "action",
-                    f"Shinobi: Art of Vengeance advancing 3-strike flurry with {s_w}: (Step 1) darting front-foot slip-step with quick slash -> "
-                    f"(Step 2) cross-stepping hip pivot into reverse stab -> (Step 3) lunging spin-slice upward flare{vfx_clause}, nimble backstep recovery to guard",
+                    f"Shinobi: Art of Vengeance & SoR4 fast-paced arcade 3-strike flurry with {s_w} (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery): (Step 1, 0.0s-0.5s) darting front-foot slip-step advance -> "
+                    f"(Step 2, 0.5s-1.8s) rapid diagonal slash -> (Step 3, 1.8s-3.0s) cross-stepping hip pivot into reverse stab -> "
+                    f"(Step 4, 3.0s-4.0s) lunging spin-slice upward flare{vfx_clause} -> (Step 5, 4.0s-5.0s) nimble backstep recovery to guard",
                 ),
                 (
                     "3-Hit Heavy Attack Combo",
                     "action",
-                    f"Streets of Rage 4 advancing 3-strike cleave with {p_w}: (Step 1) heavy power step-in horizontal cleave -> "
-                    f"(Step 2) deep cross-step torso torque into overhead slam -> (Step 3) full-body advancing 360-degree whirlwind spin cut causing knockdown, stepping back to guard",
+                    f"Streets of Rage 4 & Shinobi fast-paced arcade 3-strike cleave with {p_w} (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery): (Step 1, 0.0s-0.5s) heavy power step-in advance -> "
+                    f"(Step 2, 0.5s-1.8s) horizontal cleave -> (Step 3, 1.8s-3.0s) deep cross-step torso torque into overhead slam -> "
+                    f"(Step 4, 3.0s-4.0s) full-body advancing 360-degree whirlwind cleave causing knockdown with flaming shockwaves -> (Step 5, 4.0s-5.0s) stepping back to guard",
                 ),
                 (
                     "Heavy Double-Damage Charge Hit",
                     "action",
-                    f"Braces back foot and channels kinetic energy into {p_w} with a bright charge aura before exploding forward in a lunging double-damage breaker cleave with shockwave",
+                    f"Classic Beat 'em Up 1.5s Hold-to-Charge Super Attack: (0.0s-1.5s) holds crouched charge gathering fiery kinetic energy along {p_w} and {s_w} -> "
+                    f"(1.5s-4.0s) erupts forward into an explosive dual-blade cross-breaker slash with blazing shockwaves -> "
+                    f"(4.0s-5.0s) slides to a halt and recovers smoothly to dual-wield guard",
                 ),
                 (
                     "Sprint Dash Light Strike",
@@ -1678,17 +1793,20 @@ class SpritesPipeline:
         move_data: Dict[str, Any],
         wan_seed: int = 42,
         progress_cb: Optional[Callable[[float, str], None]] = None,
+        resolution: Any = (832, 832),
     ) -> str:
         """
         Synthesizes a 5-second video clip using Wan 2.2 on Modal.
         For Locomotion loops: anchors Frame 0 & Frame 80 to Qwen Stride Keyframe (Zero Frame Skipping).
         For Idle loops: anchors Frame 0 & Frame 80 to Master Sprite (Sine-wave cyclic breathing).
         For Action moves: anchors Frame 0 & Frame 80 to Master Sprite (Clean return-to-idle).
+        Uses intelligent square canvas padding (e.g. 832x832 or 1024x1024) to ensure wide VFX and weapon sweeps never clip.
         """
         anim_name = move_data.get("name", "move")
         is_loop = move_data.get("type", "loop") == "loop"
         char_name = character_data.get("name", "Character")
         is_locomotion_loop = is_loop and any(k in anim_name.lower() for k in ("walk", "sprint", "run", "dash"))
+        target_w, target_h = self.parse_resolution(resolution)
 
         master_sprite_path = character_data.get("master_sprite_path")
         master_sprite_pil = character_data.get("master_sprite_pil")
@@ -1711,15 +1829,15 @@ class SpritesPipeline:
             master_sprite_path = str(temp_path)
             character_data["master_sprite_path"] = master_sprite_path
 
-        # Dual keyframe preparation
+        # Dual keyframe preparation with intelligent square canvas padding (guaranteeing VFX and reach room)
         if is_locomotion_loop:
             if progress_cb:
                 progress_cb(0.10, f"Synthesizing Qwen stride contact keyframe for '{anim_name}'...")
             stride_pil = self.synthesize_stride_keyframe_with_qwen(character_data, move_name=anim_name)
-            start_sprite = stride_pil.resize((480, 832), Image.Resampling.LANCZOS)
+            start_sprite = self.pad_sprite_to_square_canvas(stride_pil, target_size=(target_w, target_h))
             last_sprite = start_sprite  # Matching stride contact pose at start and end eliminates frame skipping
         else:
-            start_sprite = master_sprite_pil.resize((480, 832), Image.Resampling.LANCZOS)
+            start_sprite = self.pad_sprite_to_square_canvas(master_sprite_pil, target_size=(target_w, target_h))
             last_sprite = start_sprite  # Anchors return-to-idle for actions, or closed cyclic loop for resting idle
 
         # Compile Wan prompt
@@ -1729,7 +1847,7 @@ class SpritesPipeline:
         elif is_loop:
             loop_clause = "seamless cyclic breathing loop, continuous motion, start resting stance matches end resting stance"
         else:
-            loop_clause = "starts in resting idle pose, performs dynamic action, cleanly recovers back to resting idle pose at end"
+            loop_clause = "starts in resting idle pose, performs dynamic fast-paced arcade action, cleanly recovers back to resting idle pose at end"
 
         full_wan_prompt = (
             f"2D game sprite animation of {char_name} executing {anim_name}: {refined_wan}. "
@@ -1737,8 +1855,31 @@ class SpritesPipeline:
             f"on pure flat solid seamless white studio background #FFFFFF, high-key studio lighting, no floor shadows, clean outline"
         )
 
+        # Dynamic weapon retention and anti-disappearing negative prompt
+        weapon_tiers = self.parse_weapons_and_combat_tiers(character_data)
+        p_w = (weapon_tiers.get("primary_heavy_weapon") or "").strip()
+        s_w = (weapon_tiers.get("secondary_light_weapon") or "").strip()
+        weapon_loss_negatives = [
+            "disappearing weapons", "dropping weapon", "missing weapon",
+            "empty hands", "bare hands", "bare fist", "hands merging",
+            "morphing weapon", "holster", "sheathing", "weapon fading out",
+            "sluggish movement", "slow motion", "floaty animation", "hesitating",
+            "low action", "static posture", "frozen limbs"
+        ]
+        if p_w:
+            weapon_loss_negatives.extend([f"missing {p_w}", f"vanishing {p_w}", f"dropping {p_w}"])
+        if s_w:
+            weapon_loss_negatives.extend([f"missing {s_w}", f"vanishing {s_w}", f"dropping {s_w}"])
+
+        dynamic_negative_prompt = (
+            "camera motion, camera pan, camera tilt, zoom, dynamic background, complex background, "
+            "scenery, floor shadows, ground clutter, perspective shift, rotation, 3d camera orbit, "
+            "dark background, colored background, green screen, chroma green, "
+            + ", ".join(weapon_loss_negatives)
+        )
+
         if progress_cb:
-            progress_cb(0.15, f"Synthesizing '{anim_name}' with Wan 2.2 FLF2V (Seed {wan_seed})...")
+            progress_cb(0.15, f"Synthesizing '{anim_name}' with Wan 2.2 FLF2V at {target_w}x{target_h} (Seed {wan_seed})...")
 
         def _safe_progress(pct, *args, **kwargs):
             if not progress_cb:
@@ -1766,11 +1907,7 @@ class SpritesPipeline:
             processed_last_image=last_sprite,
             prompt=full_wan_prompt,
             steps=8,
-            negative_prompt=(
-                "camera motion, camera pan, camera tilt, zoom, dynamic background, complex background, "
-                "scenery, floor shadows, ground clutter, perspective shift, rotation, 3d camera orbit, "
-                "dark background, colored background, green screen, chroma green"
-            ),
+            negative_prompt=dynamic_negative_prompt,
             num_frames=81,  # 81 frames @ 16 fps ≈ 5.06s
             guidance_scale=2.0,
             guidance_scale_2=1.5,
@@ -1784,6 +1921,8 @@ class SpritesPipeline:
             deflicker_frames=True,
             progress=_safe_progress,
             last_frame_image=last_sprite,
+            width=target_w,
+            height=target_h,
             save_dir=str(self.clips_dir),
             output_filename=clip_filename,
         )
@@ -1799,6 +1938,7 @@ class SpritesPipeline:
 
         move_data["video_path"] = final_clip_path
         move_data["wan_seed"] = wan_seed
+        move_data["resolution"] = f"{target_w}x{target_h}"
 
         if progress_cb:
             progress_cb(1.0, f"Animation '{anim_name}' synthesized successfully -> {final_clip_path}")

@@ -789,6 +789,133 @@ class TestSpritesUIHandlers(unittest.TestCase):
             self.assertTrue(str(result_path).endswith(expected_filename))
             self.assertIn("clips", Path(result_path).parts)
 
+    def test_fast_paced_combo_cadence_timing(self):
+        """Tests that combo prompts enforce the fast-paced arcade cadence (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery)."""
+        hero_data = {
+            "name": "Eric",
+            "signature_gear": "dual edge sword and a small magic Red dagger",
+            "appearance": "Hero in broken copper armor",
+        }
+        pipeline = SpritesPipeline()
+        light_prompt = pipeline.build_pre_animation_wan_prompt(
+            character_data=hero_data,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            move_name="3-Hit Light Attack Combo",
+            move_type="action",
+            move_description="Rapid dagger flurry",
+        )
+        self.assertIn("FAST-PACED ARCADE CADENCE (0.5s step-in -> 3.5s rapid combat -> 1.0s recovery)", light_prompt)
+        self.assertIn("Step 1 (0.0s-0.5s", light_prompt)
+        self.assertIn("Step 2 (0.5s-1.8s", light_prompt)
+        self.assertIn("Step 3 (1.8s-3.0s", light_prompt)
+        self.assertIn("Step 4 (3.0s-4.0s", light_prompt)
+        self.assertIn("Step 5 (4.0s-5.0s", light_prompt)
+        self.assertIn("zero sluggishness or slow-motion", light_prompt)
+
+    def test_1_5_second_hold_to_charge_super_attack(self):
+        """Tests classic beat 'em up 1.5s button-hold energy charge and explosive weapon-tailored release."""
+        # 1. Swordsman test
+        sword_hero = {
+            "name": "Arthur",
+            "signature_gear": "excalibur sword",
+            "appearance": "Knight with broadsword",
+        }
+        pipeline = SpritesPipeline()
+        sword_prompt = pipeline.build_pre_animation_wan_prompt(
+            character_data=sword_hero,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            move_name="Heavy Double-Damage Charge Hit",
+            move_type="action",
+            move_description="Crouched charge release",
+        )
+        self.assertIn("Classic Beat 'em Up 1.5s Hold-to-Charge Super Attack", sword_prompt)
+        self.assertIn("Phase 1 (0.0s-1.5s — The 1.5s Button-Hold Charge)", sword_prompt)
+        self.assertIn("Phase 2 (1.5s-4.0s — Explosive Super Hit Release)", sword_prompt)
+        self.assertIn("flaming blade cleave", sword_prompt)
+
+        # 2. Brawler / Fist test
+        brawler = {
+            "name": "Axel",
+            "signature_gear": "bare fists and leather gloves",
+            "appearance": "Street brawler in jeans",
+        }
+        fist_prompt = pipeline.build_pre_animation_wan_prompt(
+            character_data=brawler,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            move_name="Heavy Double-Damage Charge Hit",
+            move_type="action",
+            move_description="Crouched charge release",
+        )
+        self.assertIn("Classic Beat 'em Up 1.5s Hold-to-Charge Super Attack", fist_prompt)
+        self.assertIn("flaming dragon uppercut", fist_prompt)
+
+    def test_weapon_retention_lock_and_dynamic_negative_prompts(self):
+        """Tests that both weapons are strictly locked in hand invariants and weapon-loss tokens are dynamically injected into negative prompts."""
+        hero_data = {
+            "name": "Eric",
+            "signature_gear": "dual edge sword and a small magic Red dagger",
+            "appearance": "Hero in broken copper armor",
+        }
+        pipeline = SpritesPipeline()
+        prompt = pipeline.build_pre_animation_wan_prompt(
+            character_data=hero_data,
+            genre="Beat 'em Up (Streets of Rage / Final Fight)",
+            move_name="3-Hit Heavy Attack Combo",
+            move_type="action",
+            move_description="Heavy cleave",
+        )
+        self.assertIn("strictly gripping dual edge sword firmly in primary hand and small magic red dagger in off-hand across all frames", prompt)
+        self.assertIn("Both weapons are permanently locked in character's hands and MUST NEVER disappear", prompt)
+
+        # Verify dynamic negative prompts constructed in synthesize_animation_clip
+        with patch("sprites_pipeline.run_remote_inference") as mock_wan:
+            mock_wan.return_value = ("output/clip.mp4", 42)
+            dummy_img = Image.new("RGB", (64, 64), (255, 255, 255))
+            char_data = dict(hero_data)
+            char_data["master_sprite_pil"] = dummy_img
+            move_data = {"name": "Test Move", "type": "action", "description": "Test"}
+            pipeline.synthesize_animation_clip(char_data, move_data)
+
+            call_kwargs = mock_wan.call_args[1]
+            neg_p = call_kwargs["negative_prompt"]
+            self.assertIn("disappearing weapons", neg_p)
+            self.assertIn("missing dual edge sword", neg_p)
+            self.assertIn("missing small magic red dagger", neg_p)
+            self.assertIn("vanishing dual edge sword", neg_p)
+            self.assertIn("bare hands", neg_p)
+
+    def test_square_canvas_padding_and_vfx_resolution(self):
+        """Tests intelligent square canvas padding (e.g. 832x832 or 512x512) on pure white studio background with generous VFX reach room."""
+        # Test parse_resolution
+        w1, h1 = SpritesPipeline.parse_resolution("832x832")
+        self.assertEqual((w1, h1), (832, 832))
+
+        w2, h2 = SpritesPipeline.parse_resolution("1080x1080")
+        self.assertEqual(w2 % 16, 0)
+        self.assertEqual(h2 % 16, 0)
+        self.assertEqual(w2, 1072)
+
+        w3, h3 = SpritesPipeline.parse_resolution("512x512")
+        self.assertEqual((w3, h3), (512, 512))
+
+        # Test pad_sprite_to_square_canvas
+        dummy_tall_sprite = Image.new("RGBA", (200, 400), (0, 0, 0, 255))
+        padded = SpritesPipeline.pad_sprite_to_square_canvas(dummy_tall_sprite, target_size=(832, 832))
+        self.assertEqual(padded.size, (832, 832))
+
+        # Check pure white border pixels
+        corners = [
+            padded.getpixel((0, 0)),
+            padded.getpixel((831, 0)),
+            padded.getpixel((0, 831)),
+            padded.getpixel((831, 831)),
+            padded.getpixel((10, 416)),  # left margin
+            padded.getpixel((821, 416)), # right margin
+            padded.getpixel((416, 10)),  # top margin
+        ]
+        for c in corners:
+            self.assertEqual(c, (255, 255, 255))
+
 
 if __name__ == "__main__":
     unittest.main()
