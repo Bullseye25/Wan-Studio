@@ -22,6 +22,8 @@ from studio_pipeline import (
     generate_three_studio_seeds,
     restore_extracted_video_frame,
 )
+from sprites_pipeline import SpritesPipeline, GENRE_PRESETS
+from sprite_cutter import process_video_to_sprite_sheet
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -1397,6 +1399,238 @@ def studio_run_step4(
         return None, f"### ❌ Step 5 Error\n`{e}`", current_state
 
 
+# ── Sprites Creator Studio Handlers ──────────────────────────────────────────
+
+def sprites_ui_refine_character(user_concept, genre, art_style, api_key, model):
+    pipeline = SpritesPipeline(api_key=api_key, model=model)
+    try:
+        refined = pipeline.refine_character_with_gemma(
+            user_input=user_concept or "Arcade protagonist",
+            genre=genre,
+            art_style=art_style,
+        )
+        status = f"### ✨ Gemma Refined 2D Game Character: `{refined.get('name')}`\nGenre: `{genre}` | Style: `{art_style}`"
+        return (
+            refined.get("name", "Hero"),
+            refined.get("title", ""),
+            refined.get("appearance", ""),
+            refined.get("signature_gear", ""),
+            refined.get("z_image_prompt", ""),
+            status,
+        )
+    except Exception as e:
+        return "Hero", "Arcade Fighter", user_concept, "Standard Gear", "", f"### ⚠️ Gemma Refine Error\n`{e}`"
+
+
+def sprites_ui_generate_master_sprite(
+    name, title, appearance, gear, z_prompt, seed, genre, art_style, api_key, model, current_state
+):
+    pipeline = SpritesPipeline(api_key=api_key, model=model)
+    char_data = {
+        "name": name or "Hero",
+        "title": title or "Arcade Fighter",
+        "appearance": appearance or "",
+        "signature_gear": gear or "",
+        "z_image_prompt": z_prompt or f"2D game character sheet of {name}",
+        "genre": genre,
+        "art_style": art_style,
+    }
+    try:
+        pil_img, local_path = pipeline.synthesize_master_character_sprite(char_data, seed=int(seed))
+        char_data["master_sprite_pil"] = pil_img
+        char_data["master_sprite_path"] = local_path
+        char_data["master_seed"] = int(seed)
+
+        # Initialize default move-set from genre template
+        moves = SpritesPipeline.get_default_moves_for_genre(genre)
+        char_data["moves"] = moves
+
+        current_state = current_state or {}
+        current_state["character"] = char_data
+
+        move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+        status = (
+            f"### 🎨 Master 2D Sprite Generated: `{name}` (Seed {seed})\n"
+            f"Isolated on Chroma Key Green. Initialized `{len(moves)}` default moves for `{genre}`."
+        )
+        first_choice = move_choices[0] if move_choices else None
+        return (
+            local_path,
+            gr.update(choices=move_choices, value=first_choice),
+            gr.update(choices=move_choices, value=first_choice),
+            gr.update(choices=move_choices, value=first_choice),
+            moves,
+            status,
+            current_state,
+        )
+    except Exception as e:
+        return None, gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(choices=[], value=None), [], f"### ❌ Sprite Generation Error\n`{e}`", current_state
+
+
+def sprites_ui_refine_custom_anim(char_state, genre, custom_name, custom_desc, custom_type, api_key, model):
+    character_data = (char_state or {}).get("character", {})
+    if not character_data:
+        return "", f"### ⚠️ Please generate a master character sprite first in Phase 1."
+    anim_type = "loop" if "loop" in str(custom_type).lower() else "action"
+    pipeline = SpritesPipeline(api_key=api_key, model=model)
+    try:
+        plan = pipeline.refine_custom_animation_with_gemma(
+            character_data=character_data,
+            genre=genre,
+            anim_name=custom_name or "Custom Move",
+            raw_description=custom_desc or "Dynamic movement",
+            anim_type=anim_type,
+        )
+        status = f"### ✨ Gemma Directed Move: `{custom_name}` ({anim_type.upper()})\n{plan.get('action_summary')}"
+        return plan.get("wan_prompt", ""), status
+    except Exception as e:
+        return "", f"### ⚠️ Gemma Move Refine Error\n`{e}`"
+
+
+def sprites_ui_add_custom_anim(char_state, custom_name, custom_desc, custom_type, refined_prompt):
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    if not character_data:
+        return gr.update(), gr.update(), gr.update(), [], "### ⚠️ Please generate a master character sprite first in Phase 1.", char_state
+
+    moves = list(character_data.get("moves", []))
+    anim_type = "loop" if "loop" in str(custom_type).lower() else "action"
+    new_id = f"custom_move_{len(moves) + 1}"
+    name_str = custom_name.strip() if custom_name and custom_name.strip() else f"Custom Move {len(moves)+1}"
+    new_move = {
+        "id": new_id,
+        "name": name_str,
+        "type": anim_type,
+        "description": custom_desc or "",
+        "refined_prompt": refined_prompt or custom_desc or "",
+        "wan_seed": 42 + len(moves) * 1007,
+        "video_path": None,
+        "sheet_path": None,
+        "json_path": None,
+    }
+    moves.append(new_move)
+    character_data["moves"] = moves
+    char_state["character"] = character_data
+
+    move_choices = [f"{m['name']} ({m['type'].upper()})" for m in moves]
+    chosen = move_choices[-1]
+    status = f"### ➕ Added Custom Move: `{name_str}` ({anim_type.upper()}) to move-set (Total moves: {len(moves)})."
+    return (
+        gr.update(choices=move_choices, value=chosen),
+        gr.update(choices=move_choices, value=chosen),
+        gr.update(choices=move_choices, value=chosen),
+        moves,
+        status,
+        char_state,
+    )
+
+
+def sprites_ui_load_move_details(choice_label, char_state):
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = character_data.get("moves", [])
+    if not moves or not choice_label:
+        return "No move selected.", None
+    for m in moves:
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            v_path = m.get("video_path")
+            rule = "🔁 Infinite Seamless Loop" if m["type"] == "loop" else "🎯 Action & Combo (Returns to Idle Posture @ Final Frame)"
+            info = (
+                f"### 🎯 Selected Move: `{m['name']}` ({m['type'].upper()})\n"
+                f"- **Motion Rule:** {rule}\n"
+                f"- **Choreography:** {m.get('description', '')}\n"
+                f"- **Prompt:** `{m.get('refined_prompt', '')}`\n"
+                f"- **Animation Status:** {'✅ Rendered (' + os.path.basename(v_path) + ')' if (v_path and os.path.exists(v_path)) else '⏳ Not yet animated'}"
+            )
+            return info, v_path if (v_path and os.path.exists(v_path)) else None
+    return "Move details not found.", None
+
+
+def sprites_ui_animate_move(choice_label, anim_seed, char_state, progress=gr.Progress(track_tqdm=True)):
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = character_data.get("moves", [])
+    if not character_data or not moves:
+        return None, "### ⚠️ Please complete Phase 1 and Phase 2 first.", char_state
+
+    idx = 0
+    for i, m in enumerate(moves):
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            idx = i
+            break
+    target_move = moves[idx]
+
+    pipeline = SpritesPipeline()
+    try:
+        def cb(pct, msg):
+            try:
+                progress(pct, desc=msg)
+            except Exception:
+                pass
+
+        video_path = pipeline.synthesize_animation_clip(
+            character_data=character_data,
+            move_data=target_move,
+            wan_seed=int(anim_seed),
+            progress_cb=cb,
+        )
+        moves[idx] = target_move
+        character_data["moves"] = moves
+        char_state["character"] = character_data
+
+        mode_str = "Seamless Infinite Loop" if target_move["type"] == "loop" else "Return-to-Idle Recovery (FLF2V)"
+        status = (
+            f"### 🎬 Synthesized Move Animation: `{target_move['name']}` ({target_move['type'].upper()})\n"
+            f"- **Motion Mode:** `{mode_str}` | **Seed:** `{anim_seed}`\n"
+            f"- **Saved Video:** `{pathlib.Path(video_path).name}`"
+        )
+        return video_path, gr.update(value=choice_label), status, char_state
+    except Exception as e:
+        return None, gr.update(), f"### ❌ Animation Synthesis Error\n`{e}`", char_state
+
+
+def sprites_ui_cut_sprite_sheet(choice_label, target_fps, chroma_tol, char_state):
+    char_state = char_state or {}
+    character_data = char_state.get("character", {})
+    moves = character_data.get("moves", [])
+    if not character_data or not moves:
+        return None, {}, None, None, "### ⚠️ Please animate a move in Phase 3 first.", char_state
+
+    idx = 0
+    for i, m in enumerate(moves):
+        label = f"{m['name']} ({m['type'].upper()})"
+        if choice_label == label or m["name"] in str(choice_label):
+            idx = i
+            break
+    target_move = moves[idx]
+    video_path = target_move.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        return None, {}, None, None, f"### ⚠️ Please animate `{target_move['name']}` in Phase 3 first.", char_state
+
+    pipeline = SpritesPipeline()
+    try:
+        res = pipeline.cut_and_export_sprite_sheet(
+            character_data=character_data,
+            move_data=target_move,
+            target_fps=int(target_fps),
+            chroma_tolerance=float(chroma_tol),
+        )
+        moves[idx] = target_move
+        character_data["moves"] = moves
+        char_state["character"] = character_data
+
+        status = (
+            f"### ✂️ Sprite Sheet Packed: `{target_move['name']}` ({res['frame_count']} frames @ {target_fps} FPS)\n"
+            f"- **PNG Atlas:** `{pathlib.Path(res['sheet_path']).name}`\n"
+            f"- **Engine Manifest:** `{pathlib.Path(res['json_path']).name}`"
+        )
+        return res["sheet_image"], res["metadata"], res["sheet_path"], res["json_path"], status, char_state
+    except Exception as e:
+        return None, {}, None, None, f"### ❌ Sprite Cutter Error\n`{e}`", char_state
+
+
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
 with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
@@ -1418,10 +1652,210 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         expand_all_btn = gr.Button("🔽 Expand All Tools", variant="secondary", size="sm")
         collapse_all_btn = gr.Button("🔼 Collapse All Tools", variant="secondary", size="sm")
 
-    # ── Tool 3 (Primary): 4-Phase Interactive AI Filmmaking Studio Wizard ─────
+    # ── Tool 0 (Flagship): Universal 2D Game Sprites Creator Studio ──────────
+    with gr.Accordion(
+        "🎮 2D Game Sprites Creator Studio — Multi-Genre Asset Pipeline (Action Runner, Mega Man X, RPG, Shmup, Beat 'em Up)",
+        open=True,
+        elem_classes="tool-accordion sprites-panel",
+    ) as sprites_accordion:
+        gr.Markdown(
+            "### 🎮 Universal 2D Game Sprites Creator · Gemma 4: 31B ➔ Z-Image Turbo ➔ Wan 2.2 ➔ Transparent Sprite Sheet",
+            elem_classes="section-header",
+        )
+
+        sprites_state_store = gr.State({})
+
+        with gr.Group():
+            with gr.Row():
+                sprites_genre = gr.Dropdown(
+                    label="🕹️ Game Genre / Perspective Archetype",
+                    choices=list(GENRE_PRESETS.keys()),
+                    value="Action Runner (Pepsiman / Crash Bandicoot)",
+                    scale=2,
+                )
+                sprites_art_style = gr.Dropdown(
+                    label="🎨 Art Aesthetic Style",
+                    choices=[
+                        "16-bit arcade pixel art style",
+                        "Hand-drawn 2D anime cel style",
+                        "2.5D stylized rendered sprite",
+                        "Classic retro 8-bit NES style",
+                        "High-res modern vector arcade style",
+                    ],
+                    value="16-bit arcade pixel art style",
+                    scale=1,
+                )
+                sprites_char_seed = gr.Number(
+                    value=42, precision=0, label="🎲 Character Seed", scale=1
+                )
+                sprites_anim_seed = gr.Number(
+                    value=8888, precision=0, label="🎲 Animation Seed", scale=1
+                )
+
+            with gr.Accordion("🔑 Gemma 4: 31B Cloud API Settings", open=False):
+                with gr.Row():
+                    sprites_ollama_key = gr.Textbox(
+                        label="Ollama API Key",
+                        value=DEFAULT_OLLAMA_API_KEY,
+                        type="password",
+                        scale=3,
+                    )
+                    sprites_ollama_model = gr.Textbox(
+                        label="Model Tag",
+                        value=DEFAULT_OLLAMA_MODEL,
+                        scale=1,
+                    )
+
+        sprites_status = gr.Markdown("### 🕹️ Ready. Enter a character concept below to begin Phase 1.")
+
+        with gr.Tabs() as sprites_wizard_tabs:
+            # ─────────────────────────────────────────────────────────────
+            # Phase 1: Character Genesis
+            # ─────────────────────────────────────────────────────────────
+            with gr.TabItem("1️⃣ Phase 1: Character Genesis", id="sprites_phase1"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        sprites_user_concept = gr.Textbox(
+                            label="Character Concept / Details",
+                            placeholder="e.g. Silver metallic runner with blue logo on chest, athletic build, running sneakers, energetic hero personality",
+                            lines=3,
+                        )
+                        with gr.Row():
+                            sprites_refine_char_btn = gr.Button("✨ Refine Character with Gemma 4: 31B", variant="secondary")
+                            sprites_gen_char_btn = gr.Button("🎨 Generate Master 2D Sprite", variant="primary")
+
+                        with gr.Row():
+                            sprites_char_name = gr.Textbox(label="Character Name", value="Pepsi_Hero", scale=1)
+                            sprites_char_title = gr.Textbox(label="Title / Archetype", value="Endless Obstacle Runner", scale=1)
+                        sprites_char_appearance = gr.Textbox(label="Visual Description & Outfit", lines=2)
+                        sprites_char_gear = gr.Textbox(label="Signature Gear / Item", lines=1)
+                        sprites_char_prompt = gr.Textbox(label="Z-Image Prompt (Chroma Key Green #00FF00)", lines=2)
+
+                    with gr.Column(scale=1):
+                        sprites_char_preview = gr.Image(
+                            label="Master 2D Sprite Preview (Isolated on Solid Chroma Green)",
+                            height=380,
+                            interactive=False,
+                        )
+                        sprites_phase1_next_btn = gr.Button(
+                            "✅ Validate Character & Proceed to Move Choreography ➔",
+                            variant="primary",
+                            size="lg",
+                        )
+
+            # ─────────────────────────────────────────────────────────────
+            # Phase 2: Move Choreography & Custom Animation Creator
+            # ─────────────────────────────────────────────────────────────
+            with gr.TabItem("2️⃣ Phase 2: Move Choreography & Custom Creator", id="sprites_phase2"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 📋 Active Character Move-Set")
+                        sprites_move_selector = gr.Dropdown(
+                            label="Select Move to Inspect / Animate",
+                            choices=[],
+                            interactive=True,
+                        )
+                        sprites_moves_json = gr.JSON(label="Move-Set Registry")
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### ➕ Add Custom Animation")
+                        sprites_custom_name = gr.Textbox(
+                            label="Custom Animation Name",
+                            placeholder="e.g. Soda Can Chug, Hadouken Blast, Double Backflip...",
+                        )
+                        sprites_custom_desc = gr.Textbox(
+                            label="Movement & Behavior Description",
+                            placeholder="Describe what the character does in plain natural language...",
+                            lines=2,
+                        )
+                        sprites_custom_type = gr.Radio(
+                            label="Animation Motion Rule",
+                            choices=["🎯 Action (Return to Idle Stance)", "🔁 Seamless Looping Cycle"],
+                            value="🎯 Action (Return to Idle Stance)",
+                        )
+                        sprites_custom_refined_prompt = gr.Textbox(
+                            label="Refined Wan Choreography Prompt",
+                            lines=2,
+                            placeholder="Click 'Direct & Refine with Gemma' to compile micro-choreography prompt...",
+                        )
+                        with gr.Row():
+                            sprites_refine_custom_btn = gr.Button("✨ Direct & Refine with Gemma", variant="secondary")
+                            sprites_add_custom_btn = gr.Button("➕ Add to Character's Move-Set", variant="primary")
+
+                with gr.Row():
+                    sprites_phase2_back_btn = gr.Button("⬅️ Back to Phase 1", variant="secondary")
+                    sprites_phase2_next_btn = gr.Button("✅ Proceed to Phase 3: Wan 2.2 Animation Studio ➔", variant="primary")
+
+            # ─────────────────────────────────────────────────────────────
+            # Phase 3: Wan 2.2 Animation Studio
+            # ─────────────────────────────────────────────────────────────
+            with gr.TabItem("3️⃣ Phase 3: Wan 2.2 Animation Studio", id="sprites_phase3"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        sprites_anim_target_move = gr.Dropdown(
+                            label="Select Move to Animate with Wan 2.2",
+                            choices=[],
+                            interactive=True,
+                        )
+                        with gr.Row():
+                            sprites_animate_single_btn = gr.Button("🎬 Animate Selected Move (Wan 2.2)", variant="primary", size="lg")
+                        sprites_anim_info = gr.Markdown("Select a move and click animate.")
+
+                    with gr.Column(scale=1):
+                        sprites_anim_video_preview = gr.Video(
+                            label="Synthesized Move Animation Clip (Looping MP4)",
+                            height=360,
+                            autoplay=True,
+                            loop=True,
+                        )
+                with gr.Row():
+                    sprites_phase3_back_btn = gr.Button("⬅️ Back to Phase 2", variant="secondary")
+                    sprites_phase3_next_btn = gr.Button("✅ Proceed to Phase 4: Sprite Cutter & Sheet Exporter ➔", variant="primary")
+
+            # ─────────────────────────────────────────────────────────────
+            # Phase 4: Sprite Cutter & Sheet Exporter
+            # ─────────────────────────────────────────────────────────────
+            with gr.TabItem("4️⃣ Phase 4: Sprite Cutter & Sheet Exporter", id="sprites_phase4"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        sprites_cut_target_move = gr.Dropdown(
+                            label="Select Move Animation to Slice into Sprite Sheet",
+                            choices=[],
+                            interactive=True,
+                        )
+                        with gr.Row():
+                            sprites_target_fps = gr.Dropdown(
+                                label="Target Game Frame Rate",
+                                choices=[8, 12, 16, 24],
+                                value=12,
+                                scale=1,
+                            )
+                            sprites_chroma_tol = gr.Slider(
+                                label="Chroma Removal Tolerance",
+                                minimum=15.0,
+                                maximum=70.0,
+                                value=38.0,
+                                step=1.0,
+                                scale=1,
+                            )
+                        sprites_cut_sheet_btn = gr.Button("✂️ Cut Video to Transparent Sprite Sheet & JSON", variant="primary", size="lg")
+                        with gr.Row():
+                            sprites_download_sheet = gr.File(label="💾 Download Sprite Sheet (.png)")
+                            sprites_download_json = gr.File(label="📄 Download Engine Manifest (.json)")
+
+                    with gr.Column(scale=1):
+                        sprites_sheet_preview = gr.Image(
+                            label="Packed Transparent Sprite Sheet Atlas (PNG)",
+                            height=380,
+                        )
+                        sprites_json_preview = gr.JSON(label="Generated Engine Metadata (Unity / Godot / Unreal)")
+                with gr.Row():
+                    sprites_phase4_back_btn = gr.Button("⬅️ Back to Phase 3", variant="secondary")
+
+    # ── Tool 3: 4-Phase Interactive AI Filmmaking Studio Wizard ───────────────
     with gr.Accordion(
         "🎬 AI Filmmaking Studio — 4-Phase Interactive Story-to-Movie Wizard (Gemma 4: 31B ➔ Z-Image ➔ Qwen ➔ Wan 2.2)",
-        open=True,
+        open=False,
         elem_classes="tool-accordion studio-panel",
     ) as studio_accordion:
         gr.Markdown(
@@ -2053,15 +2487,15 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
     # ── Global Toolbar Events (Expand/Collapse All Tools) ─────────────────────
     expand_all_btn.click(
-        fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True)),
+        fn=lambda: (gr.update(open=True), gr.update(open=True), gr.update(open=True), gr.update(open=True)),
         inputs=[],
-        outputs=[qwen_accordion, wan_accordion, studio_accordion],
+        outputs=[sprites_accordion, qwen_accordion, wan_accordion, studio_accordion],
     )
 
     collapse_all_btn.click(
-        fn=lambda: (gr.update(open=False), gr.update(open=False), gr.update(open=False)),
+        fn=lambda: (gr.update(open=False), gr.update(open=False), gr.update(open=False), gr.update(open=False)),
         inputs=[],
-        outputs=[qwen_accordion, wan_accordion, studio_accordion],
+        outputs=[sprites_accordion, qwen_accordion, wan_accordion, studio_accordion],
     )
 
     # ── Events: Qwen Image Edit ───────────────────────────────────────────────
@@ -2639,6 +3073,141 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_final_video, studio_char_gallery, studio_scenes_gallery,
             studio_json_display, studio_status, studio_pipeline_state,
         ],
+    )
+
+    # ── Events: Universal 2D Game Sprites Creator Studio ─────────────────────
+
+    # Phase 1: Refine Character & Generate Master Sprite
+    sprites_refine_char_btn.click(
+        fn=sprites_ui_refine_character,
+        inputs=[
+            sprites_user_concept, sprites_genre, sprites_art_style,
+            sprites_ollama_key, sprites_ollama_model,
+        ],
+        outputs=[
+            sprites_char_name, sprites_char_title, sprites_char_appearance,
+            sprites_char_gear, sprites_char_prompt, sprites_status,
+        ],
+    )
+
+    sprites_gen_char_btn.click(
+        fn=sprites_ui_generate_master_sprite,
+        inputs=[
+            sprites_char_name, sprites_char_title, sprites_char_appearance,
+            sprites_char_gear, sprites_char_prompt, sprites_char_seed,
+            sprites_genre, sprites_art_style,
+            sprites_ollama_key, sprites_ollama_model, sprites_state_store,
+        ],
+        outputs=[
+            sprites_char_preview,
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    # Move Inspector: Show details when a move is selected in Phase 2 or Phase 3
+    sprites_move_selector.change(
+        fn=sprites_ui_load_move_details,
+        inputs=[sprites_move_selector, sprites_state_store],
+        outputs=[sprites_anim_info, sprites_anim_video_preview],
+    )
+
+    sprites_anim_target_move.change(
+        fn=sprites_ui_load_move_details,
+        inputs=[sprites_anim_target_move, sprites_state_store],
+        outputs=[sprites_anim_info, sprites_anim_video_preview],
+    )
+
+    # Phase 2: Refine Custom Move & Add Custom Move
+    sprites_refine_custom_btn.click(
+        fn=sprites_ui_refine_custom_anim,
+        inputs=[
+            sprites_state_store, sprites_genre,
+            sprites_custom_name, sprites_custom_desc, sprites_custom_type,
+            sprites_ollama_key, sprites_ollama_model,
+        ],
+        outputs=[sprites_custom_refined_prompt, sprites_status],
+    )
+
+    sprites_add_custom_btn.click(
+        fn=sprites_ui_add_custom_anim,
+        inputs=[
+            sprites_state_store, sprites_custom_name, sprites_custom_desc,
+            sprites_custom_type, sprites_custom_refined_prompt,
+        ],
+        outputs=[
+            sprites_move_selector,
+            sprites_anim_target_move,
+            sprites_cut_target_move,
+            sprites_moves_json,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    # Phase 3: Animate Selected Move with Wan 2.2
+    sprites_animate_single_btn.click(
+        fn=sprites_ui_animate_move,
+        inputs=[sprites_anim_target_move, sprites_anim_seed, sprites_state_store],
+        outputs=[
+            sprites_anim_video_preview,
+            sprites_cut_target_move,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    # Phase 4: Cut Video to Transparent Sprite Sheet & Engine JSON
+    sprites_cut_sheet_btn.click(
+        fn=sprites_ui_cut_sprite_sheet,
+        inputs=[
+            sprites_cut_target_move, sprites_target_fps, sprites_chroma_tol,
+            sprites_state_store,
+        ],
+        outputs=[
+            sprites_sheet_preview,
+            sprites_json_preview,
+            sprites_download_sheet,
+            sprites_download_json,
+            sprites_status,
+            sprites_state_store,
+        ],
+    )
+
+    # Tab Wizard Navigation Buttons
+    sprites_phase1_next_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase2"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
+    )
+    sprites_phase2_back_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase1"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
+    )
+    sprites_phase2_next_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase3"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
+    )
+    sprites_phase3_back_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase2"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
+    )
+    sprites_phase3_next_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase4"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
+    )
+    sprites_phase4_back_btn.click(
+        fn=lambda: gr.update(selected="sprites_phase3"),
+        inputs=[],
+        outputs=[sprites_wizard_tabs],
     )
 
     # ── Heartbeat Toggles (All 3 Models Active by Default on Startup) ─────────
