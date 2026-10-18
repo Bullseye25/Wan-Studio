@@ -1549,6 +1549,7 @@ def studio_run_step4(
     aspect_ratio, seed, api_key, model, use_vision, current_state,
     use_last_frame=True, enable_rife_2x=False, anti_noise_guard=True,
     progress=gr.Progress(track_tqdm=True),
+    transition_type="crossfade", transition_duration=0.5,
 ):
     scenes = (current_state or {}).get("scenes", [])
     if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
@@ -1573,11 +1574,15 @@ def studio_run_step4(
             progress_cb=cb,
         )
         current_state["clip_paths"] = clips
+        trans_t = (current_state or {}).get("transition_type") or transition_type
+        trans_d = float((current_state or {}).get("transition_duration") or transition_duration)
         final_movie = pipeline.stitch_clips(
             clip_paths=clips,
             movie_title=current_state.get("title", "Studio_Movie"),
             progress_cb=cb,
             scenes=scenes,
+            transition_type=trans_t,
+            transition_duration=trans_d,
         )
         current_state["final_movie_path"] = final_movie
         current_state["manifest_path"] = pipeline.save_manifest(current_state)

@@ -271,7 +271,7 @@ class TestFrontendPhaseHandlersAndEdgeCases(unittest.TestCase):
                 break
         self.assertIsNotNone(ui_step1_fn)
         res = ui_step1_fn("Prompt", "2D cartoon", 1, 3.5, "key", "model", 111, 222, 333)
-        self.assertEqual(len(res), 30)
+        self.assertEqual(len(res), 31)
         self.assertEqual(res[3], "Starry Rescue")
 
     @patch("backend.ping_all_active_backends")

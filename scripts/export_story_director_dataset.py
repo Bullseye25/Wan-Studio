@@ -129,8 +129,8 @@ def export_datasets(output_dir: str = "dataset"):
 
     # 3. Export DPO Preference Dataset
     dpo_count = 0
+    dpo_pairs = []
     if memory_bank.dpo_file.exists():
-        dpo_pairs = []
         with open(memory_bank.dpo_file, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
@@ -139,27 +139,118 @@ def export_datasets(output_dir: str = "dataset"):
                     except Exception:
                         pass
 
-        with open(dpo_file, "w", encoding="utf-8") as f:
-            for pair in dpo_pairs:
-                prompt_text = (
-                    f"Direct a logical animation storyboard for premise: {pair.get('premise', '')}. "
-                    "Ensure causal connectors, prop permanence, and 5-second feasibility."
-                )
-                chosen_text = json.dumps(pair.get("chosen", {}), indent=2, ensure_ascii=False)
-                rejected_text = json.dumps(pair.get("rejected", {}), indent=2, ensure_ascii=False)
-                dpo_record = {
-                    "prompt": prompt_text,
-                    "chosen": chosen_text,
-                    "rejected": rejected_text,
-                    "critique": pair.get("critique_feedback", ""),
-                }
-                f.write(json.dumps(dpo_record, ensure_ascii=False) + "\n")
-                dpo_count += 1
+    # 4. Generate Orchestra AI Decision Maker Pairs (What to do vs What NOT to do)
+    orchestra_sft_file = out_path / "orchestra_decision_sft.jsonl"
+    orchestra_dpo_file = out_path / "orchestra_decision_dpo.jsonl"
+
+    orchestra_dpo_records = [
+        # Z-Image Turbo Genesis Rule
+        {
+            "prompt": "Orchestra Decision: Formulate character genesis prompt for Silas the elderly clockmaker.",
+            "chosen": (
+                "Full-body vertical character reference sheet of Silas, gentle crinkled blue eyes, silver mutton chops beard, "
+                "soft brown woolen vest, canvas apron, holding brass jeweler loupe in hand. 9:16 vertical portrait, head-to-toe visible, "
+                "clean neutral studio backdrop. Negative prompt: multiple people, crowd, cropped limbs, distorted hands, complex background."
+            ),
+            "rejected": (
+                "Silas the clockmaker in his busy crowded workshop full of clocks, close up face portrait with other apprentices in the background."
+            ),
+            "critique": "Z-Image Turbo reference sheets must be single-character full-body on neutral backdrops to prevent identity corruption in Qwen.",
+        },
+        # Qwen Dual-Keyframe Rule
+        {
+            "prompt": "Orchestra Decision: Formulate Qwen end keyframe prompt for Scene 1 (Silas finds robin).",
+            "chosen": (
+                "image 1 is the starting frame. For this ending frame at t=5.0s, transform Silas: Silas is now kneeling beside his stone fireplace hearth, "
+                "tenderly cradling the robin wrapped in a soft wool handkerchief against his chest with a warm smile. Keep identical workshop clocks, "
+                "wall textures, and rustic room geometry."
+            ),
+            "rejected": (
+                "A different camera angle showing Silas sitting in his living room having tea with the robin outside."
+            ),
+            "critique": "End frame must anchor on image 1 with high pose delta while explicitly locking background geometry and camera angle.",
+        },
+        # Wan 2.2 Temporal Timeline Rule
+        {
+            "prompt": "Orchestra Decision: Formulate Wan 2.2 animation motion prompt for Scene 1 (5.0s clip).",
+            "chosen": (
+                "Slow dolly-in moving gently toward Silas on a 50mm lens. "
+                "Phase 1 (0.0s-1.5s): Initiating from Silas standing by frosted window. "
+                "Phase 2 (1.5s-3.5s): Silas scoops the shivering robin into his handkerchief and turns toward hearth. "
+                "Phase 3 (3.5s-5.0s): Settling onto one knee by the warm embers. "
+                "Rigid background architecture, locked lighting, smooth continuous motion, zero camera jitter, no morphing."
+            ),
+            "rejected": (
+                "Silas picks up the robin while simultaneously clock cuckoos fly out and then a snowstorm breaks the window and Silas runs away."
+            ),
+            "critique": "Wan 2.2 clips can only execute ONE atomic action and reaction in 5s. Rambling run-ons cause latent noise boiling.",
+        },
+        # Character Budget Rule
+        {
+            "prompt": "Orchestra Decision: Direct a heart-touching short story cast budget.",
+            "chosen": (
+                "Limit cast to 2-3 characters (e.g. Silas and Robin) for maximum emotional intimacy and visual stability."
+            ),
+            "rejected": (
+                "Introduce 8 village townspeople, three guards, and a flock of birds in a 5-scene short."
+            ),
+            "critique": "Heart-touching shorts must adhere to <= 3 characters max to avoid multi-character identity confusion in Qwen.",
+        },
+        # Transition Mode Rule
+        {
+            "prompt": "Orchestra Decision: Select transition between emotional scenes.",
+            "chosen": (
+                "Apply 'crossfade' (0.5s gentle dissolve) via FFmpeg xfade with acrossfade audio to convey emotional passage of time."
+            ),
+            "rejected": (
+                "Use high-speed whip-pan or jarring cut for an intimate hearth-side emotional beat."
+            ),
+            "critique": "Intimate heart-touching narratives require soft cross-dissolves or dip-to-black rather than fast action transitions.",
+        },
+    ]
+
+    for pair in dpo_pairs:
+        prompt_text = (
+            f"Direct a logical animation storyboard for premise: {pair.get('premise', '')}. "
+            "Ensure causal connectors, prop permanence, and 5-second feasibility."
+        )
+        chosen_text = json.dumps(pair.get("chosen", {}), indent=2, ensure_ascii=False)
+        rejected_text = json.dumps(pair.get("rejected", {}), indent=2, ensure_ascii=False)
+        orchestra_dpo_records.append({
+            "prompt": prompt_text,
+            "chosen": chosen_text,
+            "rejected": rejected_text,
+            "critique": pair.get("critique_feedback", ""),
+        })
+
+    with open(dpo_file, "w", encoding="utf-8") as f:
+        for r in orchestra_dpo_records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    with open(orchestra_dpo_file, "w", encoding="utf-8") as f:
+        for r in orchestra_dpo_records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    # Orchestra SFT Dataset
+    orchestra_sft_records = [
+        {
+            "conversations": [
+                {"from": "human", "value": r["prompt"]},
+                {"from": "gpt", "value": r["chosen"]},
+            ]
+        }
+        for r in orchestra_dpo_records
+    ]
+    with open(orchestra_sft_file, "w", encoding="utf-8") as f:
+        for r in orchestra_sft_records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     print(f"\n[Export Completed]")
-    print(f"  -> SFT (ShareGPT): {sft_file} ({len(sft_records)} examples)")
-    print(f"  -> SFT (Alpaca):   {alpaca_file} ({len(alpaca_records)} examples)")
-    print(f"  -> DPO Preference: {dpo_file} ({dpo_count} preference pairs)")
+    print(f"  -> SFT (ShareGPT):        {sft_file} ({len(sft_records)} examples)")
+    print(f"  -> SFT (Alpaca):          {alpaca_file} ({len(alpaca_records)} examples)")
+    print(f"  -> DPO Preference:        {dpo_file} ({len(orchestra_dpo_records)} preference pairs)")
+    print(f"  -> Orchestra Decision SFT: {orchestra_sft_file} ({len(orchestra_sft_records)} pairs)")
+    print(f"  -> Orchestra Decision DPO: {orchestra_dpo_file} ({len(orchestra_dpo_records)} pairs)")
 
 
 if __name__ == "__main__":

@@ -683,8 +683,10 @@ class AudioVisualSyncEngine:
     def write_srt_subtitles(
         scenes: List[Dict[str, Any]],
         output_srt_path: str,
+        transition_type: str = "cut",
+        transition_duration: float = 0.5,
     ) -> str:
-        """Writes a frame-accurate `.srt` subtitle file across all stitched scenes."""
+        """Writes a frame-accurate `.srt` subtitle file across all stitched scenes, taking transition overlap into account."""
         def _fmt_srt_time(seconds: float) -> str:
             seconds = max(0.0, float(seconds))
             hrs = int(seconds // 3600)
@@ -696,7 +698,9 @@ class AudioVisualSyncEngine:
         lines = []
         cursor = 0.0
         sub_idx = 1
-        for sc in scenes:
+        overlap = transition_duration if transition_type in ("crossfade", "fade_black", "match_cut") else 0.0
+
+        for idx, sc in enumerate(scenes):
             dur = float(sc.get("exact_duration_seconds") or sc.get("duration_seconds") or 3.5)
             narration = str(sc.get("narration_text") or "").strip()
             wts = sc.get("word_timestamps") or sc.get("narration_word_timestamps") or []
@@ -708,7 +712,10 @@ class AudioVisualSyncEngine:
                 lines.append(narration)
                 lines.append("")
                 sub_idx += 1
-            cursor += dur
+            if idx < len(scenes) - 1:
+                cursor += max(0.1, dur - overlap)
+            else:
+                cursor += dur
 
         out = pathlib.Path(output_srt_path)
         out.parent.mkdir(parents=True, exist_ok=True)

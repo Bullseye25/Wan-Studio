@@ -48,6 +48,14 @@ from narrator_engine import (
     OpenSourceNarratorTTS,
     AudioVisualSyncEngine,
 )
+from orchestra_rules import (
+    MAX_STORY_CHARACTERS,
+    TransitionType,
+    build_ffmpeg_transition_filter,
+    calculate_transition_srt_timestamps,
+    validate_story_budget,
+    enforce_orchestra_story_constraints,
+)
 
 
 # ── Defaults & Constants ──────────────────────────────────────────────────────
@@ -863,6 +871,9 @@ class StudioPipeline:
             c["id"] = cid
             c.setdefault("name", f"Character {i+1}")
             norm_chars.append(c)
+        # Enforce maximum 3 characters budget (Heart-Touching Intimacy Constraint)
+        if len(norm_chars) > MAX_STORY_CHARACTERS:
+            norm_chars = norm_chars[:MAX_STORY_CHARACTERS]
         data["characters"] = norm_chars
         valid_ids = [c["id"] for c in norm_chars]
 
@@ -969,6 +980,7 @@ class StudioPipeline:
             }
 
         data["scenes"] = norm_scenes
+        data = enforce_orchestra_story_constraints(data)
         return data
 
     def audit_and_repair_story_logic(
@@ -2891,10 +2903,13 @@ class StudioPipeline:
         movie_title: str = "Studio Movie",
         progress_cb: Optional[Callable[[float, str], None]] = None,
         scenes: Optional[List[Dict[str, Any]]] = None,
+        transition_type: str = "cut",
+        transition_duration: float = 0.5,
     ) -> str:
         """
-        Concatenates individual scene clips into a single movie using FFmpeg (preserving muxed AAC
-        voiceover tracks when present) and exports a companion `.srt` subtitle file if `scenes` are provided.
+        Concatenates individual scene clips into a single movie using FFmpeg.
+        Supports seamless cinematic transitions ('cut', 'crossfade', 'fade_black', 'match_cut')
+        with companion audio crossfading, and exports synchronized `.srt` subtitles.
         """
         if not clip_paths:
             raise ValueError("No video clips provided for stitching.")
@@ -2903,48 +2918,116 @@ class StudioPipeline:
             raise FileNotFoundError(f"Clip(s) not found for stitching: {missing}")
 
         if progress_cb:
-            progress_cb(0.92, "Assembling and stitching scene clips into final movie...")
+            progress_cb(0.92, f"Assembling scene clips with transition '{transition_type}' into final movie...")
 
         ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         timestamp = int(time.time())
         clean_title = self._sanitize_filename(movie_title) or "Studio_Movie"
         output_movie_path = self.movies_dir / f"{clean_title}_{timestamp}.mp4"
 
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f_list:
-            concat_list_file = f_list.name
-            for p in clip_paths:
-                safe_path = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
-                f_list.write(f"file '{safe_path}'\n")
+        stitched_successfully = False
 
-        try:
-            cmd_copy = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
-                        "-c", "copy", str(output_movie_path)]
-            print(f"[StudioPipeline] Stitching clips via FFmpeg copy: {' '.join(cmd_copy)}")
-            res = subprocess.run(cmd_copy, capture_output=True, text=True)
+        # ── 1. Cinematic Transition Path (xfade / acrossfade) ─────────────────
+        if transition_type in ("crossfade", "fade_black", "match_cut") and len(clip_paths) >= 2 and transition_duration > 0:
+            try:
+                durations = []
+                has_audio = True
+                for p in clip_paths:
+                    dur = 5.0
+                    try:
+                        import cv2
+                        cap = cv2.VideoCapture(str(p))
+                        if cap.isOpened():
+                            fps = cap.get(cv2.CAP_PROP_FPS) or 16.0
+                            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 81.0
+                            cap.release()
+                            if fps > 0:
+                                dur = float(frames / fps)
+                    except Exception:
+                        pass
+                    durations.append(dur)
 
-            if res.returncode != 0 or not output_movie_path.exists() or output_movie_path.stat().st_size == 0:
-                print(f"[StudioPipeline] FFmpeg copy returned {res.returncode}, re-encoding concat...")
-                cmd_reencode = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
-                                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                                "-c:a", "aac", "-b:a", "192k",
-                                str(output_movie_path)]
-                res_re = subprocess.run(cmd_reencode, capture_output=True, text=True)
-                if res_re.returncode != 0:
-                    # Fallback without audio codec if input clips have no audio stream
-                    cmd_reencode_vo = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
-                                       "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                                       str(output_movie_path)]
-                    res_vo = subprocess.run(cmd_reencode_vo, capture_output=True, text=True)
-                    if res_vo.returncode != 0:
-                        raise RuntimeError(f"FFmpeg stitching failed: {res_vo.stderr}")
-        finally:
-            if os.path.exists(concat_list_file):
-                os.remove(concat_list_file)
+                    # Probe whether audio track exists
+                    try:
+                        probe_res = subprocess.run([ffmpeg_bin, "-i", str(p)], capture_output=True, text=True)
+                        if "Audio:" not in (probe_res.stderr or ""):
+                            has_audio = False
+                    except Exception:
+                        has_audio = False
+
+                v_filt, a_filt, _ = build_ffmpeg_transition_filter(
+                    clip_durations=durations,
+                    transition_type=transition_type,
+                    transition_duration=transition_duration,
+                    has_audio=has_audio,
+                )
+
+                if v_filt:
+                    input_args = []
+                    for p in clip_paths:
+                        input_args.extend(["-i", str(p)])
+                    filter_complex = f"{v_filt};{a_filt}" if a_filt else v_filt
+                    cmd_xfade = [ffmpeg_bin, "-y"] + input_args + [
+                        "-filter_complex", filter_complex,
+                        "-map", "[v]",
+                    ]
+                    if a_filt:
+                        cmd_xfade.extend(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"])
+                    cmd_xfade.extend([
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                        str(output_movie_path)
+                    ])
+                    print(f"[StudioPipeline] Stitching clips via FFmpeg xfade ({transition_type}): {' '.join(cmd_xfade[:12])}...")
+                    res_xf = subprocess.run(cmd_xfade, capture_output=True, text=True)
+                    if res_xf.returncode == 0 and output_movie_path.exists() and output_movie_path.stat().st_size > 0:
+                        stitched_successfully = True
+                    else:
+                        print(f"[StudioPipeline] Transition stitch returned {res_xf.returncode}, falling back to concat: {res_xf.stderr[:200]}")
+            except Exception as e:
+                print(f"[StudioPipeline] Transition stitch note ({e}); falling back to concat.")
+
+        # ── 2. Fallback / Standard Hard Concat ────────────────────────────────
+        if not stitched_successfully:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f_list:
+                concat_list_file = f_list.name
+                for p in clip_paths:
+                    safe_path = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
+                    f_list.write(f"file '{safe_path}'\n")
+
+            try:
+                cmd_copy = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                            "-c", "copy", str(output_movie_path)]
+                print(f"[StudioPipeline] Stitching clips via FFmpeg copy: {' '.join(cmd_copy)}")
+                res = subprocess.run(cmd_copy, capture_output=True, text=True)
+
+                if res.returncode != 0 or not output_movie_path.exists() or output_movie_path.stat().st_size == 0:
+                    print(f"[StudioPipeline] FFmpeg copy returned {res.returncode}, re-encoding concat...")
+                    cmd_reencode = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                                    "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                    "-c:a", "aac", "-b:a", "192k",
+                                    str(output_movie_path)]
+                    res_re = subprocess.run(cmd_reencode, capture_output=True, text=True)
+                    if res_re.returncode != 0:
+                        # Fallback without audio codec if input clips have no audio stream
+                        cmd_reencode_vo = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                                           "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                           str(output_movie_path)]
+                        res_vo = subprocess.run(cmd_reencode_vo, capture_output=True, text=True)
+                        if res_vo.returncode != 0:
+                            raise RuntimeError(f"FFmpeg stitching failed: {res_vo.stderr}")
+            finally:
+                if os.path.exists(concat_list_file):
+                    os.remove(concat_list_file)
 
         if scenes:
             try:
                 srt_path = output_movie_path.with_suffix(".srt")
-                AudioVisualSyncEngine.write_srt_subtitles(scenes, str(srt_path))
+                AudioVisualSyncEngine.write_srt_subtitles(
+                    scenes,
+                    str(srt_path),
+                    transition_type=transition_type,
+                    transition_duration=transition_duration,
+                )
                 print(f"[StudioPipeline] Exported synchronized SRT subtitles: {srt_path}")
             except Exception as e:
                 print(f"[StudioPipeline] Subtitle export note: {e}")
