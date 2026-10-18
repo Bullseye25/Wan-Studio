@@ -23,6 +23,7 @@ from studio_pipeline import (
     generate_three_studio_seeds,
     restore_extracted_video_frame,
 )
+from narrator_engine import NARRATOR_VOICE_PRESETS, DEFAULT_NARRATOR_VOICE
 from sprites_pipeline import SpritesPipeline, GENRE_PRESETS
 from sprite_cutter import process_video_to_sprite_sheet
 
@@ -1346,18 +1347,36 @@ def studio_run_full(
         return None, [], [], {}, f"### ❌ Studio Production Error\n`{e}`", {}
 
 
-def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, progress=gr.Progress(track_tqdm=True)):
+def studio_run_step1(
+    prompt, art_style, num_scenes, duration, api_key, model,
+    progress=gr.Progress(track_tqdm=True),
+    enable_narrator=True,
+    narrator_voice=DEFAULT_NARRATOR_VOICE,
+):
     pipeline = StudioPipeline(api_key=api_key, model=model)
     try:
+        cb = _studio_progress(progress)
         story_data = pipeline.generate_story_and_characters(
             prompt=prompt,
             num_scenes=int(num_scenes),
             target_duration=float(duration),
             art_style=art_style,
-            progress_cb=_studio_progress(progress),
+            progress_cb=cb,
         )
+        narrator_note = ""
+        if enable_narrator and story_data.get("scenes"):
+            try:
+                pipeline.generate_story_narration(
+                    scenes=story_data["scenes"],
+                    voice_preset=narrator_voice or DEFAULT_NARRATOR_VOICE,
+                    progress_cb=cb,
+                )
+                story_data["narrator_voice"] = narrator_voice or DEFAULT_NARRATOR_VOICE
+                narrator_note = f" + 🎙️ Open-Source Narrator Voiceover (`{narrator_voice or DEFAULT_NARRATOR_VOICE}`) & Word-Level Sync"
+            except Exception as ne:
+                narrator_note = f" (Narrator note: {ne})"
         status_msg = (
-            f"### 📝 Step 1 Complete: Screenplay & Characters Generated\n"
+            f"### 📝 Step 1 Complete: Screenplay & Characters Generated{narrator_note}\n"
             f"**Title:** *{story_data.get('title')}* — Extracted **{len(story_data.get('characters', []))}** character(s) and "
             f"**{len(story_data.get('scenes', []))}** shot(s) of ≤5s each (with First + Last Frame beats).\n"
             f"Review/edit below, then click **Next: Validate Story ➔ Phase 2 (Characters)**."
@@ -1365,6 +1384,32 @@ def studio_run_step1(prompt, art_style, num_scenes, duration, api_key, model, pr
         return StudioPipeline.serializable(story_data), status_msg, story_data
     except Exception as e:
         return {}, f"### ❌ Step 1 Error\n`{e}`", {}
+
+
+def studio_synthesize_narration_ui(current_state, narrator_voice=DEFAULT_NARRATOR_VOICE, progress=gr.Progress(track_tqdm=True)):
+    if not current_state or "scenes" not in current_state:
+        return StudioPipeline.serializable(current_state or {}), None, "### ⚠️ Please generate a story in Step 1 first.", current_state
+    pipeline = StudioPipeline()
+    try:
+        scenes = pipeline.generate_story_narration(
+            scenes=current_state["scenes"],
+            voice_preset=narrator_voice or DEFAULT_NARRATOR_VOICE,
+            progress_cb=_studio_progress(progress),
+        )
+        current_state["scenes"] = scenes
+        current_state["narrator_voice"] = narrator_voice or DEFAULT_NARRATOR_VOICE
+        first_audio = next((s.get("narration_audio_path") for s in scenes if s.get("narration_audio_path")), None)
+        trig_summary = ", ".join(
+            f"S{s.get('scene_number', i+1)}: '{s.get('sync_trigger_word', '')}' @ {s.get('synced_phases', {}).get('p1', 1.5)}s"
+            for i, s in enumerate(scenes)
+        )
+        status_md = (
+            f"### 🎙️ Open-Source Narrator Synthesized ({len(scenes)} scenes · Voice `{narrator_voice}`)\n"
+            f"- **Audio-Visual Temporal Lock:** {trig_summary}"
+        )
+        return StudioPipeline.serializable(current_state), first_audio, status_md, current_state
+    except Exception as e:
+        return StudioPipeline.serializable(current_state), None, f"### ❌ Narrator Error\n`{e}`", current_state
 
 
 def studio_run_logic_audit(current_state, api_key, model):
@@ -1529,7 +1574,10 @@ def studio_run_step4(
         )
         current_state["clip_paths"] = clips
         final_movie = pipeline.stitch_clips(
-            clip_paths=clips, movie_title=current_state.get("title", "Studio_Movie"), progress_cb=cb,
+            clip_paths=clips,
+            movie_title=current_state.get("title", "Studio_Movie"),
+            progress_cb=cb,
+            scenes=scenes,
         )
         current_state["final_movie_path"] = final_movie
         current_state["manifest_path"] = pipeline.save_manifest(current_state)
@@ -2396,6 +2444,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     label="🎬 Enable Gemma 4: 31B Multimodal Vision Director (inspects each keyframe before animating)",
                                     value=True,
                                 )
+                                with gr.Row():
+                                    studio_enable_narrator_chk = gr.Checkbox(
+                                        label="🎙️ Enable Open-Source AI Narrator & Audio-Visual Sync (Kokoro-82M / Prosodic Synth)",
+                                        value=True,
+                                        scale=1,
+                                    )
+                                    studio_narrator_voice_dropdown = gr.Dropdown(
+                                        label="🗣️ Narrator Voice Preset (Open-Source)",
+                                        choices=list(NARRATOR_VOICE_PRESETS.keys()),
+                                        value=DEFAULT_NARRATOR_VOICE,
+                                        scale=1,
+                                    )
                                 with gr.Accordion("⚙️ Ollama Cloud API & One-Click Auto Mode", open=False):
                                     with gr.Row():
                                         studio_ollama_key = gr.Textbox(
@@ -2428,8 +2488,14 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     placeholder="Generated story title will appear here...",
                                 )
                                 studio_json_display = gr.JSON(label="Generated Screenplay, Cast & Scene Breakdown")
+                                studio_narration_audio_preview = gr.Audio(
+                                    label="🎙️ Scene #1 Narrator Voiceover Preview (24kHz WAV)",
+                                    type="filepath",
+                                    interactive=False,
+                                )
                                 with gr.Row():
                                     studio_audit_btn = gr.Button("🧠 Run Story Doctor Causal Audit", variant="secondary")
+                                    studio_synth_narration_btn = gr.Button("🎙️ Re-Synthesize Narrator Voice & Sync", variant="secondary")
                                     studio_save_memory_btn = gr.Button("💾 Save to AI Training Memory", variant="secondary")
                                 studio_phase1_next_btn = gr.Button(
                                     "✅ Validate Story & Next ➔ Phase 2: Characters",
@@ -3391,9 +3457,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     )
 
     # Phase 1: Generate Story & populate dropdowns for Phases 2, 3, 4
-    def _ui_step1(prompt, art_style, num_scenes, duration, api_key, model, z_seed, q_seed, w_seed, progress=gr.Progress(track_tqdm=True)):
+    def _ui_step1(
+        prompt, art_style, num_scenes, duration, api_key, model,
+        z_seed, q_seed, w_seed, enable_narrator=True, narrator_voice=DEFAULT_NARRATOR_VOICE,
+        progress=gr.Progress(track_tqdm=True),
+    ):
         json_data, status_msg, state = studio_run_step1(
-            prompt, art_style, num_scenes, duration, api_key, model, progress=progress
+            prompt, art_style, num_scenes, duration, api_key, model,
+            progress=progress,
+            enable_narrator=bool(enable_narrator),
+            narrator_voice=narrator_voice,
         )
         char_opts = _character_choices(state)
         scene_opts = _scene_choices(state)
@@ -3409,6 +3482,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(
             first_scene, state, default_seed=w_seed
         )
+        first_audio = next(
+            (s.get("narration_audio_path") for s in (state.get("scenes") or []) if s.get("narration_audio_path")),
+            None,
+        )
         return (
             json_data,
             status_msg,
@@ -3420,6 +3497,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             s_title, s_scen, s_qprompt, s_qendprompt, s_cids, s_seed, s_img, s_end_img, s_end_seed, s_delta,
             gr.update(choices=scene_opts, value=first_scene),
             v_mot, v_cam, v_wprompt, v_seed, v_vid,
+            first_audio,
         )
 
     studio_step1_btn.click(
@@ -3428,6 +3506,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_prompt, studio_art_style, studio_num_scenes,
             studio_total_duration, studio_ollama_key, studio_ollama_model,
             studio_seed, studio_qwen_seed, studio_wan_seed,
+            studio_enable_narrator_chk, studio_narrator_voice_dropdown,
         ],
         outputs=[
             studio_json_display, studio_status, studio_pipeline_state,
@@ -3444,6 +3523,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_clip_selector,
             studio_clip_motion_edit, studio_clip_camera_edit, studio_clip_wan_prompt_edit,
             studio_clip_seed_edit, studio_clip_preview,
+            studio_narration_audio_preview,
         ],
     )
 
@@ -3451,6 +3531,12 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         fn=studio_run_logic_audit,
         inputs=[studio_pipeline_state, studio_ollama_key, studio_ollama_model],
         outputs=[studio_json_display, studio_status, studio_pipeline_state],
+    )
+
+    studio_synth_narration_btn.click(
+        fn=studio_synthesize_narration_ui,
+        inputs=[studio_pipeline_state, studio_narrator_voice_dropdown],
+        outputs=[studio_json_display, studio_narration_audio_preview, studio_status, studio_pipeline_state],
     )
 
     studio_save_memory_btn.click(

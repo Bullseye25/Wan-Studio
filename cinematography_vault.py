@@ -295,6 +295,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 1,
                 "narrative_beat": "Hook & Status Quo",
                 "causal_connector": "SETUP",
+                "narration_text": "Deep inside the crystal cavern, Ren readies his fiery blade.",
+                "narration_voice_style": "tense_whisper",
+                "sync_trigger_word": "readies",
                 "state_ledger": {
                     "entry_state": "Ren stands low in defensive stance at cavern entrance, katana gripped two-handed",
                     "active_props": ["chipped fiery katana (two-handed grip)"],
@@ -311,6 +314,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 2,
                 "narrative_beat": "Inciting Obstacle",
                 "causal_connector": "BUT — Sentinel slams its fist into the ground, rupturing the rock under Ren's leap",
+                "narration_text": "But the ancient giant slams down, shattering the stone beneath him.",
+                "narration_voice_style": "urgent_rising",
+                "sync_trigger_word": "slams",
                 "state_ledger": {
                     "entry_state": "Ren airborne mid-leap with katana raised, sentinel fist descending",
                     "active_props": ["chipped fiery katana (right hand)"],
@@ -327,6 +333,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 3,
                 "narrative_beat": "Climax & Payoff",
                 "causal_connector": "THEREFORE — Ren channels the fissure's molten heat into his blade for an explosive rising strike",
+                "narration_text": "Drawing molten fury from the earth, Ren cleaves the colossus apart!",
+                "narration_voice_style": "epic_climax",
+                "sync_trigger_word": "cleaves",
                 "state_ledger": {
                     "entry_state": "Ren crouching on one knee with blade in rock fissure, glowing molten fissures underneath",
                     "active_props": ["flaming katana fully energized (two-handed grip)"],
@@ -363,6 +372,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 1,
                 "narrative_beat": "Hook & Status Quo",
                 "causal_connector": "SETUP",
+                "narration_text": "With one gentle turn, Milo awakens the tiny brass songbird.",
+                "narration_voice_style": "warm_wonder",
+                "sync_trigger_word": "awakens",
                 "state_ledger": {
                     "entry_state": "Milo leans over cluttered wooden workbench holding mechanical bird in two cupped hands",
                     "active_props": ["brass mechanical songbird (two hands)", "brass winding key"],
@@ -379,6 +391,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 2,
                 "narrative_beat": "Inciting Obstacle",
                 "causal_connector": "BUT — A sudden gust of wind blows through the open window, catching the bird and making it spiral helplessly toward the floor",
+                "narration_text": "Suddenly, a fierce gust sweeps the fragile bird toward the floor.",
+                "narration_voice_style": "urgent_rising",
+                "sync_trigger_word": "sweeps",
                 "state_ledger": {
                     "entry_state": "Milo standing proudly with palms open, bird just lifting off toward window",
                     "active_props": ["brass mechanical bird (in air)"],
@@ -395,6 +410,9 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
                 "scene_number": 3,
                 "narrative_beat": "Climax & Payoff",
                 "causal_connector": "THEREFORE — Milo's gentle fingertips catch the air beneath the bird, giving it the updraft it needs to soar gracefully out into the sky",
+                "narration_text": "Milo catches the draft, and the songbird soars into golden skies.",
+                "narration_voice_style": "joyful_resolution",
+                "sync_trigger_word": "soars",
                 "state_ledger": {
                     "entry_state": "Milo sliding on knees near attic window, bird tumbling just above floor",
                     "active_props": ["brass mechanical bird (soaring)"],
@@ -416,9 +434,10 @@ CAUSAL_NARRATIVE_BLUEPRINTS: List[Dict[str, Any]] = [
 class StoryMemoryBank:
     """
     Manages long-term episodic memory for logical animated stories.
-    Stores user-approved stories, human prompt edits, and DPO training pairs in
-    local JSONL files. Dynamically retrieves relevant few-shot exemplars to
-    train LLMs in-context on user taste and causal narrative logic.
+    Stores user-approved stories, human prompt edits, DPO training pairs, and
+    clip quality telemetry in local JSONL files. Dynamically retrieves relevant
+    few-shot exemplars to train LLMs in-context on user taste, causal narrative
+    logic, and synchronized narration.
     """
 
     def __init__(
@@ -426,11 +445,14 @@ class StoryMemoryBank:
         memory_dir: Optional[str] = None,
         memory_filename: str = "story_training_memory.jsonl",
         dpo_filename: str = "story_dpo_pairs.jsonl",
+        telemetry_filename: str = "story_clip_telemetry.jsonl",
+        storage_dir: Optional[str] = None,
     ):
-        base_dir = pathlib.Path(memory_dir or os.path.join("outputs", "studio"))
+        base_dir = pathlib.Path(memory_dir or storage_dir or os.path.join("outputs", "studio"))
         base_dir.mkdir(parents=True, exist_ok=True)
         self.memory_file = base_dir / memory_filename
         self.dpo_file = base_dir / dpo_filename
+        self.telemetry_file = base_dir / telemetry_filename
 
     def save_exemplar(
         self,
@@ -457,12 +479,16 @@ class StoryMemoryBank:
                         "title": s.get("title"),
                         "narrative_beat": s.get("narrative_beat"),
                         "causal_connector": s.get("causal_connector"),
+                        "narration_text": s.get("narration_text", ""),
+                        "narration_voice_style": s.get("narration_voice_style", "cinematic_warm"),
+                        "sync_trigger_word": s.get("sync_trigger_word", ""),
                         "state_ledger": s.get("state_ledger", {}),
                         "scenario": s.get("scenario"),
                         "qwen_scene_prompt": s.get("qwen_scene_prompt"),
                         "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
                         "wan_motion_prompt": s.get("wan_motion_prompt"),
                         "camera_movement": s.get("camera_movement"),
+                        "telemetry": s.get("telemetry", {}),
                     }
                     for s in story_data.get("scenes", [])
                 ],
@@ -495,6 +521,8 @@ class StoryMemoryBank:
                         {
                             "scene_number": s.get("scene_number"),
                             "scenario": s.get("scenario"),
+                            "narration_text": s.get("narration_text", ""),
+                            "sync_trigger_word": s.get("sync_trigger_word", ""),
                             "qwen_scene_prompt": s.get("qwen_scene_prompt"),
                             "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
                             "state_ledger": s.get("state_ledger", {}),
@@ -508,6 +536,8 @@ class StoryMemoryBank:
                         {
                             "scene_number": s.get("scene_number"),
                             "scenario": s.get("scenario"),
+                            "narration_text": s.get("narration_text", ""),
+                            "sync_trigger_word": s.get("sync_trigger_word", ""),
                             "qwen_scene_prompt": s.get("qwen_scene_prompt"),
                             "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
                             "state_ledger": s.get("state_ledger", {}),
@@ -521,6 +551,28 @@ class StoryMemoryBank:
             return True
         except Exception as e:
             print(f"[StoryMemoryBank] Failed to save DPO pair: {e}")
+            return False
+
+    def record_clip_telemetry(
+        self,
+        scene_number: int,
+        telemetry: Dict[str, Any],
+        director_plan: Optional[Dict[str, Any]] = None,
+        title: str = "",
+    ) -> bool:
+        """Records automated post-render video quality and audio-visual sync telemetry."""
+        try:
+            record = {
+                "scene_number": scene_number,
+                "title": title,
+                "telemetry": telemetry,
+                "director_plan": director_plan or {},
+            }
+            with open(self.telemetry_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return True
+        except Exception as e:
+            print(f"[StoryMemoryBank] Failed to record telemetry: {e}")
             return False
 
     def retrieve_exemplars(self, premise: str, top_k: int = 2) -> List[Dict[str, Any]]:
@@ -568,12 +620,16 @@ class StoryMemoryBank:
         for idx, ex in enumerate(exemplars, 1):
             output.append(f"Example {idx}: '{ex.get('title', 'Storyboard')}'")
             output.append(f"Premise: {ex.get('premise', ex.get('theme', ''))}")
-            output.append("Scenes with Causal Connectors & State Ledgers:")
+            output.append("Scenes with Causal Connectors, Voiceover Narration & State Ledgers:")
             for sc in ex.get("scenes", [])[:3]:
                 connector = sc.get("causal_connector", "THEREFORE")
                 beat = sc.get("narrative_beat", f"Beat {sc.get('scene_number', 1)}")
                 ledger = sc.get("state_ledger", {})
+                narration = sc.get("narration_text", "")
+                trigger = sc.get("sync_trigger_word", "")
                 output.append(f"- Scene {sc.get('scene_number', 1)} [{beat}] ({connector}):")
+                if narration:
+                    output.append(f"  Narration (6-11 words): \"{narration}\" [Sync Trigger Word: '{trigger}']")
                 output.append(f"  Entry State: {ledger.get('entry_state', 'Character at starting stance')}")
                 output.append(f"  Active Props: {', '.join(ledger.get('active_props', [])) or 'None'}")
                 output.append(f"  Atomic 5s Action: {ledger.get('atomic_action_5s', sc.get('scenario', ''))}")
@@ -583,4 +639,5 @@ class StoryMemoryBank:
             output.append("\n" + "=" * 50 + "\n")
 
         return "\n".join(output)
+
 

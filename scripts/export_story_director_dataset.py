@@ -47,6 +47,9 @@ def build_sft_conversation(premise: str, story: Dict[str, Any], art_style: str =
                     "causal_connector": s.get("causal_connector"),
                     "state_ledger": s.get("state_ledger", {}),
                     "scenario": s.get("scenario"),
+                    "narration_text": s.get("narration_text", ""),
+                    "narration_voice_style": s.get("narration_voice_style", "warm_storyteller"),
+                    "sync_trigger_word": s.get("sync_trigger_word", ""),
                     "qwen_scene_prompt": s.get("qwen_scene_prompt"),
                     "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
                     "wan_motion_prompt": s.get("wan_motion_prompt"),
@@ -67,7 +70,8 @@ def build_sft_conversation(premise: str, story: Dict[str, Any], art_style: str =
                 "value": (
                     "You are a master animation director directing a causally coherent animated short film. "
                     "Output a complete JSON storyboard with Causal State Ledgers, 'THEREFORE/BUT' transitions, "
-                    "and 5-second atomic physical actions.\n\n" + user_prompt
+                    "5-second atomic physical actions, and synchronized 6-11 word voiceover narration (`narration_text`, `sync_trigger_word`).\n\n"
+                    + user_prompt
                 ),
             },
             {

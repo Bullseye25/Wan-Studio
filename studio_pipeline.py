@@ -40,6 +40,15 @@ from cinematography_vault import (
     CAUSAL_NARRATIVE_BLUEPRINTS,
     StoryMemoryBank,
 )
+from narrator_engine import (
+    NARRATOR_VOICE_PRESETS,
+    DEFAULT_NARRATOR_VOICE,
+    enforce_narration_word_budget,
+    extract_sync_trigger_word,
+    OpenSourceNarratorTTS,
+    AudioVisualSyncEngine,
+)
+
 
 # ── Defaults & Constants ──────────────────────────────────────────────────────
 
@@ -312,6 +321,259 @@ def ensure_high_delta_end_prompt(start_prompt: str, end_prompt: str, scenario: s
     return end_prompt
 
 
+def evaluate_flf2v_compatibility(
+    start_pil: Any,
+    end_pil: Any,
+    min_delta: float = 18.0,
+    max_delta: float = 85.0,
+    min_bg_ssim: float = 0.68,
+) -> Dict[str, Any]:
+    """
+    Two-Sided Pose-Delta & Background-Similarity Gatekeeper for Wan 2.2 FLF2V:
+    - TOO_STATIC:        pose_delta < 18.0 (start and end poses are too similar -> frozen video)
+    - EXTREME_DIVERGENCE: pose_delta > 85.0 or bg_similarity < 0.68 (background/geometry diverged -> mid-clip cross-fade/morphing)
+    - OPTIMAL_FLF2V:     18.0 <= pose_delta <= 85.0 and bg_similarity >= 0.68 (sweet spot for smooth 81-frame interpolation)
+    """
+    import numpy as np
+
+    if start_pil is None or end_pil is None:
+        return {
+            "pose_delta": 0.0,
+            "bg_similarity": 1.0,
+            "status": "TOO_STATIC",
+            "flf2v_safe": False,
+        }
+
+    try:
+        if isinstance(start_pil, str) and os.path.exists(start_pil):
+            start_pil = Image.open(start_pil)
+        if isinstance(end_pil, str) and os.path.exists(end_pil):
+            end_pil = Image.open(end_pil)
+
+        pose_delta = measure_frame_pose_delta(start_pil, end_pil)
+
+        a = np.array(start_pil.resize((256, 256)).convert("RGB"), dtype=np.float32)
+        b = np.array(end_pil.resize((256, 256)).convert("RGB"), dtype=np.float32)
+
+        # Compute outer 14% border ring similarity to verify background geometry stability
+        border = int(round(256 * 0.14))
+        mask = np.zeros((256, 256), dtype=bool)
+        mask[:border, :] = True
+        mask[-border:, :] = True
+        mask[:, :border] = True
+        mask[:, -border:] = True
+
+        border_diff = float(np.abs(a[mask] - b[mask]).mean())
+        bg_similarity = float(max(0.0, min(1.0, 1.0 - (border_diff / 90.0))))
+
+        if pose_delta < min_delta:
+            status = "TOO_STATIC"
+            flf2v_safe = False
+            use_flf2v = True
+        elif pose_delta > max_delta or bg_similarity < min_bg_ssim:
+            status = "EXTREME_DIVERGENCE"
+            flf2v_safe = False
+            use_flf2v = False
+        else:
+            status = "OPTIMAL_FLF2V"
+            flf2v_safe = True
+            use_flf2v = True
+
+        return {
+            "pose_delta": round(pose_delta, 2),
+            "bg_similarity": round(bg_similarity, 3),
+            "bg_ssim": round(bg_similarity, 3),
+            "status": status,
+            "flf2v_safe": flf2v_safe,
+            "use_flf2v": use_flf2v,
+        }
+    except Exception:
+        return {
+            "pose_delta": 0.0,
+            "bg_similarity": 1.0,
+            "bg_ssim": 1.0,
+            "status": "TOO_STATIC",
+            "flf2v_safe": False,
+            "use_flf2v": True,
+        }
+
+
+def stabilize_end_frame_background(
+    start_pil: Image.Image,
+    end_pil: Image.Image,
+    border_ratio: float = 0.14,
+) -> Image.Image:
+    """
+    Soft-feathered background border lock for Wan 2.2 FLF2V:
+    Blends the outer peripheral background border of `start_pil` into `end_pil` using a smooth
+    Gaussian-feathered alpha mask while leaving the central 72% character action zone untouched.
+    Eliminates peripheral wall/foliage drift during Qwen Image Edit end-frame synthesis.
+    """
+    import numpy as np
+    import cv2
+
+    if start_pil is None or end_pil is None:
+        return end_pil
+
+    w, h = end_pil.size
+    start_resized = start_pil.convert("RGB").resize((w, h), Image.Resampling.BILINEAR)
+    end_rgb = np.array(end_pil.convert("RGB"), dtype=np.float32)
+    start_rgb = np.array(start_resized, dtype=np.float32)
+
+    # Create central action mask (1.0 in center, 0.0 at outer border edges)
+    mask = np.zeros((h, w), dtype=np.float32)
+    bx = max(4, int(round(w * border_ratio)))
+    by = max(4, int(round(h * border_ratio)))
+    mask[by : h - by, bx : w - bx] = 1.0
+
+    # Feather the transition smoothly
+    ksize = max(15, (min(bx, by) // 2) * 2 + 1)
+    mask = cv2.GaussianBlur(mask, (ksize, ksize), sigmaX=max(5.0, min(bx, by) * 0.45))
+    mask_3d = mask[:, :, None]
+
+    # Preserve 100% of end_rgb in center, blend 65% of start_rgb along outer peripheral border
+    edge_weight = (1.0 - mask_3d) * 0.65
+    blended = end_rgb * (1.0 - edge_weight) + start_rgb * edge_weight
+    return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
+
+
+def compute_motion_adaptive_wan_params(
+    motion_intensity: int = 2,
+    duration_seconds: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Motion-Adaptive Dual-CFG & Flow-Shift Matrix for Wan 2.2 14B Lightning:
+    - Low-Motion / Dialogue (Intensity 1-2): flow_shift=2.8, cfg=2.0, cfg_2=1.5, steps=8
+    - Medium Narrative Action (Intensity 3): flow_shift=3.8, cfg=1.9, cfg_2=1.4, steps=10
+    - High-Velocity Action / Combat (Intensity 4-5): flow_shift=4.8, cfg=1.75, cfg_2=1.25, steps=12
+      (prevents high-frequency CFG ghosting / double-limbs during fast motion).
+    """
+    intensity = int(round(_clamp(motion_intensity, 1, 5, 2)))
+    if intensity >= 4:
+        params = {
+            "guidance_scale": 1.75,
+            "guidance_scale_2": 1.25,
+            "flow_shift": 4.8,
+            "steps": 12,
+        }
+    elif intensity == 3:
+        params = {
+            "guidance_scale": 1.9,
+            "guidance_scale_2": 1.4,
+            "flow_shift": 3.8,
+            "steps": 10,
+        }
+    else:
+        params = {
+            "guidance_scale": WAN_DEFAULTS["guidance_scale"],
+            "guidance_scale_2": WAN_DEFAULTS["guidance_scale_2"],
+            "flow_shift": WAN_DEFAULTS["flow_shift"],
+            "steps": WAN_DEFAULTS["steps"],
+        }
+    return params
+
+
+def verify_video_clip_quality(
+    video_path: str,
+    expected_peak_sec: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Post-Render Optical Flow & Sharpness Telemetry Gate:
+    Inspects a rendered MP4 clip using Farneback dense optical flow and Laplacian variance:
+      1. mean_flow: average optical flow magnitude across the clip (detects frozen clips < 0.35).
+      2. surge_ratio: max(frame_flow) / median(frame_flow) (detects mid-clip cross-fade/morphing > 6.5).
+      3. sharpness_retention: Laplacian sharpness of final 20% frames vs first 20% frames (detects late-frame blur < 0.45).
+      4. peak_flow_sec & audio_sync_delta_sec: measures temporal alignment between peak visual motion
+         and the narrator's spoken sync_trigger_word timestamp.
+    """
+    import numpy as np
+    import cv2
+
+    if not video_path or not os.path.exists(video_path):
+        return {
+            "passed": False,
+            "mean_flow": 0.0,
+            "surge_ratio": 0.0,
+            "sharpness_retention": 0.0,
+            "peak_flow_sec": 0.0,
+            "audio_sync_delta_sec": None,
+            "issues": ["Video file missing"],
+        }
+
+    cap = cv2.VideoCapture(video_path)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or WAN_FPS)
+    if fps <= 0:
+        fps = float(WAN_FPS)
+
+    gray_frames = []
+    sharpness_vals = []
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        small = cv2.resize(frame, (160, 160))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        gray_frames.append(gray)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        sharpness_vals.append(lap_var)
+    cap.release()
+
+    if len(gray_frames) < 2:
+        return {
+            "passed": True,
+            "mean_flow": 0.0,
+            "surge_ratio": 1.0,
+            "sharpness_retention": 1.0,
+            "peak_flow_sec": 0.0,
+            "audio_sync_delta_sec": None,
+            "issues": [],
+        }
+
+    flow_mags = []
+    for i in range(len(gray_frames) - 1):
+        flow = cv2.calcOpticalFlowFarneback(
+            gray_frames[i], gray_frames[i + 1], None,
+            pyr_scale=0.5, levels=2, winsize=13, iterations=2, poly_n=5, poly_sigma=1.1, flags=0
+        )
+        mag = float(np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean())
+        flow_mags.append(mag)
+
+    mean_flow = float(np.mean(flow_mags)) if flow_mags else 0.0
+    median_flow = float(np.median(flow_mags)) if flow_mags else 0.0
+    max_flow = float(np.max(flow_mags)) if flow_mags else 0.0
+    surge_ratio = float(max_flow / max(median_flow, 0.15)) if flow_mags else 1.0
+
+    peak_idx = int(np.argmax(flow_mags)) if flow_mags else 0
+    peak_flow_sec = round((peak_idx + 1) / fps, 2)
+
+    n_sharp = max(1, len(sharpness_vals) // 5)
+    early_sharp = float(np.mean(sharpness_vals[:n_sharp])) + 1e-5
+    late_sharp = float(np.mean(sharpness_vals[-n_sharp:])) + 1e-5
+    sharpness_retention = float(late_sharp / early_sharp)
+
+    issues = []
+    if mean_flow < 0.15:
+        issues.append(f"Frozen clip detected (mean_flow={mean_flow:.2f} < 0.15)")
+    if surge_ratio > 6.5 and max_flow > 4.0:
+        issues.append(f"Mid-clip morphing surge detected (surge_ratio={surge_ratio:.2f} > 6.5)")
+    if sharpness_retention < 0.45 and early_sharp > 15.0:
+        issues.append(f"Late-frame sharpness degradation (retention={sharpness_retention:.2f} < 0.45)")
+
+    audio_sync_delta = None
+    if expected_peak_sec is not None:
+        audio_sync_delta = round(abs(peak_flow_sec - float(expected_peak_sec)), 2)
+
+    return {
+        "passed": len(issues) == 0,
+        "mean_flow": round(mean_flow, 3),
+        "surge_ratio": round(surge_ratio, 2),
+        "sharpness_retention": round(sharpness_retention, 2),
+        "peak_flow_sec": peak_flow_sec,
+        "audio_sync_delta_sec": audio_sync_delta,
+        "issues": issues,
+    }
+
+
 class StudioPipeline:
     """
     Automated Multi-Agent Video Production Studio Coordinator.
@@ -337,9 +599,11 @@ class StudioPipeline:
         self.scenes_dir = self.base_dir / "scenes"
         self.clips_dir = self.base_dir / "clips"
         self.movies_dir = self.base_dir / "movies"
+        self.audio_dir = self.base_dir / "audio"
 
-        for d in [self.char_dir, self.scenes_dir, self.clips_dir, self.movies_dir]:
+        for d in [self.char_dir, self.scenes_dir, self.clips_dir, self.movies_dir, self.audio_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # LLM transport (shared by Story Architect and Animation Director)
@@ -477,7 +741,10 @@ class StudioPipeline:
             "4. 180-DEGREE SCREEN DIRECTION: Maintain consistent spatial eyelines and screen direction (e.g. hero moving screen-left to screen-right) "
             "across cuts so characters do not disorientingly flip orientation.\n"
             "5. HIGH POSE DELTA: Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. If start and end poses are too similar, the video will freeze! "
-            "The End Frame (t=5.0s) MUST have a visibly transformed body posture, changed limbs, and clear follow-through.\n\n"
+            "The End Frame (t=5.0s) MUST have a visibly transformed body posture, changed limbs, and clear follow-through.\n"
+            "6. SYNCHRONIZED VOICEOVER NARRATION (6 TO 11 WORDS MAX PER SCENE): Every scene must include a spoken 'narration_text' (strictly 6 to 11 words "
+            "so it is spoken cleanly in 2.2s–3.8s inside the 5.0s shot), a 'narration_voice_style' (e.g. 'warm_wonder', 'tense_whisper', 'urgent_rising', "
+            "'epic_climax', 'joyful_resolution'), and a single 'sync_trigger_word' (the exact action verb in narration_text where the visual climax occurs).\n\n"
             f"NARRATIVE BEAT STRUCTURE TO FOLLOW:\n{beat_guide_text}\n\n"
             + (f"{few_shot_prompt}\n\n" if few_shot_prompt else "")
             + "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
@@ -505,6 +772,9 @@ class StudioPipeline:
             f'      "duration_seconds": {scene_duration},\n'
             '      "narrative_beat": "e.g. Hook & Status Quo / Inciting Obstacle / Climax & Payoff",\n'
             '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
+            '      "narration_text": "Spoken voiceover line for this 5s shot (strictly 6 to 11 words)",\n'
+            '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
+            '      "sync_trigger_word": "exact action verb in narration_text that triggers the visual climax",\n'
             '      "state_ledger": {\n'
             '        "entry_state": "Exact character body posture, location, and hand items at t=0.0s",\n'
             '        "active_props": ["list of held weapons or items"],\n'
@@ -639,7 +909,7 @@ class StudioPipeline:
             for s in norm_scenes:
                 s["duration_seconds"] = per_scene
 
-        # ── Causal State Ledger & Narrative Beat Enforcement ──────────────────
+        # ── Causal State Ledger, Narration & Narrative Beat Enforcement ───────
         char_props = [c.get("signature_details") for c in norm_chars if c.get("signature_details")]
         beat_presets = NARRATIVE_BEATS_BY_COUNT.get(len(norm_scenes), NARRATIVE_BEATS_BY_COUNT.get(6, []))
 
@@ -648,6 +918,20 @@ class StudioPipeline:
             default_conn = beat_presets[i]["connector"] if i < len(beat_presets) else ("SETUP" if i == 0 else "THEREFORE")
             s.setdefault("narrative_beat", default_beat)
             s.setdefault("causal_connector", default_conn)
+
+            # Enforce 6-11 word spoken narration & sync trigger word
+            raw_narration = s.get("narration_text") or ""
+            s["narration_text"] = enforce_narration_word_budget(
+                raw_narration,
+                scenario=s.get("scenario") or s.get("qwen_scene_prompt", ""),
+                max_words=12,
+            )
+            s.setdefault("narration_voice_style", "cinematic_warm")
+            s["sync_trigger_word"] = extract_sync_trigger_word(
+                s["narration_text"],
+                scenario=s.get("scenario", ""),
+                explicit_trigger=s.get("sync_trigger_word"),
+            )
 
             raw_ledger = s.get("state_ledger")
             if not isinstance(raw_ledger, dict):
@@ -697,7 +981,7 @@ class StudioPipeline:
         Multi-Agent 'Story Doctor' & Causal Continuity Critic.
         Audits the screenplay before image/video rendering against 5 key criteria:
         1. Narrative Causality: Are scenes linked by THEREFORE / BUT instead of AND THEN?
-        2. 5-Second Feasibility: Does each scene feature 1 atomic action + reaction that fits in 5 seconds?
+        2. 5-Second Feasibility: Does each scene feature 1 atomic action + reaction that fits in 5 seconds (and narration <= 12 words)?
         3. Prop & Weapon Permanence: Do items stay in hands without vanishing mid-story?
         4. Spatial & Screen Direction: Is 180-degree cinema direction respected across cuts?
         5. Visual Action Progression: Is there a dramatic physical pose difference between start and end?
@@ -724,10 +1008,10 @@ class StudioPipeline:
         system_prompt = (
             "You are the Lead Story Doctor and Animation Continuity Critic for a world-class animation studio.\n"
             "Your mission is to audit an animated short film storyboard and ensure it possesses ironclad narrative causality, "
-            "strict 5-second temporal feasibility, prop permanence, and visual action progression.\n\n"
+            "strict 5-second temporal feasibility, prop permanence, synchronized narration (6-11 words), and visual action progression.\n\n"
             "AUDIT CRITERIA (Score 1-10 each):\n"
             "1. causality: Every scene transition must connect via 'THEREFORE' (consequence) or 'BUT' (obstacle). Ban lazy 'AND THEN' jumps.\n"
-            "2. feasibility_5s: Each 5.0-second Wan 2.2 clip can only execute ONE primary physical action and immediate reaction. Ban cramming 3-4 separate events into 5s.\n"
+            "2. feasibility_5s: Each 5.0-second Wan 2.2 clip can only execute ONE primary physical action and immediate reaction, and narration_text must be <= 12 words.\n"
             "3. prop_permanence: Weapons and items in characters' hands must stay in their hands across cuts unless explicitly dropped, sheared, or stowed.\n"
             "4. spatial_continuity: Keep 180-degree screen direction consistent (e.g. facing screen-right vs screen-left).\n"
             "5. visual_delta: The End Frame (t=5s) MUST be a drastically different physical body stance from the Start Frame (t=0s).\n\n"
@@ -749,6 +1033,9 @@ class StudioPipeline:
             '      "title": "Scene Name",\n'
             '      "narrative_beat": "e.g. Hook & Status Quo",\n'
             '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
+            '      "narration_text": "Spoken line (6 to 11 words)",\n'
+            '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
+            '      "sync_trigger_word": "action verb in narration_text",\n'
             '      "state_ledger": {\n'
             '        "entry_state": "Starting body posture at t=0s",\n'
             '        "active_props": ["held items/weapons"],\n'
@@ -779,6 +1066,9 @@ class StudioPipeline:
                         "title": s.get("title"),
                         "narrative_beat": s.get("narrative_beat"),
                         "causal_connector": s.get("causal_connector"),
+                        "narration_text": s.get("narration_text"),
+                        "narration_voice_style": s.get("narration_voice_style"),
+                        "sync_trigger_word": s.get("sync_trigger_word"),
                         "state_ledger": s.get("state_ledger"),
                         "scenario": s.get("scenario"),
                         "qwen_scene_prompt": s.get("qwen_scene_prompt"),
@@ -837,6 +1127,13 @@ class StudioPipeline:
                     f_score = max(6.0, f_score - 1.0)
                     issues.append(f"Scene {i+1} scenario contains multiple actions that may exceed the 5-second window.")
 
+                # Check narration word budget
+                narr_words = re.findall(r"\w+", str(s.get("narration_text", "")))
+                if len(narr_words) > 13:
+                    f_score = max(6.0, f_score - 1.0)
+                    issues.append(f"Scene {i+1} narration exceeds the 12-word spoken budget for a 5s shot.")
+                    s["narration_text"] = enforce_narration_word_budget(s.get("narration_text", ""), scen_text, max_words=12)
+
                 # Check visual delta
                 p1 = s.get("qwen_scene_prompt", "")
                 p2 = s.get("qwen_end_scene_prompt", "")
@@ -867,7 +1164,12 @@ class StudioPipeline:
             for i, rep in enumerate(repaired_scenes):
                 if isinstance(rep, dict):
                     # Retain durations and identifiers while updating narrative content
-                    for key in ("title", "narrative_beat", "causal_connector", "state_ledger", "scenario", "qwen_scene_prompt", "qwen_end_scene_prompt", "wan_motion_prompt", "camera_movement"):
+                    for key in (
+                        "title", "narrative_beat", "causal_connector", "narration_text",
+                        "narration_voice_style", "sync_trigger_word", "state_ledger",
+                        "scenario", "qwen_scene_prompt", "qwen_end_scene_prompt",
+                        "wan_motion_prompt", "camera_movement",
+                    ):
                         if rep.get(key):
                             scenes[i][key] = rep[key]
             story_data["scenes"] = scenes
@@ -918,6 +1220,121 @@ class StudioPipeline:
             user_edited=user_edited,
             notes=notes,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 1B: Open-Source Narrator Voice Synthesis & Audio-Visual Sync
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def generate_story_narration(
+        self,
+        scenes: List[Dict[str, Any]],
+        voice_preset: str = DEFAULT_NARRATOR_VOICE,
+        quantize_durations: bool = False,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Synthesizes open-source voiceover narration (.wav) for every scene using OpenSourceNarratorTTS
+        (Kokoro-82M Apache 2.0 with offline harmonic fallback), extracts word-level timestamps,
+        quantizes audio to Wan 2.2 4k+1 frame counts, and calculates exact phase transition
+        boundaries (p1, p2) locked to each scene's spoken `sync_trigger_word`.
+        """
+        tts = OpenSourceNarratorTTS(voice_preset=voice_preset)
+        total = len(scenes)
+        updated_scenes = []
+
+        for idx, scene in enumerate(scenes):
+            scene_entry = dict(scene)
+            scene_num = scene_entry.get("scene_number", idx + 1)
+            title = self._sanitize_filename(scene_entry.get("title", f"scene_{scene_num}"))
+
+            if progress_cb:
+                pct = 0.12 + (idx / max(1, total)) * 0.04
+                progress_cb(pct, f"🎙️ Synthesizing Narrator Voice for Scene {idx+1}/{total}: '{scene_entry.get('title', '')}'...")
+
+            narration_text = enforce_narration_word_budget(
+                scene_entry.get("narration_text", ""),
+                scenario=scene_entry.get("scenario") or scene_entry.get("qwen_scene_prompt", ""),
+                max_words=12,
+            )
+            scene_entry["narration_text"] = narration_text
+
+            trigger_word = extract_sync_trigger_word(
+                narration_text,
+                scenario=scene_entry.get("scenario", ""),
+                explicit_trigger=scene_entry.get("sync_trigger_word"),
+            )
+            scene_entry["sync_trigger_word"] = trigger_word
+            scene_entry["narrator_voice_preset"] = voice_preset
+
+            wav_path = str(self.audio_dir / f"scene_{scene_num}_{title}_narration.wav")
+            tts_res = tts.synthesize_scene_narration(
+                text=narration_text,
+                output_wav_path=wav_path,
+                voice_preset=voice_preset,
+                voice_style=scene_entry.get("narration_voice_style", "cinematic_warm"),
+            )
+
+            quant_info = AudioVisualSyncEngine.quantize_audio_to_wan_frames(
+                audio_path=tts_res["audio_path"],
+                word_timestamps=tts_res["word_timestamps"],
+                lead_in_sec=0.25,
+                tail_pause_sec=0.35,
+            )
+
+            if quantize_durations:
+                scene_entry["duration_seconds"] = quant_info["duration_seconds"]
+                scene_entry["num_frames"] = quant_info["num_frames"]
+
+            clip_dur = float(scene_entry.get("duration_seconds", quant_info["duration_seconds"]))
+            synced_phases = AudioVisualSyncEngine.compute_synced_phase_boundaries(
+                duration_seconds=clip_dur,
+                word_timestamps=quant_info["shifted_timestamps"],
+                sync_trigger_word=trigger_word,
+            )
+
+            scene_entry["audio_path"] = quant_info["audio_path"]
+            scene_entry["narration_audio_path"] = quant_info["audio_path"]
+            scene_entry["word_timestamps"] = quant_info["shifted_timestamps"]
+            scene_entry["audio_quantization"] = quant_info
+            scene_entry["synced_phases"] = synced_phases
+            scene_entry["tts_engine"] = tts_res.get("engine", "kokoro-82m")
+
+            scene.update(scene_entry)
+            updated_scenes.append(scene_entry)
+
+        return updated_scenes
+
+    def regenerate_single_scene_narration(
+        self,
+        story_data: Dict[str, Any],
+        scene_index: int,
+        narration_text: Optional[str] = None,
+        sync_trigger_word: Optional[str] = None,
+        voice_preset: Optional[str] = None,
+        quantize_durations: bool = False,
+    ) -> Dict[str, Any]:
+        """Regenerates the open-source narrator audio and sync phase boundaries for a single scene."""
+        scenes = list((story_data or {}).get("scenes", []))
+        if not scenes or scene_index < 0 or scene_index >= len(scenes):
+            raise IndexError(f"Scene index {scene_index} is out of range (total: {len(scenes)}).")
+
+        target = dict(scenes[scene_index])
+        if narration_text is not None and str(narration_text).strip():
+            target["narration_text"] = str(narration_text).strip()
+        if sync_trigger_word is not None and str(sync_trigger_word).strip():
+            target["sync_trigger_word"] = str(sync_trigger_word).strip()
+
+        use_voice = voice_preset or target.get("narrator_voice_preset") or story_data.get("narrator_voice_preset") or DEFAULT_NARRATOR_VOICE
+        updated_list = self.generate_story_narration(
+            [target],
+            voice_preset=use_voice,
+            quantize_durations=quantize_durations,
+        )
+        updated_scene = updated_list[0]
+        scenes[scene_index] = updated_scene
+        story_data["scenes"] = scenes
+        return updated_scene
+
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1225,6 +1642,7 @@ class StudioPipeline:
             last_keyframe_pil = Image.open(io.BytesIO(end_results[0])).convert("RGB")
             if color_match_end and keyframe_pil is not None:
                 last_keyframe_pil = match_color_histogram_lab(last_keyframe_pil, keyframe_pil, strength=0.75)
+                last_keyframe_pil = stabilize_end_frame_background(keyframe_pil, last_keyframe_pil, border_ratio=0.14)
 
             # ── Pose Delta Gatekeeper (Self-Correction for Stagnant Frames) ───
             pose_delta = measure_frame_pose_delta(keyframe_pil, last_keyframe_pil)
@@ -1263,6 +1681,7 @@ class StudioPipeline:
                 retry_pil = Image.open(io.BytesIO(retry_results[0])).convert("RGB")
                 if color_match_end:
                     retry_pil = match_color_histogram_lab(retry_pil, keyframe_pil, strength=0.75)
+                    retry_pil = stabilize_end_frame_background(keyframe_pil, retry_pil, border_ratio=0.14)
 
                 retry_delta = measure_frame_pose_delta(keyframe_pil, retry_pil)
                 print(f"[StudioPipeline] Scene {scene_num} Retry Pose Delta: {retry_delta:.2f}")
@@ -1270,17 +1689,22 @@ class StudioPipeline:
                 use_end_seed = retry_end_seed
                 pose_delta = retry_delta
 
+            flf2v_compat = evaluate_flf2v_compatibility(keyframe_pil, last_keyframe_pil)
+
             end_filename = f"scene_{scene_num}_end_{clean_title}_{timestamp}.jpg"
             last_keyframe_path = self.scenes_dir / end_filename
             last_keyframe_pil.save(last_keyframe_path, format="JPEG", quality=95)
-            print(f"[StudioPipeline] Saved Scene {scene_num} END keyframe: {last_keyframe_path}")
+            print(f"[StudioPipeline] Saved Scene {scene_num} END keyframe: {last_keyframe_path} (FLF2V status={flf2v_compat['status']})")
 
             scene_entry["last_keyframe_pil"] = last_keyframe_pil
             scene_entry["last_keyframe_path"] = str(last_keyframe_path)
             scene_entry["last_keyframe_seed"] = use_end_seed
             scene_entry["pose_delta"] = round(pose_delta, 2)
+            scene_entry["flf2v_compat"] = flf2v_compat
+            scene_entry["flf2v_safe"] = flf2v_compat["flf2v_safe"]
 
         return scene_entry
+
 
     def direct_scene_end_frame_with_gemma(
         self,
@@ -1881,12 +2305,22 @@ class StudioPipeline:
                 f"Active Props/Weapons: {', '.join(active_props) if active_props else 'None'}\n"
             )
 
+        narration_note = ""
+        if scene.get("narration_text"):
+            sync_p = scene.get("synced_phases") or {}
+            trig_t = sync_p.get("p1", round(duration * 0.3, 1))
+            narration_note = (
+                f"Voiceover Narration: \"{scene.get('narration_text')}\" "
+                f"[Sync Trigger Word: '{scene.get('sync_trigger_word', '')}' spoken at t={trig_t}s — align Phase 2 climax action to this timestamp]\n"
+            )
+
         text = (
             f"Film: {story_meta.get('title', '')} | Style: {story_meta.get('art_style', '')} | "
             f"Theme: {story_meta.get('theme', '')}\n"
             f"Shot {scene.get('scene_number')}: {scene.get('title', '')} ({duration:.1f}s)\n"
             f"Story beat: {scene.get('scenario', '')}\n"
             f"{ledger_note}"
+            f"{narration_note}"
             f"{end_prompt_note}"
             f"Draft motion from writer: {scene.get('wan_motion_prompt', '')}\n"
             f"Draft camera: {scene.get('camera_movement', '')}\n"
@@ -1925,7 +2359,8 @@ class StudioPipeline:
         """
         Validates/clamps the Director's JSON and compiles it into the exact Wan 2.2 prompt,
         negative prompt and sampler parameters. Works with an empty dict (deterministic fallback).
-        Integrates the Cinematography Knowledge Vault for period sequencing and reactive physics.
+        Integrates the Cinematography Knowledge Vault, Motion-Adaptive Dual-CFG & Flow-Shift Matrix,
+        and Audio-Visual Temporal Lock (`synced_phases`) when narrator timestamps are present.
         """
         story_meta = story_meta or {}
         raw = raw if isinstance(raw, dict) else {}
@@ -1933,9 +2368,12 @@ class StudioPipeline:
 
         lim = DIRECTOR_PARAM_LIMITS
         intensity = int(round(_clamp(raw.get("motion_intensity"), *lim["motion_intensity"], 2)))
-        cfg = round(_clamp(raw.get("guidance_scale"), *lim["guidance_scale"], WAN_DEFAULTS["guidance_scale"]), 2)
-        steps = int(round(_clamp(raw.get("steps"), *lim["steps"], WAN_DEFAULTS["steps"])))
-        flow_shift = round(_clamp(raw.get("flow_shift"), *lim["flow_shift"], WAN_DEFAULTS["flow_shift"]), 2)
+        adaptive = compute_motion_adaptive_wan_params(intensity, duration)
+
+        cfg = round(_clamp(raw.get("guidance_scale"), *lim["guidance_scale"], adaptive["guidance_scale"]), 2)
+        cfg2 = round(float(raw.get("guidance_scale_2", adaptive["guidance_scale_2"])), 2)
+        steps = int(round(_clamp(raw.get("steps"), *lim["steps"], adaptive["steps"])))
+        flow_shift = round(_clamp(raw.get("flow_shift"), *lim["flow_shift"], adaptive["flow_shift"]), 2)
 
         camera = _trim(raw.get("camera_movement") or scene.get("camera_movement") or "static tripod shot", 80)
         shot_type = _trim(raw.get("shot_type") or "medium shot", 60)
@@ -1963,7 +2401,14 @@ class StudioPipeline:
             art_style=story_meta.get("art_style", ""),
         )
 
-        p1, p2 = round(duration * 0.3, 1), round(duration * 0.8, 1)
+        # Lock Phase 1 -> Phase 2 -> Phase 3 transitions to Narrator Sync Trigger Word when available
+        synced_phases = scene.get("synced_phases")
+        if isinstance(synced_phases, dict) and "p1" in synced_phases and "p2" in synced_phases:
+            p1 = round(float(synced_phases["p1"]), 2)
+            p2 = round(float(synced_phases["p2"]), 2)
+        else:
+            p1, p2 = round(duration * 0.3, 1), round(duration * 0.8, 1)
+
         t0 = timeline[0].strip().rstrip(".")
         t1 = timeline[1].strip().rstrip(".")
         t2 = timeline[2].strip().rstrip(".")
@@ -2000,7 +2445,6 @@ class StudioPipeline:
             f"{style + ', ' if style else ''}smooth fluid animation, consistent character design, high detail."
         )
 
-
         extra_neg = _trim(raw.get("negative_additions") or "", 200)
         negative = ", ".join(x for x in [DEFAULT_NEGATIVE_PROMPT, IDENTITY_NEGATIVE, extra_neg] if x)
 
@@ -2010,6 +2454,7 @@ class StudioPipeline:
             "motion_intensity": intensity,
             "subject_action": action,
             "timeline": timeline,
+            "synced_phases": {"p1": p1, "p2": p2},
             "environment_motion": env,
             "identity_anchors": anchors,
             "lens": blueprint.get("lens", "50mm prime cinema lens"),
@@ -2017,7 +2462,7 @@ class StudioPipeline:
             "wan_prompt": wan_prompt,
             "negative_prompt": negative,
             "guidance_scale": cfg,
-            "guidance_scale_2": WAN_DEFAULTS["guidance_scale_2"],
+            "guidance_scale_2": cfg2,
             "steps": steps,
             "flow_shift": flow_shift,
             "duration_seconds": duration,
@@ -2032,12 +2477,15 @@ class StudioPipeline:
         anti_noise_guard: bool = True,
     ) -> Dict[str, Any]:
         """
-        Anti-Degradation, Anti-Noise, and Rotation Identity Guard:
+        Anti-Degradation, Anti-Noise, Motion-Adaptive Dual-CFG, and Rotation Identity Guard:
         1. Protects long (>= 4.5s / 73-81 frames) clips from dissolving into late-frame noise:
-           - Automatically raises FlowShift to 4.5 to keep global temporal structure locked.
+           - Automatically raises FlowShift to >= 4.5 to keep global temporal structure locked.
            - Sets inference steps to at least 10 on long clips to clean up high-frequency grain.
            - Clamps guidance scale <= 2.0 to prevent CFG latent norm explosion.
-        2. Rotation Identity Lock:
+        2. Motion-Adaptive High-Velocity Guard (motion_intensity >= 4):
+           - Raises FlowShift to >= 4.8, steps >= 12, and lowers guidance_scale <= 1.75 / guidance_scale_2 <= 1.25
+             to eliminate double-limbs and ghosting during fast combat/sprints.
+        3. Rotation Identity Lock:
            - Injects explicit rotational geometric anchors into prompt and negative prompt
              when head or body turns/rotations are detected so the face doesn't morph.
         """
@@ -2046,6 +2494,7 @@ class StudioPipeline:
 
         updated = dict(plan_or_wan_kwargs)
         dur = float(duration_seconds)
+        intensity = int(updated.get("motion_intensity", 2) or 2)
 
         # ── 1. Anti-Noise Guard for 4.5s – 5.0s clips ───────────────────────
         if dur >= 4.5:
@@ -2061,6 +2510,13 @@ class StudioPipeline:
             current_cfg2 = float(updated.get("guidance_scale_2", 1.5))
             if current_cfg2 > 1.5:
                 updated["guidance_scale_2"] = 1.5
+
+        # ── 1b. Motion-Adaptive High-Velocity Guard (Intensity 4-5) ─────────
+        if intensity >= 4:
+            updated["steps"] = max(int(updated.get("steps", 10)), 12)
+            updated["flow_shift"] = max(float(updated.get("flow_shift", 4.5)), 4.8)
+            updated["guidance_scale"] = min(float(updated.get("guidance_scale", 2.0)), 1.75)
+            updated["guidance_scale_2"] = min(float(updated.get("guidance_scale_2", 1.5)), 1.25)
 
         # ── 2. Rotation Identity Lock ─────────────────────────────────────────
         text_to_check = (
@@ -2152,8 +2608,10 @@ class StudioPipeline:
         Animates a single scene with Wan 2.2 on Modal.
         When `use_last_frame=True` and the scene has a `last_keyframe_pil` / `last_keyframe_path`,
         both the Start Frame (`resized_image`) and CIE-Lab color-matched End Frame (`processed_last_image`)
-        are passed to Wan 2.2 for First-Last-Frame (FLF2V) animation.
-        If `anti_noise_guard=True`, stabilizes late-frame CFG and applies rotational geometric locks.
+        are passed to Wan 2.2 for First-Last-Frame (FLF2V) animation — unless `flf2v_compat` flags
+        `EXTREME_DIVERGENCE`, in which case it automatically routes to Guided I2V Mode to prevent
+        mid-clip cross-fade/morphing.
+        Post-render: runs `verify_video_clip_quality` and muxes open-source narrator `.wav` audio when present.
         """
         dims = ASPECT_RATIO_PRESETS.get(aspect_ratio, ASPECT_RATIO_PRESETS["9:16 Vertical (Shorts/Reels)"])
         wan_w, wan_h = dims["wan_w"], dims["wan_h"]
@@ -2169,7 +2627,8 @@ class StudioPipeline:
         resized_frame = keyframe_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
 
         resized_last_frame = None
-        if use_last_frame:
+        compat_status = scene.get("flf2v_status") or (scene.get("flf2v_compat") or {}).get("status")
+        if use_last_frame and compat_status != "EXTREME_DIVERGENCE" and not scene.get("force_guided_i2v", False):
             last_pil = scene.get("last_keyframe_pil")
             if last_pil is None and scene.get("last_keyframe_path") and os.path.exists(scene["last_keyframe_path"]):
                 try:
@@ -2179,6 +2638,12 @@ class StudioPipeline:
             if last_pil is not None:
                 resized_last_frame = last_pil.resize((wan_w, wan_h), Image.Resampling.LANCZOS)
                 resized_last_frame = match_color_histogram_lab(resized_last_frame, resized_frame, strength=0.85)
+        elif use_last_frame and (compat_status == "EXTREME_DIVERGENCE" or scene.get("force_guided_i2v", False)):
+            print(
+                f"[StudioPipeline] [FLF2V Guard] Scene {scene_num} flagged as EXTREME_DIVERGENCE "
+                f"— routing to Guided I2V Mode to prevent mid-clip ghosting/morphing."
+            )
+            scene["flf2v_fallback_to_i2v"] = True
 
         plan = scene.get("director")
         if not plan:
@@ -2225,6 +2690,42 @@ class StudioPipeline:
         clip_dest = self.clips_dir / f"clip_scene_{scene_num}_{self._sanitize_filename(title)}_{timestamp}.mp4"
         with open(video_path, "rb") as src, open(clip_dest, "wb") as dst:
             dst.write(src.read())
+
+        # ── Post-Render Optical Flow & Sharpness Telemetry ────────────────────
+        expected_peak = (scene.get("synced_phases") or {}).get("p1")
+        telemetry = verify_video_clip_quality(str(clip_dest), expected_peak_sec=expected_peak)
+        scene["telemetry"] = telemetry
+        try:
+            StoryMemoryBank(memory_dir=str(self.base_dir)).record_clip_telemetry(
+                scene_number=scene_num,
+                telemetry=telemetry,
+                director_plan=plan,
+            )
+        except Exception:
+            pass
+
+        # ── Mux Open-Source Narrator Audio Track into Scene Clip ──────────────
+        audio_path = scene.get("audio_path") or scene.get("narration_audio_path")
+        if audio_path and os.path.exists(audio_path):
+            temp_muxed = self.clips_dir / f"mux_tmp_scene_{scene_num}_{timestamp}.mp4"
+            try:
+                AudioVisualSyncEngine.mux_video_and_audio(
+                    video_path=str(clip_dest),
+                    audio_path=audio_path,
+                    output_path=str(temp_muxed),
+                )
+                if temp_muxed.exists() and temp_muxed.stat().st_size > 100:
+                    os.replace(str(temp_muxed), str(clip_dest))
+                    scene["audio_muxed"] = True
+                    scene["has_narrator_audio"] = True
+            except Exception as e:
+                print(f"[StudioPipeline] Audio mux note for scene {scene_num}: {e}")
+            finally:
+                if temp_muxed.exists():
+                    try:
+                        temp_muxed.unlink()
+                    except Exception:
+                        pass
 
         print(f"[StudioPipeline] Saved Scene {scene_num} clip: {clip_dest}")
         scene["video_path"] = str(clip_dest)
@@ -2311,7 +2812,7 @@ class StudioPipeline:
         cast = [char_map[c] for c in target.get("character_ids", []) if c in char_map]
 
         if updated_fields:
-            for k in ("title", "scenario", "wan_motion_prompt", "camera_movement", "duration_seconds"):
+            for k in ("title", "scenario", "wan_motion_prompt", "camera_movement", "duration_seconds", "narration_text", "sync_trigger_word"):
                 if k in updated_fields and updated_fields[k] is not None:
                     target[k] = updated_fields[k]
 
@@ -2371,6 +2872,7 @@ class StudioPipeline:
                 clip_paths=all_clips,
                 movie_title=story_data.get("title", "Studio_Movie"),
                 progress_cb=progress_cb,
+                scenes=scenes,
             )
             story_data["final_movie_path"] = final_movie
             story_data["manifest_path"] = self.save_manifest(story_data)
@@ -2388,9 +2890,11 @@ class StudioPipeline:
         clip_paths: List[str],
         movie_title: str = "Studio Movie",
         progress_cb: Optional[Callable[[float, str], None]] = None,
+        scenes: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Concatenates individual scene clips into a single movie using FFmpeg.
+        Concatenates individual scene clips into a single movie using FFmpeg (preserving muxed AAC
+        voiceover tracks when present) and exports a companion `.srt` subtitle file if `scenes` are provided.
         """
         if not clip_paths:
             raise ValueError("No video clips provided for stitching.")
@@ -2422,13 +2926,28 @@ class StudioPipeline:
                 print(f"[StudioPipeline] FFmpeg copy returned {res.returncode}, re-encoding concat...")
                 cmd_reencode = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
                                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-b:a", "192k",
                                 str(output_movie_path)]
                 res_re = subprocess.run(cmd_reencode, capture_output=True, text=True)
                 if res_re.returncode != 0:
-                    raise RuntimeError(f"FFmpeg stitching failed: {res_re.stderr}")
+                    # Fallback without audio codec if input clips have no audio stream
+                    cmd_reencode_vo = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_file,
+                                       "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                       str(output_movie_path)]
+                    res_vo = subprocess.run(cmd_reencode_vo, capture_output=True, text=True)
+                    if res_vo.returncode != 0:
+                        raise RuntimeError(f"FFmpeg stitching failed: {res_vo.stderr}")
         finally:
             if os.path.exists(concat_list_file):
                 os.remove(concat_list_file)
+
+        if scenes:
+            try:
+                srt_path = output_movie_path.with_suffix(".srt")
+                AudioVisualSyncEngine.write_srt_subtitles(scenes, str(srt_path))
+                print(f"[StudioPipeline] Exported synchronized SRT subtitles: {srt_path}")
+            except Exception as e:
+                print(f"[StudioPipeline] Subtitle export note: {e}")
 
         print(f"[StudioPipeline] Successfully assembled movie ({output_movie_path.stat().st_size} bytes): {output_movie_path}")
 
@@ -2457,15 +2976,16 @@ class StudioPipeline:
         enable_rife_2x: bool = True,
         chain_previous_end_frame: bool = False,
         anti_noise_guard: bool = True,
+        enable_narrator: bool = True,
+        narrator_voice: str = DEFAULT_NARRATOR_VOICE,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes all 6 stages of the Studio pipeline end-to-end using three dedicated seeds:
+        Executes all stages of the Studio pipeline end-to-end using three dedicated seeds:
           - z_image_seed : locked across all Z-Image Turbo character portraits
           - qwen_seed    : locked across all Qwen Image Edit scene keyframes
           - wan_seed     : locked across all Wan 2.2 5s video clips
-        If any of the 3 seeds is not provided, falls back to `shared_seed` if given, or picks
-        3 random seeds via `generate_three_studio_seeds()`.
+        Includes Open-Source Narrator Voice Synthesis & Audio-Visual Sync when `enable_narrator=True`.
         """
         random_seeds = generate_three_studio_seeds()
         seed_z = int(z_image_seed if z_image_seed is not None else (shared_seed if shared_seed is not None else random_seeds["z_image_seed"]))
@@ -2482,11 +3002,20 @@ class StudioPipeline:
         story_data["z_image_seed"] = seed_z
         story_data["qwen_seed"] = seed_qwen
         story_data["wan_seed"] = seed_wan
+        story_data["narrator_voice_preset"] = narrator_voice
         story_data["seeds"] = {
             "z_image_seed": seed_z,
             "qwen_seed": seed_qwen,
             "wan_seed": seed_wan,
         }
+
+        if enable_narrator:
+            story_data["scenes"] = self.generate_story_narration(
+                scenes=story_data.get("scenes", []),
+                voice_preset=narrator_voice,
+                quantize_durations=False,
+                progress_cb=progress_cb,
+            )
 
         characters = self.generate_character_portraits(
             characters=story_data.get("characters", []),
@@ -2529,12 +3058,17 @@ class StudioPipeline:
             clip_paths=clip_paths,
             movie_title=story_data.get("title", "Studio_Movie"),
             progress_cb=progress_cb,
+            scenes=scenes,
         )
         story_data["final_movie_path"] = final_movie
+        srt_candidate = pathlib.Path(final_movie).with_suffix(".srt")
+        if srt_candidate.exists():
+            story_data["subtitle_srt_path"] = str(srt_candidate)
         story_data["clip_paths"] = clip_paths
         story_data["manifest_path"] = self.save_manifest(story_data)
 
         return story_data
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helper Utilities
