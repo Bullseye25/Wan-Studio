@@ -131,14 +131,14 @@ def parse_arguments() -> argparse.Namespace:
         "--provider",
         type=str,
         default="groq",
-        choices=["groq", "local_ollama", "gemini"],
-        help="LLM provider for Screenplay and Vision Director",
+        choices=["groq", "ollama_cloud", "local_ollama"],
+        help="LLM provider for Screenplay and Vision Director (default: groq with auto-fallback to ollama_cloud)",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="llama-3.3-70b-versatile",
-        help="Model ID for Screenplay and Vision Director",
+        default=None,
+        help="Model ID for Screenplay and Vision Director (defaults to provider's best model)",
     )
     parser.add_argument(
         "--story-folder",

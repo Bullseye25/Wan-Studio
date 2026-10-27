@@ -44,7 +44,7 @@ class OmniFlowConfig:
     lora_repo_or_path: str = ""
     lora_scale: float = 0.8
     provider: str = "groq"
-    model: Optional[str] = "llama-3.3-70b-versatile"
+    model: Optional[str] = None
     api_key: Optional[str] = None
     story_folder_name: Optional[str] = None
     run_story_audit: bool = True

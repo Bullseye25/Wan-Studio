@@ -653,12 +653,15 @@ class StudioPipeline:
                 self.api_key = "local"
             else:
                 # Groq without explicit key -> fallback to Ollama Cloud preconfigured key
+                print(f"[StudioPipeline] Note: No {env_var} found in environment. Automatically switching to Ollama Cloud ({DEFAULT_OLLAMA_MODEL}).")
                 self.api_key = DEFAULT_OLLAMA_API_KEY
                 self.endpoint_url = DEFAULT_OLLAMA_ENDPOINT
                 self.provider = "ollama_cloud"
                 prov_cfg = LLM_PROVIDERS["ollama_cloud"]
+                if not model or "llama" in str(model).lower() or "deepseek" in str(model).lower():
+                    model = DEFAULT_OLLAMA_MODEL
 
-        self.model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
+        self.model = model or prov_cfg.get("default_model") or DEFAULT_OLLAMA_MODEL
 
         eff_base = base_dir or output_base_dir
         if eff_base:
@@ -802,7 +805,15 @@ class StudioPipeline:
                                 return "llava"
                             return "gemma4:31b"
 
-        m = (self.model or DEFAULT_GROQ_MODEL).strip()
+        prov_cfg = LLM_PROVIDERS.get(self.provider, LLM_PROVIDERS["ollama_cloud"])
+        m = (self.model or prov_cfg.get("default_model") or DEFAULT_OLLAMA_MODEL).strip()
+        
+        # Sanitize cross-provider model mismatches to prevent 404s
+        if self.provider == "ollama_cloud" and any(k in m.lower() for k in ("llama", "deepseek")):
+            m = DEFAULT_OLLAMA_MODEL
+        elif self.provider == "groq" and any(k in m.lower() for k in ("gemma", "gpt-oss", "nemotron")):
+            m = DEFAULT_GROQ_MODEL
+
         if "auto" in m.lower():
             if self.provider == "groq":
                 if task_role in ("quick_edit", "timeline"):
