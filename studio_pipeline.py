@@ -60,11 +60,27 @@ from orchestra_rules import (
 
 # ── Defaults & Constants ──────────────────────────────────────────────────────
 
+# Automatically load .env if present
+_env_file = pathlib.Path(__file__).parent / ".env"
+if _env_file.exists():
+    try:
+        with open(_env_file, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+                    if _k and _v and _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
+
 DEFAULT_OLLAMA_API_KEY = "ca8516405cc74a238c9525b490331d3a.HmyaGAbsmLFyYN25P1K8_tG6"
 DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
+DEFAULT_GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DEFAULT_GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
 DEFAULT_LOCAL_OLLAMA_ENDPOINT = "http://localhost:11434/v1/chat/completions"
 DEFAULT_LOCAL_OLLAMA_MODEL = "qwen2.5:7b"
 
@@ -86,10 +102,9 @@ LLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "endpoint": DEFAULT_GROQ_ENDPOINT,
         "default_model": DEFAULT_GROQ_MODEL,
         "models": [
-            ("⚡ llama-3.3-70b-versatile — Master Screenwriter (70B - Recommended)", "llama-3.3-70b-versatile"),
-            ("🚀 llama-3.1-8b-instant — Sub-Second Timeline & QA Critic (8B)", "llama-3.1-8b-instant"),
-            ("👁️ llama-3.2-11b-vision-preview — Multimodal Keyframe Director", "llama-3.2-11b-vision-preview"),
-            ("🧠 deepseek-r1-distill-llama-70b — Deep Reasoning & Logic Auditor", "deepseek-r1-distill-llama-70b"),
+            ("⚡ qwen/qwen3.8-27b — Ultra-Fast Master Screenwriter & Causal Logic (Recommended)", "qwen/qwen3.8-27b"),
+            ("🎬 openai/gpt-oss-120b — Deep Narrative & World-Building Director", "openai/gpt-oss-120b"),
+            ("🚀 openai/gpt-oss-20b — Rapid Timeline & Dialog Tweaks", "openai/gpt-oss-20b"),
         ],
         "env_key": "GROQ_API_KEY",
     },
@@ -647,6 +662,8 @@ class StudioPipeline:
             env_val = os.environ.get(env_var, "") if env_var else ""
             if env_val:
                 self.api_key = env_val
+            elif self.provider == "groq" and DEFAULT_GROQ_API_KEY:
+                self.api_key = DEFAULT_GROQ_API_KEY
             elif self.provider == "ollama_cloud":
                 self.api_key = DEFAULT_OLLAMA_API_KEY
             elif self.provider == "local_ollama":
@@ -733,10 +750,15 @@ class StudioPipeline:
         eff_endpoint = endpoint_url or prov_cfg.get("endpoint") or DEFAULT_GROQ_ENDPOINT
         eff_model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
         eff_key = api_key or os.environ.get(prov_cfg.get("env_key", ""), "") or (
-            DEFAULT_OLLAMA_API_KEY if p_clean == "ollama_cloud" else ("local" if p_clean == "local_ollama" else "")
+            DEFAULT_GROQ_API_KEY if p_clean == "groq" else (
+                DEFAULT_OLLAMA_API_KEY if p_clean == "ollama_cloud" else ("local" if p_clean == "local_ollama" else "")
+            )
         )
 
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
         if eff_key and eff_key != "local":
             headers["Authorization"] = f"Bearer {eff_key}"
 
@@ -811,7 +833,7 @@ class StudioPipeline:
         # Sanitize cross-provider model mismatches to prevent 404s
         if self.provider == "ollama_cloud" and any(k in m.lower() for k in ("llama", "deepseek")):
             m = DEFAULT_OLLAMA_MODEL
-        elif self.provider == "groq" and any(k in m.lower() for k in ("gemma", "gpt-oss", "nemotron")):
+        elif self.provider == "groq" and any(k in m.lower() for k in ("llama", "deepseek", "gemma", "nemotron")):
             m = DEFAULT_GROQ_MODEL
 
         if "auto" in m.lower():
@@ -851,7 +873,10 @@ class StudioPipeline:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
         if self.api_key and self.api_key != "local":
             headers["Authorization"] = f"Bearer {self.api_key}"
 
