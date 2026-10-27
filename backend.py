@@ -9,14 +9,16 @@ import time
 _wan_model_instance = None
 _qwen_model_instance = None
 _z_image_model_instance = None
+_narrator_model_instance = None
 
 
 def reset_cached_models():
     """Resets cached model instances (useful for testing and fresh reconnects)."""
-    global _wan_model_instance, _qwen_model_instance, _z_image_model_instance
+    global _wan_model_instance, _qwen_model_instance, _z_image_model_instance, _narrator_model_instance
     _wan_model_instance = None
     _qwen_model_instance = None
     _z_image_model_instance = None
+    _narrator_model_instance = None
 
 
 def get_wan_model(force_refresh: bool = False):
@@ -50,6 +52,45 @@ def get_z_image_model(force_refresh: bool = False):
             model_cls = modal.Cls.from_name("adaab-z-image-turbo", "ZImageTurboModel")
             _z_image_model_instance = model_cls()
     return _z_image_model_instance
+
+
+def get_narrator_model(force_refresh: bool = False):
+    """Retrieves or caches the remote Kokoro-82M Neural Narrator client on Modal."""
+    global _narrator_model_instance
+    if _narrator_model_instance is None or force_refresh:
+        model_cls = modal.Cls.from_name("adaab-neural-narrator", "NeuralNarratorModel")
+        _narrator_model_instance = model_cls()
+    return _narrator_model_instance
+
+
+def generate_neural_narration_remote(
+    text: str,
+    voice: str = "af_heart",
+    speed: float = 1.0,
+    lang_code: str = "a",
+    max_retries: int = 2,
+) -> dict:
+    """
+    Invokes the serverless Kokoro-82M neural narrator deployed on Modal.
+    Produces warm, expressive, charming human speech with exact word timestamps.
+    Returns:
+      {
+        "audio_bytes": bytes (WAV 24kHz mono PCM 16-bit),
+        "duration_sec": float,
+        "sample_rate": 24000,
+        "word_timestamps": [{"word": str, "start": float, "end": float}, ...],
+        "voice": str,
+      }
+    """
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            m = get_narrator_model(force_refresh=(attempt > 0))
+            return m.synthesize.remote(text=text, voice=voice, speed=speed, lang_code=lang_code)
+        except Exception as e:
+            last_err = e
+            time.sleep(0.8)
+    raise RuntimeError(f"Remote neural narration failed after {max_retries + 1} attempts: {last_err}")
 
 
 def _image_to_optimized_bytes(pil_image):

@@ -331,6 +331,66 @@ class TestNarratorAndAnimationReliability(unittest.TestCase):
         self.assertTrue(scenes[0].get("has_narrator_audio"))
         self.assertIn("telemetry", scenes[0])
 
+    def test_voice_preset_resolution_and_charming_voices(self):
+        # 1. Verify charming voices exist in preset registry
+        self.assertIn("Warm Storyteller (Female - af_heart)", NARRATOR_VOICE_PRESETS)
+        self.assertIn("Charming Storyteller (Male - am_adam)", NARRATOR_VOICE_PRESETS)
+        self.assertIn("Expressive Anime / Youth (Female - af_bella)", NARRATOR_VOICE_PRESETS)
+        self.assertIn("Cinematic Drama (Male - am_fenrir)", NARRATOR_VOICE_PRESETS)
+        self.assertIn("Gentle Fable (Female - bf_emma)", NARRATOR_VOICE_PRESETS)
+        self.assertIn("Sweet Expressive (Female - af_sarah)", NARRATOR_VOICE_PRESETS)
+
+        # 2. Verify fuzzy and voice_id resolution
+        self.assertEqual(
+            OpenSourceNarratorTTS._resolve_voice_preset("af_heart"),
+            "Warm Storyteller (Female - af_heart)",
+        )
+        self.assertEqual(
+            OpenSourceNarratorTTS._resolve_voice_preset("am_adam"),
+            "Charming Storyteller (Male - am_adam)",
+        )
+        self.assertEqual(
+            OpenSourceNarratorTTS._resolve_voice_preset("adam"),
+            "Charming Storyteller (Male - am_adam)",
+        )
+        self.assertEqual(
+            OpenSourceNarratorTTS._resolve_voice_preset("bella"),
+            "Expressive Anime / Youth (Female - af_bella)",
+        )
+        self.assertEqual(
+            OpenSourceNarratorTTS._resolve_voice_preset("emma"),
+            "Gentle Fable (Female - bf_emma)",
+        )
+
+    def test_modal_remote_narrator_integration(self):
+        tts = OpenSourceNarratorTTS(voice_preset="Charming Storyteller (Male - am_adam)")
+        out_wav = str(self.base_path / "audio" / "remote_test.wav")
+
+        # Mock generate_neural_narration_remote to verify handling
+        mock_pcm = np.zeros(24000, dtype=np.float32)
+        import io, soundfile as sf
+        buf = io.BytesIO()
+        sf.write(buf, mock_pcm, 24000, format="WAV", subtype="PCM_16")
+
+        mock_payload = {
+            "audio_bytes": buf.getvalue(),
+            "duration_sec": 1.0,
+            "sample_rate": 24000,
+            "word_timestamps": [{"word": "Barnaby", "start": 0.1, "end": 0.4}, {"word": "leaps", "start": 0.45, "end": 0.8}],
+            "voice": "am_adam",
+        }
+
+        with patch("backend.generate_neural_narration_remote", return_value=mock_payload):
+            res = tts.synthesize_scene_narration(
+                text="Barnaby leaps over the fence.",
+                output_wav_path=out_wav,
+                sync_trigger_word="leaps",
+            )
+            self.assertTrue(os.path.exists(res["audio_path"]))
+            self.assertIn("modal-kokoro-82m", res["engine"])
+            self.assertEqual(res["sync_trigger_word"], "leaps")
+            self.assertEqual(len(res["word_timestamps"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

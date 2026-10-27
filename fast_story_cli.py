@@ -372,7 +372,7 @@ Examples:
     parser.add_argument("--lora-scale", type=float, default=0.8, help="Wan 2.2 LoRA blend weight (default: 0.8)")
     parser.add_argument("--transition", default="narrative", help="Transition style ('narrative', 'crossfade', 'fade_black', 'whip_pan')")
     parser.add_argument("--transition-duration", type=float, default=0.5, help="Transition overlap duration in seconds (default: 0.5s)")
-    parser.add_argument("--voice", default="warm_storyteller", help="Voiceover narrator voice preset")
+    parser.add_argument("--voice", default="af_heart", help="Voiceover narrator preset ('af_heart' Warm Storyteller, 'am_adam' Charming Male, 'af_bella' Anime, 'am_fenrir' Cinema, 'bf_emma' Fable)")
     parser.add_argument("--fast", action="store_true", default=True, help="Enable Fast Lightning mode (8-step DiT + Groq LPU)")
     parser.add_argument("--story-folder", "--story-name", default=None, help="Dedicated subfolder inside outputs/ for this story (e.g. 'fox_story')")
 

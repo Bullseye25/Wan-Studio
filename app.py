@@ -20,6 +20,9 @@ from studio_pipeline import (
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_MODEL,
     VERIFIED_OLLAMA_MODELS,
+    LLM_PROVIDERS,
+    DEFAULT_GROQ_MODEL,
+    DEFAULT_GROQ_ENDPOINT,
     generate_three_studio_seeds,
     restore_extracted_video_frame,
 )
@@ -1257,6 +1260,7 @@ def studio_redo_single_clip(
     choice_label, motion_desc, camera_move, compiled_wan_prompt, clip_seed,
     re_run_director, use_vision, aspect_ratio, api_key, model, current_state,
     use_last_frame=True, enable_rife_2x=False, anti_noise_guard=True,
+    lora_repo_or_path="", lora_scale=0.8,
     progress=gr.Progress(track_tqdm=True),
 ):
     scenes = (current_state or {}).get("scenes", [])
@@ -1282,6 +1286,8 @@ def studio_redo_single_clip(
             enable_rife_2x=bool(enable_rife_2x),
             anti_noise_guard=bool(anti_noise_guard),
             auto_stitch=True,
+            lora_repo_or_path=str(lora_repo_or_path or ""),
+            lora_scale=float(lora_scale or 0.8),
             progress_cb=_studio_progress(progress),
         )
         clip_path = updated_scene.get("video_path")
@@ -1347,6 +1353,19 @@ def studio_run_full(
         return None, [], [], {}, f"### ❌ Studio Production Error\n`{e}`", {}
 
 
+def studio_test_llm_connection_ui(provider, api_key, model, endpoint_url=""):
+    res = StudioPipeline.test_llm_connection(
+        provider=provider,
+        api_key=api_key or None,
+        model=model or None,
+        endpoint_url=endpoint_url or None,
+    )
+    if res.get("success"):
+        return f"### ✅ {res.get('message')}"
+    else:
+        return f"### ❌ {res.get('message')}"
+
+
 def studio_run_step1(
     prompt, art_style, num_scenes, duration, api_key, model,
     progress=gr.Progress(track_tqdm=True),
@@ -1403,8 +1422,9 @@ def studio_synthesize_narration_ui(current_state, narrator_voice=DEFAULT_NARRATO
             f"S{s.get('scene_number', i+1)}: '{s.get('sync_trigger_word', '')}' @ {s.get('synced_phases', {}).get('p1', 1.5)}s"
             for i, s in enumerate(scenes)
         )
+        engine_label = scenes[0].get("tts_engine", "windows-sapi5") if scenes else "Narrator"
         status_md = (
-            f"### 🎙️ Open-Source Narrator Synthesized ({len(scenes)} scenes · Voice `{narrator_voice}`)\n"
+            f"### 🎙️ Narrator Voice Synthesized ({len(scenes)} scenes · Voice `{narrator_voice}` · Engine `{engine_label}`)\n"
             f"- **Audio-Visual Temporal Lock:** {trig_summary}"
         )
         return StudioPipeline.serializable(current_state), first_audio, status_md, current_state
@@ -1549,7 +1569,8 @@ def studio_run_step4(
     aspect_ratio, seed, api_key, model, use_vision, current_state,
     use_last_frame=True, enable_rife_2x=False, anti_noise_guard=True,
     progress=gr.Progress(track_tqdm=True),
-    transition_type="crossfade", transition_duration=0.5,
+    transition_type="narrative", transition_duration=0.5,
+    lora_repo_or_path="", lora_scale=0.8,
 ):
     scenes = (current_state or {}).get("scenes", [])
     if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
@@ -1571,11 +1592,13 @@ def studio_run_step4(
             use_last_frame=bool(use_last_frame),
             enable_rife_2x=bool(enable_rife_2x),
             anti_noise_guard=bool(anti_noise_guard),
+            lora_repo_or_path=str(lora_repo_or_path or ""),
+            lora_scale=float(lora_scale or 0.8),
             progress_cb=cb,
         )
         current_state["clip_paths"] = clips
-        trans_t = (current_state or {}).get("transition_type") or transition_type
-        trans_d = float((current_state or {}).get("transition_duration") or transition_duration)
+        trans_t = transition_type or (current_state or {}).get("transition_type") or "narrative"
+        trans_d = float(transition_duration or (current_state or {}).get("transition_duration") or 0.5)
         final_movie = pipeline.stitch_clips(
             clip_paths=clips,
             movie_title=current_state.get("title", "Studio_Movie"),
@@ -1589,8 +1612,10 @@ def studio_run_step4(
         flf_mode = "First+Last Frame (FLF2V)" if use_last_frame else "First Frame Only (I2V)"
         fps_str = "32fps RIFE 2x" if enable_rife_2x else "16fps Native"
         guard_str = " | Anti-Noise & Rotation Guard: ON" if anti_noise_guard else ""
+        lora_str = f" | LoRA: {os.path.basename(lora_repo_or_path)}@{lora_scale}" if lora_repo_or_path else ""
+        trans_str = f" | Transitions: {trans_t}"
         return final_movie, (
-            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`, Mode: `{flf_mode}`, `{fps_str}`{guard_str})\n"
+            f"### 🎬 Step 5 Complete: Movie Stitched! (Locked Wan Seed `{int(seed)}`, Mode: `{flf_mode}`, `{fps_str}`{guard_str}{lora_str}{trans_str})\n"
             f"Final file: `{pathlib.Path(final_movie).name}`"
             + _studio_director_summary(scenes)
         ), current_state
@@ -2451,7 +2476,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                 )
                                 with gr.Row():
                                     studio_enable_narrator_chk = gr.Checkbox(
-                                        label="🎙️ Enable Open-Source AI Narrator & Audio-Visual Sync (Kokoro-82M / Prosodic Synth)",
+                                        label="🎙️ Enable AI Narrator & Audio-Visual Sync (Windows SAPI5 / Kokoro-82M)",
                                         value=True,
                                         scale=1,
                                     )
@@ -2461,21 +2486,41 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                         value=DEFAULT_NARRATOR_VOICE,
                                         scale=1,
                                     )
-                                with gr.Accordion("⚙️ Ollama Cloud API & One-Click Auto Mode", open=False):
+                                with gr.Accordion("⚙️ AI Director Gateway (GroqCloud / Local Ollama / Ollama Cloud)", open=False):
                                     with gr.Row():
-                                        studio_ollama_key = gr.Textbox(
-                                            label="Ollama Cloud API Key",
-                                            value=DEFAULT_OLLAMA_API_KEY,
-                                            type="password",
+                                        studio_llm_provider = gr.Dropdown(
+                                            label="🌐 AI Director Provider",
+                                            choices=[
+                                                ("⚡ GroqCloud (Ultra-Fast Free Tier — Recommended)", "groq"),
+                                                ("💻 Local Ollama (100% Free & Offline — localhost:11434)", "local_ollama"),
+                                                ("☁️ Ollama Cloud (Hosted Gemma / GPT-OSS)", "ollama_cloud"),
+                                            ],
+                                            value="groq",
                                             scale=2,
                                         )
                                         studio_ollama_model = gr.Dropdown(
-                                            label="🧠 Ollama Cloud Model",
-                                            choices=VERIFIED_OLLAMA_MODELS,
-                                            value=DEFAULT_OLLAMA_MODEL,
+                                            label="🧠 Director LLM Model",
+                                            choices=[(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in LLM_PROVIDERS["groq"]["models"]],
+                                            value=DEFAULT_GROQ_MODEL,
                                             allow_custom_value=True,
+                                            scale=3,
+                                        )
+                                    with gr.Row():
+                                        studio_ollama_key = gr.Textbox(
+                                            label="API Key (Groq / Ollama Cloud)",
+                                            value="",
+                                            type="password",
+                                            placeholder="gsk_... or Ollama Cloud key (Local Ollama does not require key)",
+                                            scale=3,
+                                        )
+                                        studio_llm_endpoint = gr.Textbox(
+                                            label="Custom Endpoint URL (Optional)",
+                                            value="",
+                                            placeholder="Leave blank for provider default",
                                             scale=2,
                                         )
+                                        studio_llm_test_btn = gr.Button("🔌 Test Connection", variant="secondary", scale=1)
+                                    studio_llm_test_status = gr.Markdown("")
                                     studio_run_full_btn = gr.Button(
                                         "🚀 Run Full Automated Pipeline (All 4 Phases Non-Stop)",
                                         variant="secondary",
@@ -2727,6 +2772,43 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                 label="🛡️ Anti-Noise & Rotation Identity Guard (5s Noise Clamp & Turn Lock)",
                                 value=True,
                                 info="Clamps CFG <= 2.0 and sets FlowShift 4.5 on long clips to stop noise dissolution; locks facial identity during rotations.",
+                            )
+
+                        with gr.Row():
+                            studio_lora_path = gr.Textbox(
+                                label="🎯 Wan 2.2 LoRA Model Weights (Modal / HF / Safetensors)",
+                                placeholder="e.g. /vol/lora_outputs/my_lora.safetensors or HuggingFace repo ID (optional)",
+                                value="",
+                                scale=3,
+                            )
+                            studio_lora_scale = gr.Slider(
+                                label="LoRA Scale",
+                                minimum=0.0,
+                                maximum=1.5,
+                                value=0.8,
+                                step=0.05,
+                                scale=1,
+                            )
+                            studio_transition_choice = gr.Dropdown(
+                                label="🎬 Movie Transition Style",
+                                choices=[
+                                    ("Narrative-Driven (Director Auto-Cuts)", "narrative"),
+                                    ("Crossfade (Smooth Dissolve)", "crossfade"),
+                                    ("Dip to Black (Scene Shift)", "fade_black"),
+                                    ("Match Cut (Pose Continuity)", "match_cut"),
+                                    ("Whip-Pan (High Energy Action)", "whip_pan"),
+                                    ("Hard Cut (Standard Concat)", "cut"),
+                                ],
+                                value="narrative",
+                                scale=2,
+                            )
+                            studio_transition_duration = gr.Slider(
+                                label="Transition Duration (sec)",
+                                minimum=0.1,
+                                maximum=1.5,
+                                value=0.5,
+                                step=0.1,
+                                scale=1,
                             )
 
                         with gr.Row():
@@ -3860,9 +3942,37 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         ],
     )
 
+    # LLM Provider Gateway Events
+    def _on_llm_provider_change(prov):
+        prov_key = str(prov or "groq").lower()
+        cfg = LLM_PROVIDERS.get(prov_key, LLM_PROVIDERS["groq"])
+        models = cfg["models"]
+        model_choices = [(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in models]
+        def_model = cfg["default_model"]
+        default_key = DEFAULT_OLLAMA_API_KEY if prov_key == "ollama_cloud" else ""
+        placeholder_key = "No API key required (100% offline)" if prov_key == "local_ollama" else ("gsk_... for Groq" if prov_key == "groq" else "Enter Ollama Cloud API Key")
+        return (
+            gr.update(choices=model_choices, value=def_model),
+            gr.update(value=default_key, placeholder=placeholder_key),
+            gr.update(value="", placeholder=f"Default: {cfg['endpoint']}"),
+        )
+
+    studio_llm_provider.change(
+        fn=_on_llm_provider_change,
+        inputs=[studio_llm_provider],
+        outputs=[studio_ollama_model, studio_ollama_key, studio_llm_endpoint],
+    )
+
+    studio_llm_test_btn.click(
+        fn=studio_test_llm_connection_ui,
+        inputs=[studio_llm_provider, studio_ollama_key, studio_ollama_model, studio_llm_endpoint],
+        outputs=[studio_llm_test_status],
+    )
+
     def _ui_step4(
         aspect_ratio, w_seed, api_key, model, use_vision, current_state, selected_clip,
         use_last_frame=True, enable_rife_2x=True, anti_noise_guard=True,
+        lora_path="", lora_scale=0.8, trans_choice="narrative", trans_dur=0.5,
         progress=gr.Progress(track_tqdm=True),
     ):
         final_vid, status, state = studio_run_step4(
@@ -3870,6 +3980,10 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             use_last_frame=bool(use_last_frame),
             enable_rife_2x=bool(enable_rife_2x),
             anti_noise_guard=bool(anti_noise_guard),
+            transition_type=trans_choice,
+            transition_duration=float(trans_dur),
+            lora_repo_or_path=str(lora_path or ""),
+            lora_scale=float(lora_scale or 0.8),
             progress=progress,
         )
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
@@ -3881,6 +3995,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_aspect_ratio, studio_wan_seed, studio_ollama_key,
             studio_ollama_model, studio_use_vision, studio_pipeline_state, studio_clip_selector,
             studio_use_last_frame_chk, studio_rife_2x_chk, studio_anti_noise_chk,
+            studio_lora_path, studio_lora_scale, studio_transition_choice, studio_transition_duration,
         ],
         outputs=[
             studio_final_video, studio_status, studio_pipeline_state,
@@ -3918,6 +4033,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_clip_rerundir_chk, studio_use_vision, studio_aspect_ratio,
             studio_ollama_key, studio_ollama_model, studio_pipeline_state,
             studio_use_last_frame_chk, studio_rife_2x_chk, studio_anti_noise_chk,
+            studio_lora_path, studio_lora_scale,
         ],
         outputs=[
             studio_clip_preview, studio_final_video, studio_json_display,

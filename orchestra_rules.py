@@ -22,6 +22,9 @@ class TransitionType(str, Enum):
     CROSSFADE = "crossfade"      # xfade=transition=fade (soft dissolve)
     FADE_BLACK = "fade_black"    # Dip-to-black (fade out, fade in)
     MATCH_CUT = "match_cut"      # Directional slide/wipe or hard continuous action cut
+    WHIP_PAN = "whip_pan"        # Fast smooth slide (smoothleft)
+    DISSOLVE = "dissolve"        # Soft dissolve (alias for crossfade)
+    NARRATIVE = "narrative"      # Per-scene AI Director choice
 
 
 # ── 2. Operational Knowledge Base: What to Do vs What NOT to Do ───────────────
@@ -306,31 +309,42 @@ def compile_wan_motion_timeline(
 
 def build_ffmpeg_transition_filter(
     clip_durations: List[float],
-    transition_type: str = "crossfade",
-    transition_duration: float = 0.5,
+    transition_type: Any = "crossfade",
+    transition_duration: Any = 0.5,
     has_audio: bool = True,
 ) -> Tuple[str, str, float]:
     """
-    Builds the FFmpeg complex filtergraph for seamless cinematic transitions:
-    - 'cut': Simple concat filter (0 transition duration).
-    - 'crossfade': FFmpeg xfade=transition=fade with acrossfade for audio.
-    - 'fade_black': Dip-to-black fade out / fade in between scenes.
-    - 'match_cut': Fast directional wipe (xfade=transition=wipeleft or slidedown).
-
-    Returns:
-    - video_filter: FFmpeg -filter_complex string for video.
-    - audio_filter: FFmpeg -filter_complex string for audio (if has_audio is True).
-    - total_duration: Estimated final stitched duration in seconds.
+    Builds the FFmpeg complex filtergraph for seamless cinematic transitions.
+    Supports either a uniform transition string ('cut', 'crossfade', 'fade_black', 'match_cut', 'whip_pan')
+    OR a list of per-cut transition types (e.g. ['cut', 'match_cut', 'fade_black', 'crossfade'])
+    with optional per-cut transition durations.
     """
     n = len(clip_durations)
     if n <= 1:
         return "", "", sum(clip_durations)
 
-    t_type = transition_type.lower()
-    td = min(transition_duration, 1.0)
+    cuts_count = n - 1
+    t_types = []
+    t_durations = []
 
-    # 1. Hard Cut (No overlapping filter needed, or standard concat)
-    if t_type == "cut" or td <= 0:
+    if isinstance(transition_type, list):
+        for idx in range(cuts_count):
+            val = str(transition_type[idx] if idx < len(transition_type) else "crossfade").lower()
+            t_types.append(val)
+    else:
+        single_type = str(transition_type or "crossfade").lower()
+        t_types = [single_type] * cuts_count
+
+    if isinstance(transition_duration, list):
+        for idx in range(cuts_count):
+            dur = float(transition_duration[idx] if idx < len(transition_duration) else 0.5)
+            t_durations.append(max(0.0, min(1.0, dur)))
+    else:
+        single_dur = max(0.0, min(1.0, float(transition_duration or 0.5)))
+        t_durations = [single_dur] * cuts_count
+
+    # Check if all transitions are hard cuts (or 0 duration)
+    if all(t in ("cut", "none") or d <= 0.0 for t, d in zip(t_types, t_durations)):
         v_inputs = "".join(f"[{i}:v]" for i in range(n))
         v_filter = f"{v_inputs}concat=n={n}:v=1:a=0[v]"
         if has_audio:
@@ -338,44 +352,51 @@ def build_ffmpeg_transition_filter(
             a_filter = f"{a_inputs}concat=n={n}:v=0:a=1[a]"
         else:
             a_filter = ""
-        return v_filter, a_filter, sum(clip_durations)
+        return v_filter, a_filter, round(sum(clip_durations), 2)
 
-    # 2. Cross-Dissolve / Xfade
-    # For N clips with xfade:
-    # offset_0 = dur_0 - td
-    # [0:v][1:v]xfade=transition=fade:duration=td:offset=offset_0[v1]
-    # offset_1 = offset_0 + dur_1 - td
-    # [v1][2:v]xfade=transition=fade:duration=td:offset=offset_1[v2] ...
     v_lines = []
     a_lines = []
     
-    current_offset = clip_durations[0] - td
+    current_offset = clip_durations[0] - t_durations[0]
     prev_v = "[0:v]"
     prev_a = "[0:a]"
 
     for i in range(1, n):
+        cut_idx = i - 1
+        t_name_raw = t_types[cut_idx]
+        td = t_durations[cut_idx]
         next_v = f"[{i}:v]"
         next_a = f"[{i}:a]"
         out_v = f"[v{i}]" if i < n - 1 else "[v]"
         out_a = f"[a{i}]" if i < n - 1 else "[a]"
 
-        if t_type == "fade_black":
+        if t_name_raw in ("fade_black", "dip_black"):
             trans_name = "fadeblack"
-        elif t_type == "match_cut":
+            eff_td = max(0.2, td)
+        elif t_name_raw in ("match_cut", "wipe"):
             trans_name = "wipeleft"
+            eff_td = max(0.15, td)
+        elif t_name_raw in ("whip_pan", "slide"):
+            trans_name = "smoothleft"
+            eff_td = max(0.15, td)
+        elif t_name_raw in ("cut", "none") or td <= 0.0:
+            trans_name = "fade"
+            eff_td = 0.02
         else:
             trans_name = "fade"
+            eff_td = max(0.1, td)
 
         v_lines.append(
-            f"{prev_v}{next_v}xfade=transition={trans_name}:duration={td:.2f}:offset={current_offset:.2f}{out_v}"
+            f"{prev_v}{next_v}xfade=transition={trans_name}:duration={eff_td:.2f}:offset={current_offset:.2f}{out_v}"
         )
         if has_audio:
             a_lines.append(
-                f"{prev_a}{next_a}acrossfade=d={td:.2f}{out_a}"
+                f"{prev_a}{next_a}acrossfade=d={eff_td:.2f}{out_a}"
             )
 
         if i < n - 1:
-            current_offset += clip_durations[i] - td
+            next_td = t_durations[i]
+            current_offset += clip_durations[i] - next_td
             prev_v = out_v
             prev_a = out_a
 
@@ -388,8 +409,8 @@ def build_ffmpeg_transition_filter(
 
 def calculate_transition_srt_timestamps(
     scene_durations: List[float],
-    transition_type: str = "cut",
-    transition_duration: float = 0.5,
+    transition_type: Any = "cut",
+    transition_duration: Any = 0.5,
 ) -> List[Tuple[float, float]]:
     """
     Calculates the adjusted Start and End timestamps for subtitles (.srt)
@@ -399,7 +420,22 @@ def calculate_transition_srt_timestamps(
     if n == 0:
         return []
 
-    td = transition_duration if transition_type in ("crossfade", "fade_black", "match_cut") else 0.0
+    cuts_count = max(0, n - 1)
+    t_types = []
+    t_durations = []
+    if isinstance(transition_type, list):
+        for idx in range(cuts_count):
+            t_types.append(str(transition_type[idx] if idx < len(transition_type) else "crossfade").lower())
+    else:
+        t_types = [str(transition_type or "cut").lower()] * cuts_count
+
+    if isinstance(transition_duration, list):
+        for idx in range(cuts_count):
+            dur = float(transition_duration[idx] if idx < len(transition_duration) else 0.5)
+            t_durations.append(max(0.0, min(1.0, dur)))
+    else:
+        t_durations = [max(0.0, min(1.0, float(transition_duration or 0.5)))] * cuts_count
+
     timestamps: List[Tuple[float, float]] = []
     current_time = 0.0
 
@@ -407,8 +443,9 @@ def calculate_transition_srt_timestamps(
         start_t = current_time
         end_t = start_t + dur
         timestamps.append((round(start_t, 2), round(end_t, 2)))
-        # For the next scene, the start time is offset by duration minus transition overlap
         if i < n - 1:
-            current_time = end_t - td
+            t_name = t_types[i]
+            overlap = t_durations[i] if t_name not in ("cut", "none") else 0.0
+            current_time = max(0.0, end_t - overlap)
 
     return timestamps

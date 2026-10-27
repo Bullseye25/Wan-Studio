@@ -38,49 +38,97 @@ MAX_CLIP_SECONDS = 5.0
 MIN_CLIP_SECONDS = 1.0
 DEFAULT_SAMPLE_RATE = 24000
 
-# ── Curated Open-Source Narrator Voice Presets (Kokoro-82M Apache 2.0) ────────
+# ── Curated Open-Source Narrator Voice Presets (Kokoro-82M Apache 2.0 Neural Voices) ────────
 NARRATOR_VOICE_PRESETS: Dict[str, Dict[str, Any]] = {
     "Warm Storyteller (Female - af_heart)": {
         "voice_id": "af_heart",
+        "sapi_voice": "zira",
+        "sapi_rate": -1,
         "lang_code": "a",
         "base_speed": 1.0,
         "pitch_hz": 210.0,
-        "description": "Warm, expressive storybook narrator ideal for Pixar/Ghibli style shorts",
+        "description": "Warm, charming, affectionate storybook narrator with rich emotional inflection (Top Recommended)",
+    },
+    "Charming Storyteller (Male - am_adam)": {
+        "voice_id": "am_adam",
+        "sapi_voice": "david",
+        "sapi_rate": 0,
+        "lang_code": "a",
+        "base_speed": 1.0,
+        "pitch_hz": 125.0,
+        "description": "Charismatic, handsome, expressive male narrator with storytelling depth and charm (Top Recommended Male)",
+    },
+    "Expressive Anime / Youth (Female - af_bella)": {
+        "voice_id": "af_bella",
+        "sapi_voice": "zira",
+        "sapi_rate": 1,
+        "lang_code": "a",
+        "base_speed": 1.02,
+        "pitch_hz": 240.0,
+        "description": "Bright, emotional, energetic voice suited for anime, youth, and uplifting adventures",
     },
     "Cinematic Drama (Male - am_fenrir)": {
         "voice_id": "am_fenrir",
+        "sapi_voice": "david",
+        "sapi_rate": -1,
         "lang_code": "a",
         "base_speed": 0.98,
         "pitch_hz": 115.0,
-        "description": "Deep, resonant movie trailer and action-adventure narrator",
+        "description": "Deep, resonant movie trailer and action-adventure narrator with epic gravitas",
+    },
+    "Gentle Fable (Female - bf_emma)": {
+        "voice_id": "bf_emma",
+        "sapi_voice": "zira",
+        "sapi_rate": -1,
+        "lang_code": "b",
+        "base_speed": 0.98,
+        "pitch_hz": 225.0,
+        "description": "Soft, elegant, charming British voice for whimsical fables, lore, and mystery",
+    },
+    "Sweet Expressive (Female - af_sarah)": {
+        "voice_id": "af_sarah",
+        "sapi_voice": "zira",
+        "sapi_rate": 0,
+        "lang_code": "a",
+        "base_speed": 1.0,
+        "pitch_hz": 215.0,
+        "description": "Sweet, intimate, melodious narrator with gentle empathy and warmth",
     },
     "Classic British Narrator (Male - bm_george)": {
         "voice_id": "bm_george",
+        "sapi_voice": "david",
+        "sapi_rate": 0,
         "lang_code": "b",
         "base_speed": 0.96,
         "pitch_hz": 125.0,
         "description": "Refined British documentary and fantasy chronicle narrator",
     },
-    "Gentle Fable Narrator (Female - bf_emma)": {
-        "voice_id": "bf_emma",
-        "lang_code": "b",
-        "base_speed": 0.98,
-        "pitch_hz": 225.0,
-        "description": "Soft, articulate British voice for whimsical fables and mystery",
-    },
     "Energetic Action Narrator (Male - am_michael)": {
         "voice_id": "am_michael",
+        "sapi_voice": "david",
+        "sapi_rate": 1,
         "lang_code": "a",
         "base_speed": 1.05,
         "pitch_hz": 135.0,
         "description": "Crisp, fast-paced narrator for sci-fi, cyberpunk, and combat scenes",
     },
-    "Expressive Anime / Youth (Female - af_bella)": {
-        "voice_id": "af_bella",
+    "Studio Narrator (Female - Microsoft Zira)": {
+        "voice_id": "af_heart",
+        "sapi_voice": "zira",
+        "sapi_rate": -1,
         "lang_code": "a",
-        "base_speed": 1.02,
-        "pitch_hz": 240.0,
-        "description": "Bright, emotional voice suited for anime and uplifting adventures",
+        "base_speed": 1.0,
+        "pitch_hz": 210.0,
+        "description": "Clear, expressive female voice with natural warm storytelling cadence",
+    },
+    "Studio Narrator (Male - Microsoft David)": {
+        "voice_id": "am_adam",
+        "sapi_voice": "david",
+        "sapi_rate": -1,
+        "lang_code": "a",
+        "base_speed": 0.98,
+        "pitch_hz": 125.0,
+        "description": "Clear, resonant male voice with cinematic drama cadence",
     },
 }
 
@@ -214,12 +262,123 @@ class OpenSourceNarratorTTS:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         output_dir: Optional[str] = None,
     ):
-        self.voice_preset = voice_preset if voice_preset in NARRATOR_VOICE_PRESETS else DEFAULT_NARRATOR_VOICE
+        self.voice_preset = self._resolve_voice_preset(voice_preset)
         self.preset_cfg = NARRATOR_VOICE_PRESETS[self.voice_preset]
         self.sample_rate = int(sample_rate)
         self.output_dir = pathlib.Path(output_dir) if output_dir else None
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def _resolve_voice_preset(cls, preset_name: Optional[str]) -> str:
+        if not preset_name:
+            return DEFAULT_NARRATOR_VOICE
+        if preset_name in NARRATOR_VOICE_PRESETS:
+            return preset_name
+        p_low = str(preset_name).lower().strip()
+        for k, v in NARRATOR_VOICE_PRESETS.items():
+            if p_low == k.lower() or p_low in k.lower():
+                return k
+            if p_low == str(v.get("voice_id", "")).lower() or p_low in str(v.get("voice_id", "")).lower():
+                return k
+            if p_low == str(v.get("sapi_voice", "")).lower() or p_low in str(v.get("sapi_voice", "")).lower():
+                return k
+        # Gender heuristic fallback
+        if any(term in p_low for term in ("male", "man", "boy", "david", "fenrir", "george", "michael")):
+            return "Cinematic Drama (Male - am_fenrir)"
+        return DEFAULT_NARRATOR_VOICE
+
+    @staticmethod
+    def _resample_audio(samples: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        if orig_sr == target_sr or len(samples) == 0:
+            return samples
+        num_target_samples = int(round(len(samples) * float(target_sr) / float(orig_sr)))
+        x_old = np.linspace(0.0, 1.0, len(samples), endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num_target_samples, endpoint=False)
+        return np.interp(x_new, x_old, samples).astype(np.float32)
+
+    @staticmethod
+    def _normalize_peak(samples: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
+        max_val = float(np.max(np.abs(samples))) if len(samples) > 0 else 0.0
+        if max_val > 1e-4:
+            samples = samples * (target_peak / max_val)
+        return np.clip(np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0), -1.0, 1.0)
+
+    @classmethod
+    def _synthesize_windows_sapi(
+        cls,
+        text: str,
+        out_wav_path: str,
+        voice_hint: str = "zira",
+        rate: int = 0,
+        volume: int = 100,
+    ) -> bool:
+        """
+        Synthesizes audible speech to WAV using Windows SAPI5 SpVoice via win32com or PowerShell fallback.
+        """
+        target_path = pathlib.Path(out_wav_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 1. Primary: win32com.client with thread CoInitialize
+        try:
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            stream = win32com.client.Dispatch("SAPI.SpFileStream")
+
+            voices = speaker.GetVoices()
+            v_hint_l = str(voice_hint or "zira").lower()
+            matched = False
+            for i in range(voices.Count):
+                v = voices.Item(i)
+                desc = v.GetDescription().lower()
+                if v_hint_l in desc:
+                    speaker.Voice = v
+                    matched = True
+                    break
+            if not matched and voices.Count > 0:
+                speaker.Voice = voices.Item(0)
+
+            speaker.Rate = max(-10, min(10, int(rate)))
+            speaker.Volume = max(0, min(100, int(volume)))
+
+            # 3 = SSFMCreateForWrite
+            stream.Open(str(target_path), 3, False)
+            speaker.AudioOutputStream = stream
+            speaker.Speak(str(text))
+            speaker.AudioOutputStream = None
+            stream.Close()
+            if target_path.exists() and target_path.stat().st_size > 500:
+                return True
+        except Exception as e_com:
+            print(f"[NarratorTTS] win32com SAPI note ({e_com}); attempting PowerShell fallback...")
+
+        # 2. Secondary: PowerShell System.Speech.Synthesis fallback
+        try:
+            out_posix = str(target_path.resolve()).replace("\\", "/")
+            safe_text = re.sub(r"[\"'\n\r]+", " ", str(text)).strip()
+            ps_code = (
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$v = $s.GetInstalledVoices() | Where-Object {{ $_.VoiceInfo.Name.ToLower().Contains('{voice_hint.lower()}') }} | Select-Object -First 1; "
+                "if ($v) { $s.SelectVoice($v.VoiceInfo.Name); }; "
+                f"$s.Rate = {rate}; $s.Volume = {volume}; "
+                f"$s.SetOutputToWaveFile('{out_posix}'); "
+                f"$s.Speak('{safe_text}'); $s.Dispose();"
+            )
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_code],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if res.returncode == 0 and target_path.exists() and target_path.stat().st_size > 500:
+                return True
+        except Exception as e_ps:
+            print(f"[NarratorTTS] PowerShell SAPI note ({e_ps})")
+
+        return False
 
     @classmethod
     def _get_kokoro_pipeline(cls, lang_code: str = "a"):
@@ -254,12 +413,13 @@ class OpenSourceNarratorTTS:
             "word_timestamps": [{"word": str, "start": float, "end": float}, ...],
             "sync_trigger_word": str,
             "trigger_timestamp_sec": float,
-            "engine": "kokoro-82m" | "open-prosody-synth",
+            "engine": "kokoro-82m" | "windows-sapi5" | "open-prosody-synth",
           }
         """
-        if voice_preset and voice_preset in NARRATOR_VOICE_PRESETS:
-            self.voice_preset = voice_preset
-            self.preset_cfg = NARRATOR_VOICE_PRESETS[voice_preset]
+        if voice_preset:
+            resolved_preset = self._resolve_voice_preset(voice_preset)
+            self.voice_preset = resolved_preset
+            self.preset_cfg = NARRATOR_VOICE_PRESETS[resolved_preset]
         eff_emotion = voice_style or emotion_style or "warm_storyteller"
         clean_text = re.sub(r"\s+", " ", str(text or "")).strip()
 
@@ -288,7 +448,50 @@ class OpenSourceNarratorTTS:
         speed = float(speed_override) if speed_override is not None else (self.preset_cfg["base_speed"] * emotion_mult)
         speed = max(0.80, min(1.30, speed))
 
-        # ── Attempt Tier 1: Kokoro-82M Neural TTS (Apache 2.0) ────────────────
+        # ── Attempt Tier 1: Modal Serverless Kokoro-82M Neural TTS (Studio Expressive Human Voice) ──
+        voice_id = self.preset_cfg.get("voice_id", "af_heart")
+        lang_code = self.preset_cfg.get("lang_code", "a")
+        try:
+            from backend import generate_neural_narration_remote
+            remote_res = generate_neural_narration_remote(
+                text=clean_text,
+                voice=voice_id,
+                speed=speed,
+                lang_code=lang_code,
+            )
+            if remote_res and remote_res.get("audio_bytes"):
+                with open(out_path, "wb") as f:
+                    f.write(remote_res["audio_bytes"])
+
+                raw_samples, sr = self._read_pcm_wav(str(out_path))
+                if len(raw_samples) > 0:
+                    samples = self._resample_audio(raw_samples, sr, self.sample_rate)
+                    samples = self._normalize_peak(samples, target_peak=0.95)
+                    self._write_pcm_wav(str(out_path), samples, self.sample_rate)
+                    total_dur = len(samples) / float(self.sample_rate)
+                    word_timestamps = remote_res.get("word_timestamps") or []
+                    if not word_timestamps:
+                        word_timestamps = self.estimate_syllable_word_timestamps(clean_text, total_dur)
+                    synced = AudioVisualSyncEngine.compute_synced_phase_boundaries(
+                        duration_sec=float(target_duration_sec or max(2.5, total_dur + 0.6)),
+                        word_timestamps=word_timestamps,
+                        sync_trigger_word=trig_word,
+                        narration_text=clean_text,
+                    )
+                    return {
+                        "wav_path": str(out_path),
+                        "audio_path": str(out_path),
+                        "sample_rate": self.sample_rate,
+                        "raw_speech_duration": round(total_dur, 3),
+                        "word_timestamps": word_timestamps,
+                        "sync_trigger_word": synced["sync_trigger_word"],
+                        "trigger_timestamp_sec": synced["sync_trigger_timestamp"],
+                        "engine": f"modal-kokoro-82m ({voice_id})",
+                    }
+        except Exception as e_remote:
+            print(f"[NarratorTTS] Modal neural voice note ({e_remote}); trying local Kokoro/SAPI fallback...")
+
+        # ── Attempt Tier 2: Local Kokoro-82M Neural TTS (Apache 2.0) ────────────────
         kokoro_pipe = self._get_kokoro_pipeline(self.preset_cfg["lang_code"])
         if kokoro_pipe is not None:
             try:
@@ -316,6 +519,7 @@ class OpenSourceNarratorTTS:
 
                 if audio_chunks:
                     full_audio = np.concatenate(audio_chunks)
+                    full_audio = self._normalize_peak(full_audio, target_peak=0.95)
                     total_dur = len(full_audio) / float(self.sample_rate)
                     if not word_timestamps:
                         word_timestamps = self.estimate_syllable_word_timestamps(clean_text, total_dur)
@@ -337,14 +541,56 @@ class OpenSourceNarratorTTS:
                         "engine": "kokoro-82m",
                     }
             except Exception as e:
-                print(f"[NarratorTTS] Kokoro-82M note ({e}); using acoustic fallback.")
+                print(f"[NarratorTTS] Kokoro-82M note ({e}); using Windows native voice engine.")
 
-        # ── Tier 2/3: Deterministic Syllable-Prosody Harmonic Synthesizer ─────
+        # ── Attempt Tier 2: Windows Native SAPI5 / OneCore Engine ────────────
+        sapi_voice = str(self.preset_cfg.get("sapi_voice", "zira"))
+        sapi_rate_base = int(self.preset_cfg.get("sapi_rate", 0))
+        rate_offset = 1 if speed >= 1.08 else (-1 if speed <= 0.94 else 0)
+        eff_sapi_rate = max(-10, min(10, sapi_rate_base + rate_offset))
+
+        sapi_ok = self._synthesize_windows_sapi(
+            clean_text,
+            str(out_path),
+            voice_hint=sapi_voice,
+            rate=eff_sapi_rate,
+            volume=100,
+        )
+        if sapi_ok and os.path.exists(out_path) and os.path.getsize(out_path) > 500:
+            try:
+                raw_samples, sr = self._read_pcm_wav(str(out_path))
+                if len(raw_samples) > 0:
+                    samples = self._resample_audio(raw_samples, sr, self.sample_rate)
+                    samples = self._normalize_peak(samples, target_peak=0.95)
+                    self._write_pcm_wav(str(out_path), samples, self.sample_rate)
+                    total_dur = len(samples) / float(self.sample_rate)
+                    word_timestamps = self.estimate_syllable_word_timestamps(clean_text, total_dur)
+                    synced = AudioVisualSyncEngine.compute_synced_phase_boundaries(
+                        duration_sec=float(target_duration_sec or max(2.5, total_dur + 0.6)),
+                        word_timestamps=word_timestamps,
+                        sync_trigger_word=trig_word,
+                        narration_text=clean_text,
+                    )
+                    return {
+                        "wav_path": str(out_path),
+                        "audio_path": str(out_path),
+                        "sample_rate": self.sample_rate,
+                        "raw_speech_duration": round(total_dur, 3),
+                        "word_timestamps": word_timestamps,
+                        "sync_trigger_word": synced["sync_trigger_word"],
+                        "trigger_timestamp_sec": synced["sync_trigger_timestamp"],
+                        "engine": f"windows-sapi5 ({sapi_voice})",
+                    }
+            except Exception as e_norm:
+                print(f"[NarratorTTS] Post-processing SAPI audio note ({e_norm})")
+
+        # ── Tier 3: Deterministic Syllable-Prosody Harmonic Synthesizer (Offline CI) ──
         audio_samples, word_timestamps, total_dur = self._synthesize_prosodic_envelope_speech(
             clean_text,
             speed=speed,
             base_pitch_hz=float(self.preset_cfg.get("pitch_hz", 160.0)),
         )
+        audio_samples = self._normalize_peak(audio_samples, target_peak=0.85)
         self._write_pcm_wav(str(out_path), audio_samples, self.sample_rate)
         synced = AudioVisualSyncEngine.compute_synced_phase_boundaries(
             duration_sec=float(target_duration_sec or max(2.5, total_dur + 0.6)),
@@ -476,7 +722,8 @@ class OpenSourceNarratorTTS:
             + 0.10 * np.sin(3.0 * phase + 0.7)
         ).astype(np.float32)
 
-        waveform = (0.28 * envelope * carrier).astype(np.float32)
+        raw_waveform = (envelope * carrier).astype(np.float32)
+        waveform = self._normalize_peak(raw_waveform, target_peak=0.85)
         return waveform, word_timestamps, est_duration
 
     @staticmethod
@@ -594,6 +841,7 @@ class AudioVisualSyncEngine:
         if copy_len > 0:
             padded[lead_samples: lead_samples + copy_len] = samples[:copy_len]
 
+        padded = OpenSourceNarratorTTS._normalize_peak(padded, target_peak=0.95)
         OpenSourceNarratorTTS._write_pcm_wav(eff_wav_path, padded, sr)
 
         return {
@@ -698,7 +946,6 @@ class AudioVisualSyncEngine:
         lines = []
         cursor = 0.0
         sub_idx = 1
-        overlap = transition_duration if transition_type in ("crossfade", "fade_black", "match_cut") else 0.0
 
         for idx, sc in enumerate(scenes):
             dur = float(sc.get("exact_duration_seconds") or sc.get("duration_seconds") or 3.5)
@@ -712,7 +959,16 @@ class AudioVisualSyncEngine:
                 lines.append(narration)
                 lines.append("")
                 sub_idx += 1
+
             if idx < len(scenes) - 1:
+                if isinstance(transition_type, list):
+                    t_name = str(transition_type[idx] if idx < len(transition_type) else "crossfade").lower()
+                else:
+                    t_name = str(transition_type or "cut").lower()
+                td = transition_duration if not isinstance(transition_duration, list) else (
+                    transition_duration[idx] if idx < len(transition_duration) else 0.5
+                )
+                overlap = float(td) if t_name not in ("cut", "none") else 0.0
                 cursor += max(0.1, dur - overlap)
             else:
                 cursor += dur
@@ -760,6 +1016,8 @@ class AudioVisualSyncEngine:
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
+                "-ar", "44100",
+                "-af", "volume=1.2",
                 "-shortest",
                 temp_mux,
             ]

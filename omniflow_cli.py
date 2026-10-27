@@ -105,8 +105,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--voice",
         type=str,
-        default="windows-sapi5 (zira)",
-        help="Narrator voice engine preset",
+        default="Warm Storyteller (Female - af_heart)",
+        help="Narrator voice preset: 'af_heart' (Warm Female), 'am_adam' (Charming Male), 'af_bella' (Anime Female), 'am_fenrir' (Trailer Male), 'bf_emma' (British Fable)",
     )
     parser.add_argument(
         "--transition",
