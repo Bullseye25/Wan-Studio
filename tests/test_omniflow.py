@@ -30,8 +30,8 @@ class TestOmniFlowEngine(unittest.TestCase):
         self.assertEqual(calculate_omniflow_scenes(10.0), 2)
         self.assertEqual(calculate_omniflow_scenes(15.0), 3)
         self.assertEqual(calculate_omniflow_scenes(20.0), 4)
-        self.assertEqual(calculate_omniflow_scenes(30.0), 4)
-        self.assertEqual(calculate_omniflow_scenes(45.0), 4)
+        self.assertEqual(calculate_omniflow_scenes(30.0), 6)
+        self.assertEqual(calculate_omniflow_scenes(45.0), 9)
 
     def test_inject_9_16_vertical_composition_rules(self):
         """Ensures vertical 9:16 safe-zone framing cues are injected properly."""

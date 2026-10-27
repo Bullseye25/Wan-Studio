@@ -56,17 +56,12 @@ class OmniFlowConfig:
 def calculate_omniflow_scenes(duration: float) -> int:
     """
     Computes the optimal scene count for cinematic narrative pacing.
-    For a 30s film, 4 scenes of ~7.5s (or 6 scenes of 5.0s) delivers optimal dramatic structure.
+    Wan 2.2 FLF2V generates ~5.0s atomic clips (81 frames at 16fps).
+    Ensures minimum 2 scenes for narrative contrast and max 5s per clip.
+    For a 30s film, exactly 6 atomic 5.0s scenes are generated.
     """
     dur = max(5.0, float(duration))
-    if dur <= 10.0:
-        return 2
-    if dur <= 15.0:
-        return 3
-    if dur <= 25.0:
-        return 4
-    # Default 30.0s target -> 4 atomic 7.5s scenes (or 6 scenes of 5.0s)
-    return 4
+    return max(2, math.ceil(dur / 5.0))
 
 
 def inject_9_16_vertical_composition_rules(prompt: str, art_style: str) -> str:
@@ -100,28 +95,41 @@ class OmniFlowEngine:
 
     def calculate_eta(self, config: OmniFlowConfig) -> Tuple[float, Dict[str, Any]]:
         """
-        Calculates dynamic ETA in seconds for the complete production.
-        In Swarm mode, video generation runs in parallel, cutting render time from ~20m to ~4.5m!
+        Calculates dynamic, telemetry-grounded ETA in seconds for the complete production.
+        Empirically calibrated from Modal Cloud GPU benchmarks:
+          - Screenplay & Narrative Audit (Groq LPU): ~5-8s
+          - Open-Source Neural Voiceover (Modal Kokoro-82M): ~6.8s per scene (~41s for 6 scenes)
+          - Character Genesis (Modal Z-Image Turbo): ~20s per character (~40s for cast of 2)
+          - Dual Keyframes (Modal Qwen Image Edit): ~98s per keyframe (Start + End = ~196s per scene)
+          - Video Rendering (Modal Wan 2.2 FLF2V + RIFE 2x): ~250s per 81-frame clip on A100 GPU
+          - Assembly & Transitions (FFmpeg): ~7s
+          - AI Critic & Knowledge Base: ~2s
         """
         num_scenes = config.num_scenes or calculate_omniflow_scenes(config.target_duration)
         p_clean = str(config.provider or "groq").lower().strip()
-        t_script = 1.6 if p_clean == "groq" else 6.5
-        t_voice = round(num_scenes * 0.15, 1)
-        t_chars = 3.5  # Z-Image Turbo on Modal
-        t_keyframes = round(num_scenes * 2 * 5.0, 1)  # Qwen Image Edit Start + End
+        t_script = 5.0 if p_clean == "groq" else 15.0
 
-        # Video rendering on Modal A100 GPU
-        if config.parallel_swarm and num_scenes > 1:
-            # Parallel Swarm executes clips concurrently: O(1 scene) with minor coordination overhead
-            t_video = 36.0 + (num_scenes * 2.5)
-        else:
-            t_video = num_scenes * 36.0
+        # Narration via serverless Kokoro-82M on Modal (~6.8s per scene)
+        t_voice = round(num_scenes * 6.8, 1) if config.enable_narrator else 0.5
+
+        # Character portraits (Z-Image Turbo on Modal, ~20s per character, default 2)
+        detected_chars = 2
+        t_chars = round(detected_chars * 20.0, 1)
+
+        # Keyframe generation on Modal Qwen Image Edit (Start + End frame per scene)
+        t_keyframes = round(num_scenes * 2 * 98.0, 1)
+
+        # Video rendering on Modal Wan 2.2 A100-80GB GPU
+        # Calibrated benchmark: ~250s per 81-frame clip (8-step Lightning + RIFE 2x)
+        wan_clip_sec = 250.0
+        concurrency = 2 if config.parallel_swarm else 1
+        t_video = round(math.ceil(num_scenes / concurrency) * wan_clip_sec, 1)
 
         if config.enable_midpoint_refine:
-            t_video += (5.0 if config.parallel_swarm else (num_scenes * 5.0))
+            t_video += round(num_scenes * 3.0, 1)
 
-        t_assembly = 2.0
-        t_critic = 1.0
+        t_assembly = 7.0
+        t_critic = 2.0
 
         total_eta = t_script + t_voice + t_chars + t_keyframes + t_video + t_assembly + t_critic
         breakdown = {

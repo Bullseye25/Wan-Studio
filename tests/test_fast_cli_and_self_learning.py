@@ -39,7 +39,7 @@ class TestFastCLIEstimation(unittest.TestCase):
         )
         self.assertEqual(breakdown_30s["scenes_count"], 6)
         self.assertEqual(breakdown_30s["detected_chars"], 2)
-        self.assertTrue(120.0 <= eta_30s <= 260.0)
+        self.assertTrue(1500.0 <= eta_30s <= 3500.0)
 
         # 15-second story (3 scenes) should take approximately half the time
         eta_15s, breakdown_15s = calculate_dynamic_eta(

@@ -26,6 +26,7 @@ import re
 import sys
 import time
 import json
+import math
 import pathlib
 import argparse
 from typing import Dict, Any, List, Optional, Tuple
@@ -74,40 +75,41 @@ def calculate_dynamic_eta(
     # 1. Screenplay generation
     p_clean = str(provider or "groq").lower().strip()
     if p_clean == "groq":
-        t_screenplay = 1.6
+        t_screenplay = 5.0
     elif p_clean == "local_ollama":
-        t_screenplay = 6.5
+        t_screenplay = 15.0
     else:
-        t_screenplay = 14.0
+        t_screenplay = 25.0
 
-    # 2. Voiceover narration (local SAPI5)
-    t_voice = round(scenes_count * 0.1, 1)
+    # 2. Voiceover narration (Kokoro-82M on Modal Cloud GPU)
+    t_voice = round(scenes_count * 6.8, 1)
 
-    # 3. Character portraits (Z-Image Turbo on Modal)
-    t_chars = round(detected_chars * (3.0 if fast_mode else 4.0), 1)
+    # 3. Character portraits (Z-Image Turbo on Modal, ~20s per portrait)
+    t_chars = round(detected_chars * 20.0, 1)
 
     # 4. Keyframes (Qwen Image Edit on Modal: Start + End frame per scene)
-    t_keyframes = round(scenes_count * 2 * (4.8 if fast_mode else 6.2), 1)
+    keyframe_per_img = 85.0 if fast_mode else 98.0
+    t_keyframes = round(scenes_count * 2 * keyframe_per_img, 1)
 
-    # 5. Video rendering (Wan 2.2 FLF2V on Modal A100 GPU)
-    # ~30s per 81-frame clip in 8-step Lightning mode
-    wan_per_clip = 30.0 if fast_mode else 36.0
-    t_video = round(scenes_count * wan_per_clip, 1)
+    # 5. Video rendering (Wan 2.2 FLF2V on Modal A100 GPU + RIFE 2x)
+    # ~250s per 81-frame clip on A100-80GB
+    concurrency = 2 if fast_mode else 1
+    t_video = round(math.ceil(scenes_count / concurrency) * 250.0, 1)
 
-    # 6. Overlapped pipelining savings
-    t_overlap_savings = round(scenes_count * 6.5, 1) if fast_mode else 0.0
+    # 6. Final FFmpeg transition assembly + Kokoro Audio Muxing + Subtitle sync
+    t_assembly = 7.0
 
-    # 7. Final FFmpeg transition assembly + Subtitle sync
-    t_assembly = 1.5
+    # 7. Multi-tier AI Critic & Self-learning post-mortem
+    t_critic = 2.0
 
-    # 8. Multi-tier AI Critic & Self-learning post-mortem
-    t_critic = 1.0
+    # Overlapped pipelining savings
+    t_overlap_savings = 0.0
 
     # Cold boot allowance if container is idle
-    t_cold_boot = 0.0 if is_modal_warm else 30.0
+    t_cold_boot = 0.0 if is_modal_warm else 60.0
 
     total_eta = max(
-        30.0,
+        60.0,
         t_screenplay
         + t_voice
         + t_chars
@@ -115,8 +117,7 @@ def calculate_dynamic_eta(
         + t_video
         + t_assembly
         + t_critic
-        + t_cold_boot
-        - t_overlap_savings,
+        + t_cold_boot,
     )
 
     breakdown = {
