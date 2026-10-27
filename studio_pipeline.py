@@ -22,6 +22,7 @@ import base64
 import pathlib
 import tempfile
 import subprocess
+import threading
 import urllib.request
 from typing import Callable, Optional, Dict, List, Any
 from PIL import Image
@@ -78,7 +79,40 @@ if _env_file.exists():
 DEFAULT_OLLAMA_API_KEY = "ca8516405cc74a238c9525b490331d3a.HmyaGAbsmLFyYN25P1K8_tG6"
 DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
-DEFAULT_GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
+# Multi-Key Pool for GroqCloud (3x throughput, automatic failover on 429)
+DEFAULT_GROQ_API_KEYS = [
+    "",
+    "",
+    "",
+]
+if os.environ.get("GROQ_API_KEYS"):
+    _parsed = [k.strip() for k in os.environ["GROQ_API_KEYS"].split(",") if k.strip()]
+    if _parsed:
+        DEFAULT_GROQ_API_KEYS = _parsed
+elif os.environ.get("GROQ_API_KEY"):
+    _single = os.environ["GROQ_API_KEY"].strip()
+    if _single not in DEFAULT_GROQ_API_KEYS:
+        DEFAULT_GROQ_API_KEYS.insert(0, _single)
+
+DEFAULT_GROQ_API_KEY = DEFAULT_GROQ_API_KEYS[0]
+
+_groq_key_idx = 0
+_groq_key_lock = threading.Lock()
+
+def rotate_groq_api_key() -> str:
+    """Rotates round-robin to the next available Groq API key in the multi-key pool."""
+    global _groq_key_idx
+    with _groq_key_lock:
+        key = DEFAULT_GROQ_API_KEYS[_groq_key_idx]
+        _groq_key_idx = (_groq_key_idx + 1) % len(DEFAULT_GROQ_API_KEYS)
+        return key
+
+def get_current_groq_api_key() -> str:
+    global _groq_key_idx
+    with _groq_key_lock:
+        return DEFAULT_GROQ_API_KEYS[_groq_key_idx]
+
 DEFAULT_GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
 DEFAULT_LOCAL_OLLAMA_ENDPOINT = "http://localhost:11434/v1/chat/completions"
@@ -884,6 +918,9 @@ class StudioPipeline:
             target_endpoint = DEFAULT_OLLAMA_ENDPOINT
             target_key = DEFAULT_OLLAMA_API_KEY
             actual_model = "gemma4:31b"
+        elif self.provider == "groq":
+            # Rotate across the multi-key pool to distribute load
+            target_key = rotate_groq_api_key()
 
         req_body = {
             "model": actual_model,
@@ -911,8 +948,26 @@ class StudioPipeline:
                     return resp_data["choices"][0]["message"]["content"]
             except Exception as e:
                 last_err = e
-                # Resilient fallback: If Groq hits 429 (Rate Limit) or 400, automatically fallback to Ollama Cloud
-                if self.provider == "groq" and any(code in str(e) for code in ("429", "400", "404")):
+                # Key rotation on rate limit (429)
+                if self.provider == "groq" and "429" in str(e):
+                    next_key = rotate_groq_api_key()
+                    if next_key != target_key:
+                        target_key = next_key
+                        headers["Authorization"] = f"Bearer {target_key}"
+                        try:
+                            req = urllib.request.Request(
+                                target_endpoint,
+                                headers=headers,
+                                data=json.dumps(req_body).encode("utf-8"),
+                            )
+                            with urllib.request.urlopen(req, timeout=timeout) as retry_resp:
+                                resp_data = json.loads(retry_resp.read().decode("utf-8"))
+                                return resp_data["choices"][0]["message"]["content"]
+                        except Exception as e_retry:
+                            last_err = e_retry
+
+                # Resilient fallback: If all Groq keys are exhausted or error persists, fallback to Ollama Cloud
+                if self.provider == "groq" and any(code in str(last_err) for code in ("429", "400", "404")):
                     try:
                         fallback_req_body = {
                             "model": DEFAULT_OLLAMA_MODEL,
