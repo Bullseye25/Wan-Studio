@@ -176,9 +176,9 @@ def get_num_frames(duration_seconds: float):
     return 1 + (k * 4)
 
 
-def clear_all_outputs():
+def clear_all_outputs(target_dir=None):
     """Safely cleans all files and subdirectories from the local outputs/ folder."""
-    outputs_dir = pathlib.Path(__file__).parent / "outputs"
+    outputs_dir = pathlib.Path(target_dir) if target_dir else (pathlib.Path(__file__).parent / "outputs")
     if not outputs_dir.exists():
         outputs_dir.mkdir(parents=True, exist_ok=True)
         try:

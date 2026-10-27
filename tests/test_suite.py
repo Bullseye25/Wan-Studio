@@ -196,20 +196,19 @@ class TestHeartbeatState(unittest.TestCase):
 
 class TestClearOutputs(unittest.TestCase):
     def test_clear_all_outputs(self):
-        """clear_all_outputs should remove all files and keep the directory intact."""
+        """clear_all_outputs should remove all files and keep the directory intact inside its sandbox."""
+        import tempfile
         import pathlib
-        outputs_dir = pathlib.Path(__file__).parent.parent / "outputs"
-        outputs_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp_sandbox:
+            sandbox_path = pathlib.Path(tmp_sandbox)
+            dummy_file = sandbox_path / "dummy_test_file.jpg"
+            dummy_file.write_text("test")
+            self.assertTrue(dummy_file.exists())
 
-        # Create dummy files
-        dummy_file = outputs_dir / "dummy_test_file.jpg"
-        dummy_file.write_text("test")
-        self.assertTrue(dummy_file.exists())
-
-        msg = clear_all_outputs()
-        self.assertIn("Cleared", msg)
-        self.assertFalse(dummy_file.exists())
-        self.assertTrue(outputs_dir.exists())
+            msg = clear_all_outputs(target_dir=str(sandbox_path))
+            self.assertIn("Cleared", msg)
+            self.assertFalse(dummy_file.exists())
+            self.assertTrue(sandbox_path.exists())
 
 
 class TestImageTransferRoutes(unittest.TestCase):
