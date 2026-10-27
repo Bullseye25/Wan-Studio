@@ -92,6 +92,26 @@ class TestNarratorAndAnimationReliability(unittest.TestCase):
             self.assertEqual(wf.getnchannels(), 1)
             self.assertEqual(wf.getframerate(), 24000)
 
+    def test_windows_sapi_voice_loudness_and_normalization(self):
+        tts = OpenSourceNarratorTTS(voice_preset="Cinematic Drama (Male - am_fenrir)")
+        wav_path = str(self.base_path / "audio" / "male_drama.wav")
+        res = tts.synthesize_scene_narration(
+            text="The ancient iron gates slowly parted beneath the moonlight.",
+            output_wav_path=wav_path,
+            sync_trigger_word="parted",
+            target_duration_sec=5.0,
+        )
+        self.assertTrue(os.path.exists(res["audio_path"]))
+        samples, sr = tts._read_pcm_wav(res["audio_path"])
+        self.assertEqual(sr, 24000)
+        peak = float(np.max(np.abs(samples)))
+        self.assertGreaterEqual(peak, 0.80)
+        # Verify quantize maintains healthy loudness
+        q = AudioVisualSyncEngine.quantize_audio_to_wan_frames(res["audio_path"])
+        q_samples, q_sr = tts._read_pcm_wav(q["audio_path"])
+        q_peak = float(np.max(np.abs(q_samples)))
+        self.assertGreaterEqual(q_peak, 0.80)
+
     # ─────────────────────────────────────────────────────────────────────────
     # 3. Audio-Visual Synchronization Algorithm (4k+1 Quantization & Phase Lock)
     # ─────────────────────────────────────────────────────────────────────────

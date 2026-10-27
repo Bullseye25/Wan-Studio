@@ -63,6 +63,10 @@ from orchestra_rules import (
 DEFAULT_OLLAMA_API_KEY = "ca8516405cc74a238c9525b490331d3a.HmyaGAbsmLFyYN25P1K8_tG6"
 DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
+DEFAULT_GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_LOCAL_OLLAMA_ENDPOINT = "http://localhost:11434/v1/chat/completions"
+DEFAULT_LOCAL_OLLAMA_MODEL = "qwen2.5:7b"
 
 # Verified active Ollama Cloud models (tested & benchmarked)
 VERIFIED_OLLAMA_MODELS = [
@@ -74,6 +78,41 @@ VERIFIED_OLLAMA_MODELS = [
     ("⚡ gpt-oss:20b — Agile Interactive Co-Pilot & Quick Tweaks (20B)", "gpt-oss:20b"),
     ("🤖 Auto-Routing (Smart Multi-Agent Workflow — Best Model per Task)", "auto"),
 ]
+
+# Multi-Provider LLM Gateway Configurations (GroqCloud Free Tier, Local Ollama, Ollama Cloud)
+LLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "groq": {
+        "name": "⚡ GroqCloud (Ultra-Fast Free Tier — Recommended)",
+        "endpoint": DEFAULT_GROQ_ENDPOINT,
+        "default_model": DEFAULT_GROQ_MODEL,
+        "models": [
+            ("⚡ llama-3.3-70b-versatile — Master Screenwriter (70B - Recommended)", "llama-3.3-70b-versatile"),
+            ("🚀 llama-3.1-8b-instant — Sub-Second Timeline & QA Critic (8B)", "llama-3.1-8b-instant"),
+            ("👁️ llama-3.2-11b-vision-preview — Multimodal Keyframe Director", "llama-3.2-11b-vision-preview"),
+            ("🧠 deepseek-r1-distill-llama-70b — Deep Reasoning & Logic Auditor", "deepseek-r1-distill-llama-70b"),
+        ],
+        "env_key": "GROQ_API_KEY",
+    },
+    "local_ollama": {
+        "name": "💻 Local Ollama (100% Free & Offline — localhost:11434)",
+        "endpoint": DEFAULT_LOCAL_OLLAMA_ENDPOINT,
+        "default_model": DEFAULT_LOCAL_OLLAMA_MODEL,
+        "models": [
+            ("⚡ qwen2.5:7b — Flawless JSON Storyboarder & Causal Logic", "qwen2.5:7b"),
+            ("🎬 qwen2.5:14b — High-Detail Narrative Director", "qwen2.5:14b"),
+            ("🚀 llama3.2:3b — Ultra-Lightweight & Fast", "llama3.2:3b"),
+            ("🎨 gemma2:9b — Creative Concept & Visual Prompter", "gemma2:9b"),
+        ],
+        "env_key": "LOCAL_OLLAMA_KEY",
+    },
+    "ollama_cloud": {
+        "name": "☁️ Ollama Cloud (Hosted Gemma / GPT-OSS)",
+        "endpoint": DEFAULT_OLLAMA_ENDPOINT,
+        "default_model": DEFAULT_OLLAMA_MODEL,
+        "models": VERIFIED_OLLAMA_MODELS,
+        "env_key": "OLLAMA_API_KEY",
+    },
+}
 
 # Aspect ratio presets for scene synthesis and video animation
 ASPECT_RATIO_PRESETS = {
@@ -592,11 +631,33 @@ class StudioPipeline:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         endpoint_url: Optional[str] = None,
+        provider: str = "groq",
         output_base_dir: Optional[str] = None,
     ):
-        self.api_key = api_key or DEFAULT_OLLAMA_API_KEY
-        self.model = model or DEFAULT_OLLAMA_MODEL
-        self.endpoint_url = endpoint_url or DEFAULT_OLLAMA_ENDPOINT
+        self.provider = str(provider or "groq").lower().strip()
+        prov_cfg = LLM_PROVIDERS.get(self.provider, LLM_PROVIDERS["groq"])
+        self.endpoint_url = endpoint_url or prov_cfg.get("endpoint") or DEFAULT_GROQ_ENDPOINT
+
+        # Resolve api_key
+        if api_key:
+            self.api_key = api_key
+        else:
+            env_var = prov_cfg.get("env_key", "")
+            env_val = os.environ.get(env_var, "") if env_var else ""
+            if env_val:
+                self.api_key = env_val
+            elif self.provider == "ollama_cloud":
+                self.api_key = DEFAULT_OLLAMA_API_KEY
+            elif self.provider == "local_ollama":
+                self.api_key = "local"
+            else:
+                # Groq without explicit key -> fallback to Ollama Cloud preconfigured key
+                self.api_key = DEFAULT_OLLAMA_API_KEY
+                self.endpoint_url = DEFAULT_OLLAMA_ENDPOINT
+                self.provider = "ollama_cloud"
+                prov_cfg = LLM_PROVIDERS["ollama_cloud"]
+
+        self.model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
 
         if output_base_dir:
             self.base_dir = pathlib.Path(output_base_dir)
@@ -614,8 +675,66 @@ class StudioPipeline:
 
 
     # ─────────────────────────────────────────────────────────────────────────
-    # LLM transport (shared by Story Architect and Animation Director)
+    # LLM transport (Multi-Provider Gateway: GroqCloud, Local Ollama, Ollama Cloud)
     # ─────────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def test_llm_connection(
+        cls,
+        provider: str = "groq",
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+        timeout: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Tests live roundtrip latency to the selected LLM provider with a 5-token handshake.
+        Returns: { 'success': bool, 'latency_ms': float, 'model': str, 'provider': str, 'message': str }
+        """
+        p_clean = str(provider or "groq").lower().strip()
+        prov_cfg = LLM_PROVIDERS.get(p_clean, LLM_PROVIDERS["groq"])
+        eff_endpoint = endpoint_url or prov_cfg.get("endpoint") or DEFAULT_GROQ_ENDPOINT
+        eff_model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
+        eff_key = api_key or os.environ.get(prov_cfg.get("env_key", ""), "") or (
+            DEFAULT_OLLAMA_API_KEY if p_clean == "ollama_cloud" else ("local" if p_clean == "local_ollama" else "")
+        )
+
+        headers = {"Content-Type": "application/json"}
+        if eff_key and eff_key != "local":
+            headers["Authorization"] = f"Bearer {eff_key}"
+
+        req_body = {
+            "model": eff_model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+            "temperature": 0.1,
+        }
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(
+                eff_endpoint,
+                headers=headers,
+                data=json.dumps(req_body).encode("utf-8"),
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                elapsed_ms = round((time.time() - t0) * 1000, 1)
+                data = json.loads(resp.read().decode("utf-8"))
+                return {
+                    "success": True,
+                    "latency_ms": elapsed_ms,
+                    "model": eff_model,
+                    "provider": p_clean,
+                    "message": f"Connected to {prov_cfg['name']} ({eff_model}) in {elapsed_ms}ms!",
+                }
+        except Exception as e:
+            elapsed_ms = round((time.time() - t0) * 1000, 1)
+            return {
+                "success": False,
+                "latency_ms": elapsed_ms,
+                "model": eff_model,
+                "provider": p_clean,
+                "message": f"Connection failed to {prov_cfg['name']} ({e})",
+            }
 
     def _resolve_model_tag(
         self,
@@ -624,38 +743,49 @@ class StudioPipeline:
         model_override: Optional[str] = None,
     ) -> str:
         """
-        Resolves the actual Ollama model tag to use.
-        If model is 'auto', routes task to the benchmarked optimal model:
-          - 'screenplay': gpt-oss:120b (Hollywood depth & dialogue)
-          - 'character': gemma4:31b (Visual prompt isolation)
-          - 'director_qa', 'end_frame': nemotron-3-super (Rigorous alignment & critic)
-          - 'choreography', 'combat': nemotron-3-ultra (Physics & weapon-locked action)
-          - 'quick_edit', 'timeline': nemotron-3-nano:30b (Fast 2.8s turnaround)
-        If messages contain images, automatically routes to vision-capable 'gemma4:31b'.
+        Resolves the actual model tag based on active provider and task role.
         """
         if model_override:
+            mo_clean = str(model_override).strip().lower()
+            if self.provider == "groq" and any(k in mo_clean for k in ("nemotron", "gemma", "gpt-oss")):
+                return DEFAULT_GROQ_MODEL
+            elif self.provider == "local_ollama" and ("llama-3." in mo_clean or "gpt-oss" in mo_clean):
+                return DEFAULT_LOCAL_OLLAMA_MODEL
+            elif self.provider == "ollama_cloud" and "llama-3." in mo_clean:
+                return DEFAULT_OLLAMA_MODEL
             return model_override
 
-        # Vision safeguard: only vision models can receive image_url payloads
+        # Vision safeguard
         if messages:
             for m in messages:
                 c = m.get("content")
                 if isinstance(c, list):
                     for part in c:
                         if isinstance(part, dict) and part.get("type") == "image_url":
+                            if self.provider == "groq":
+                                return "llama-3.2-11b-vision-preview"
+                            elif self.provider == "local_ollama":
+                                return "llava"
                             return "gemma4:31b"
 
-        m = (self.model or DEFAULT_OLLAMA_MODEL).strip()
+        m = (self.model or DEFAULT_GROQ_MODEL).strip()
         if "auto" in m.lower():
-            if task_role == "screenplay":
-                return "gpt-oss:120b"
-            elif task_role in ("director_qa", "end_frame"):
-                return "nemotron-3-super"
-            elif task_role in ("choreography", "combat"):
-                return "nemotron-3-ultra"
-            elif task_role in ("quick_edit", "timeline"):
-                return "nemotron-3-nano:30b"
-            return "gemma4:31b"
+            if self.provider == "groq":
+                if task_role in ("quick_edit", "timeline"):
+                    return "llama-3.1-8b-instant"
+                return "llama-3.3-70b-versatile"
+            elif self.provider == "local_ollama":
+                return "qwen2.5:7b"
+            else:
+                if task_role == "screenplay":
+                    return "gpt-oss:120b"
+                elif task_role in ("director_qa", "end_frame"):
+                    return "nemotron-3-super"
+                elif task_role in ("choreography", "combat"):
+                    return "nemotron-3-ultra"
+                elif task_role in ("quick_edit", "timeline"):
+                    return "nemotron-3-nano:30b"
+                return "gemma4:31b"
         return m
 
     def _chat_completion(
@@ -668,7 +798,7 @@ class StudioPipeline:
         task_role: str = "default",
         model_override: Optional[str] = None,
     ) -> str:
-        """POSTs to the OpenAI-compatible Ollama Cloud endpoint and returns the message text."""
+        """POSTs to OpenAI-compatible LLM endpoint (GroqCloud / Local Ollama / Ollama Cloud)."""
         actual_model = self._resolve_model_tag(messages=messages, task_role=task_role, model_override=model_override)
         req_body = {
             "model": actual_model,
@@ -676,14 +806,15 @@ class StudioPipeline:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key and self.api_key != "local":
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         last_err = None
         for attempt in range(max_retries + 1):
             req = urllib.request.Request(
                 self.endpoint_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 data=json.dumps(req_body).encode("utf-8"),
             )
             try:
@@ -695,7 +826,7 @@ class StudioPipeline:
                 if attempt < max_retries:
                     time.sleep(2.0)
                     continue
-        raise RuntimeError(f"Ollama API request failed ({actual_model}): {last_err}")
+        raise RuntimeError(f"LLM API request failed ({self.provider} - {actual_model}): {last_err}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 1: Story Generation & Character Extraction (Gemma 4: 31B)
@@ -726,6 +857,14 @@ class StudioPipeline:
         exemplars = memory_bank.retrieve_exemplars(prompt, top_k=1)
         few_shot_prompt = memory_bank.format_few_shot_prompt(exemplars)
 
+        # ── Retrieve Learned Directives from Self-Learning Critic ─────────────
+        from self_learning_critic import DirectorKnowledgeBase
+        kb = DirectorKnowledgeBase(storage_dir=str(self.base_dir))
+        learned_directives = kb.retrieve_relevant_directives(prompt, top_k=3)
+        learned_prompt = kb.format_directives_prompt(learned_directives)
+        if learned_directives:
+            print(f"[StudioPipeline] Injected {len(learned_directives)} learned directive(s) from past film post-mortems.")
+
         # ── Retrieve Narrative Beat Guide for Target Scene Count ───────────────
         beat_presets = NARRATIVE_BEATS_BY_COUNT.get(num_scenes, NARRATIVE_BEATS_BY_COUNT.get(6, []))
         beat_guide_text = "\n".join(
@@ -754,12 +893,18 @@ class StudioPipeline:
             "so it is spoken cleanly in 2.2s–3.8s inside the 5.0s shot), a 'narration_voice_style' (e.g. 'warm_wonder', 'tense_whisper', 'urgent_rising', "
             "'epic_climax', 'joyful_resolution'), and a single 'sync_trigger_word' (the exact action verb in narration_text where the visual climax occurs).\n\n"
             f"NARRATIVE BEAT STRUCTURE TO FOLLOW:\n{beat_guide_text}\n\n"
+            + (f"{learned_prompt}\n\n" if learned_prompt else "")
             + (f"{few_shot_prompt}\n\n" if few_shot_prompt else "")
             + "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
             "{\n"
             '  "title": "Short Film Title",\n'
             '  "art_style": "Visual style description",\n'
             '  "theme": "Moral or thematic premise",\n'
+            '  "color_and_lighting_script": {\n'
+            '    "palette": "Color palette defining the atmosphere (e.g. Warm amber golds contrasting deep twilight teals)",\n'
+            '    "lighting_progression": "Directional lighting and mood progression across the scenes",\n'
+            '    "emotional_tone": "The core emotional mood (e.g. Heart-touching, hopeful, intimate)"\n'
+            '  },\n'
             '  "characters": [\n'
             "    {\n"
             '      "id": "char_1",\n'
@@ -780,6 +925,7 @@ class StudioPipeline:
             f'      "duration_seconds": {scene_duration},\n'
             '      "narrative_beat": "e.g. Hook & Status Quo / Inciting Obstacle / Climax & Payoff",\n'
             '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
+            '      "recommended_transition": "cut / match_cut / crossfade / fade_black / whip_pan",\n'
             '      "narration_text": "Spoken voiceover line for this 5s shot (strictly 6 to 11 words)",\n'
             '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
             '      "sync_trigger_word": "exact action verb in narration_text that triggers the visual climax",\n'
@@ -847,6 +993,14 @@ class StudioPipeline:
         data = dict(data or {})
         data.setdefault("title", "Studio Story")
         data.setdefault("art_style", art_style)
+        color_script = data.get("color_and_lighting_script")
+        if not isinstance(color_script, dict):
+            color_script = {
+                "palette": "Vibrant cinematic animation palette with rich emotional contrast",
+                "lighting_progression": "Warm motivated key lighting evolving across scene dramatic beats",
+                "emotional_tone": "Heart-touching, hopeful, and intimate",
+            }
+        data["color_and_lighting_script"] = color_script
 
         chars = data.get("characters")
         if not isinstance(chars, list) or not chars:
@@ -927,8 +1081,10 @@ class StudioPipeline:
         for i, s in enumerate(norm_scenes):
             default_beat = beat_presets[i]["beat"] if i < len(beat_presets) else f"Beat {i+1}"
             default_conn = beat_presets[i]["connector"] if i < len(beat_presets) else ("SETUP" if i == 0 else "THEREFORE")
+            default_trans = beat_presets[i].get("recommended_transition", "cut") if i < len(beat_presets) else "cut"
             s.setdefault("narrative_beat", default_beat)
             s.setdefault("causal_connector", default_conn)
+            s.setdefault("recommended_transition", default_trans)
 
             # Enforce 6-11 word spoken narration & sync trigger word
             raw_narration = s.get("narration_text") or ""
@@ -1309,7 +1465,8 @@ class StudioPipeline:
             scene_entry["word_timestamps"] = quant_info["shifted_timestamps"]
             scene_entry["audio_quantization"] = quant_info
             scene_entry["synced_phases"] = synced_phases
-            scene_entry["tts_engine"] = tts_res.get("engine", "kokoro-82m")
+            scene_entry["tts_engine"] = tts_res.get("engine", "windows-sapi5")
+            print(f"[StudioPipeline] Scene {scene_num} voice synthesized ({tts_res.get('engine')}): dur={quant_info['duration_seconds']}s, frames={quant_info['num_frames']}, file={quant_info['audio_path']}")
 
             scene.update(scene_entry)
             updated_scenes.append(scene_entry)
@@ -2614,6 +2771,9 @@ class StudioPipeline:
         use_last_frame: bool = True,
         enable_rife_2x: bool = False,
         anti_noise_guard: bool = True,
+        lora_repo_or_path: str = "",
+        lora_scale: float = 0.8,
+        enable_midpoint_refine: bool = False,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> str:
         """
@@ -2675,7 +2835,12 @@ class StudioPipeline:
                 anti_noise_guard=True,
             )
 
+        active_lora = lora_repo_or_path or scene.get("lora_repo_or_path", "") or (story_meta or {}).get("lora_repo_or_path", "")
+        active_lora_scale = float(lora_scale if lora_repo_or_path else scene.get("lora_scale", (story_meta or {}).get("lora_scale", lora_scale)))
+
         mode_str = "FLF2V (First+Last Frame)" if resized_last_frame is not None else "I2V (First Frame)"
+        if active_lora:
+            mode_str += f" + LoRA({os.path.basename(active_lora)}@{active_lora_scale})"
         print(f"[StudioPipeline] Animating Scene {scene_num} ({wan_w}x{wan_h}, {num_frames} frames, "
               f"mode={mode_str}, fps={frame_mult}, seed={use_seed}, director={plan.get('source')})...")
 
@@ -2695,6 +2860,10 @@ class StudioPipeline:
             quality=WAN_DEFAULTS["quality"],
             duration_seconds=duration_sec,
             safe_mode=True,
+            lora_repo_or_path=active_lora,
+            lora_scale=active_lora_scale,
+            enable_midpoint_refine=enable_midpoint_refine,
+            output_filename=f"output_scene_{scene_num}_{use_seed}_{int(time.time()*1000)}.mp4",
         )
         video_path = result[0] if isinstance(result, (tuple, list)) else result
 
@@ -2753,17 +2922,66 @@ class StudioPipeline:
         use_last_frame: bool = True,
         enable_rife_2x: bool = False,
         anti_noise_guard: bool = True,
+        lora_repo_or_path: str = "",
+        lora_scale: float = 0.8,
+        parallel_swarm: bool = True,
+        enable_midpoint_refine: bool = False,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> List[str]:
         """
         Animates each scene into a clip with Wan 2.2 on Modal (using both First Frame and Last Frame
         when available and `use_last_frame=True`).
-        Uses the SAME LOCKED SEED (`base_seed` / `wan_seed`) across all 5-second clips
+        Supports Parallel Swarm execution across concurrent Modal A100 GPU containers.
+        Uses the SAME LOCKED SEED (`base_seed` / `wan_seed`) across all clips
         for uniform temporal noise and motion physics across cuts.
         """
         total = len(scenes)
         clip_paths = []
         locked_wan_seed = int(base_seed)
+
+        if parallel_swarm and total > 1:
+            print(f"[StudioPipeline] >> OmniFlow Swarm: Launching {total} scene rendering tasks concurrently on Modal cloud GPUs...")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            max_workers = min(4, total)
+            results = [None] * total
+            swarm_succeeded = True
+
+            def _swarm_worker(idx_and_scene):
+                i, sc = idx_and_scene
+                dest = self._animate_single_scene_clip(
+                    scene=sc,
+                    aspect_ratio=aspect_ratio,
+                    seed=locked_wan_seed,
+                    use_last_frame=use_last_frame,
+                    enable_rife_2x=enable_rife_2x,
+                    anti_noise_guard=anti_noise_guard,
+                    lora_repo_or_path=lora_repo_or_path,
+                    lora_scale=lora_scale,
+                    enable_midpoint_refine=enable_midpoint_refine,
+                )
+                return i, dest
+
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(_swarm_worker, (i, sc)) for i, sc in enumerate(scenes)]
+                    done_count = 0
+                    for fut in as_completed(futures):
+                        i, clip_dest = fut.result()
+                        results[i] = clip_dest
+                        done_count += 1
+                        if progress_cb:
+                            pct = 0.60 + (done_count / total) * 0.30
+                            progress_cb(pct, f"OmniFlow Swarm: Completed {done_count}/{total} scenes (Scene {scenes[i].get('scene_number', i+1)} ready)...")
+                clip_paths = results
+            except Exception as swarm_err:
+                print(f"[StudioPipeline] OmniFlow Swarm encountered exception: {swarm_err}. Gracefully falling back to sequential rendering...")
+                swarm_succeeded = False
+                clip_paths = []
+
+            if swarm_succeeded and all(p is not None for p in clip_paths):
+                if progress_cb:
+                    progress_cb(0.90, f"All {total} scene clips animated via Parallel Swarm with locked Wan seed {locked_wan_seed}.")
+                return clip_paths
 
         for idx, scene in enumerate(scenes):
             scene_num = scene.get("scene_number", idx + 1)
@@ -2786,6 +3004,9 @@ class StudioPipeline:
                 use_last_frame=use_last_frame,
                 enable_rife_2x=enable_rife_2x,
                 anti_noise_guard=anti_noise_guard,
+                lora_repo_or_path=lora_repo_or_path,
+                lora_scale=lora_scale,
+                enable_midpoint_refine=enable_midpoint_refine,
             )
             clip_paths.append(clip_dest)
 
@@ -2807,6 +3028,8 @@ class StudioPipeline:
         enable_rife_2x: bool = False,
         anti_noise_guard: bool = True,
         auto_stitch: bool = True,
+        lora_repo_or_path: str = "",
+        lora_scale: float = 0.8,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -2871,6 +3094,8 @@ class StudioPipeline:
             use_last_frame=use_last_frame,
             enable_rife_2x=enable_rife_2x,
             anti_noise_guard=anti_noise_guard,
+            lora_repo_or_path=lora_repo_or_path,
+            lora_scale=lora_scale,
             progress_cb=progress_cb,
         )
         scenes[scene_index] = target
@@ -2927,8 +3152,23 @@ class StudioPipeline:
 
         stitched_successfully = False
 
+        # ── Resolve Dynamic / Narrative Transitions ───────────────────────────
+        active_transition: Any = transition_type
+        if str(transition_type).strip().lower() in ("narrative", "dynamic") and scenes and len(scenes) >= 2:
+            extracted = []
+            for sc in scenes[1:]:
+                rec = str(sc.get("recommended_transition", "cut")).strip().lower()
+                extracted.append(rec)
+            active_transition = extracted
+            print(f"[StudioPipeline] Narrative transition director resolved per-cut sequence: {active_transition}")
+
+        is_cinematic = (
+            isinstance(active_transition, list)
+            or active_transition in ("crossfade", "fade_black", "match_cut", "dissolve", "whip_pan")
+        )
+
         # ── 1. Cinematic Transition Path (xfade / acrossfade) ─────────────────
-        if transition_type in ("crossfade", "fade_black", "match_cut") and len(clip_paths) >= 2 and transition_duration > 0:
+        if is_cinematic and len(clip_paths) >= 2 and transition_duration > 0:
             try:
                 durations = []
                 has_audio = True
@@ -2957,7 +3197,7 @@ class StudioPipeline:
 
                 v_filt, a_filt, _ = build_ffmpeg_transition_filter(
                     clip_durations=durations,
-                    transition_type=transition_type,
+                    transition_type=active_transition,
                     transition_duration=transition_duration,
                     has_audio=has_audio,
                 )
@@ -3025,7 +3265,7 @@ class StudioPipeline:
                 AudioVisualSyncEngine.write_srt_subtitles(
                     scenes,
                     str(srt_path),
-                    transition_type=transition_type,
+                    transition_type=active_transition,
                     transition_duration=transition_duration,
                 )
                 print(f"[StudioPipeline] Exported synchronized SRT subtitles: {srt_path}")
@@ -3061,6 +3301,16 @@ class StudioPipeline:
         anti_noise_guard: bool = True,
         enable_narrator: bool = True,
         narrator_voice: str = DEFAULT_NARRATOR_VOICE,
+        transition_type: str = "crossfade",
+        transition_duration: float = 0.5,
+        lora_repo_or_path: str = "",
+        lora_scale: float = 0.8,
+        run_story_audit: bool = False,
+        auto_qa_retry: bool = False,
+        manage_gpu_phases: bool = False,
+        parallel_swarm: bool = True,
+        enable_midpoint_refine: bool = False,
+        collect_telemetry: bool = True,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -3068,13 +3318,21 @@ class StudioPipeline:
           - z_image_seed : locked across all Z-Image Turbo character portraits
           - qwen_seed    : locked across all Qwen Image Edit scene keyframes
           - wan_seed     : locked across all Wan 2.2 5s video clips
-        Includes Open-Source Narrator Voice Synthesis & Audio-Visual Sync when `enable_narrator=True`.
+        Includes Open-Source Narrator Voice Synthesis, Audio-Visual Sync, Cinematic Transitions,
+        and End-to-End Production Telemetry & Post-Mortem Logging.
         """
+        from production_telemetry import ProductionTelemetryCollector
+        import backend
+
+        telemetry_collector = ProductionTelemetryCollector(base_dir=str(self.base_dir)) if collect_telemetry else None
+
         random_seeds = generate_three_studio_seeds()
         seed_z = int(z_image_seed if z_image_seed is not None else (shared_seed if shared_seed is not None else random_seeds["z_image_seed"]))
         seed_qwen = int(qwen_seed if qwen_seed is not None else (shared_seed if shared_seed is not None else random_seeds["qwen_seed"]))
         seed_wan = int(wan_seed if wan_seed is not None else (shared_seed if shared_seed is not None else random_seeds["wan_seed"]))
 
+        if telemetry_collector:
+            telemetry_collector.start_stage("1_screenplay_generation")
         story_data = self.generate_story_and_characters(
             prompt=user_prompt,
             num_scenes=num_scenes,
@@ -3082,10 +3340,25 @@ class StudioPipeline:
             art_style=art_style,
             progress_cb=progress_cb,
         )
+        if telemetry_collector:
+            telemetry_collector.end_stage("1_screenplay_generation")
+
+        if run_story_audit:
+            if telemetry_collector:
+                telemetry_collector.start_stage("1a_story_doctor_audit")
+            audit_res = self.audit_and_repair_story_logic(story_data, progress_cb=progress_cb)
+            story_data = audit_res.get("story", story_data)
+            if telemetry_collector:
+                telemetry_collector.end_stage("1a_story_doctor_audit")
+
         story_data["z_image_seed"] = seed_z
         story_data["qwen_seed"] = seed_qwen
         story_data["wan_seed"] = seed_wan
         story_data["narrator_voice_preset"] = narrator_voice
+        story_data["transition_type"] = transition_type
+        story_data["transition_duration"] = transition_duration
+        story_data["lora_repo_or_path"] = lora_repo_or_path
+        story_data["lora_scale"] = lora_scale
         story_data["seeds"] = {
             "z_image_seed": seed_z,
             "qwen_seed": seed_qwen,
@@ -3093,13 +3366,22 @@ class StudioPipeline:
         }
 
         if enable_narrator:
+            if telemetry_collector:
+                telemetry_collector.start_stage("1b_narrator_voice_synthesis")
             story_data["scenes"] = self.generate_story_narration(
                 scenes=story_data.get("scenes", []),
                 voice_preset=narrator_voice,
                 quantize_durations=False,
                 progress_cb=progress_cb,
             )
+            if telemetry_collector:
+                telemetry_collector.end_stage("1b_narrator_voice_synthesis")
 
+        if manage_gpu_phases:
+            backend.activate_studio_phase(2, trigger_warmup=False)
+
+        if telemetry_collector:
+            telemetry_collector.start_stage("2_character_portraits_z_image")
         characters = self.generate_character_portraits(
             characters=story_data.get("characters", []),
             shared_seed=seed_z,
@@ -3107,7 +3389,14 @@ class StudioPipeline:
             progress_cb=progress_cb,
         )
         story_data["characters"] = characters
+        if telemetry_collector:
+            telemetry_collector.end_stage("2_character_portraits_z_image")
 
+        if manage_gpu_phases:
+            backend.activate_studio_phase(3, trigger_warmup=False)
+
+        if telemetry_collector:
+            telemetry_collector.start_stage("3_dual_scene_keyframes_qwen")
         scenes = self.generate_scene_keyframes(
             scenes=story_data.get("scenes", []),
             characters=characters,
@@ -3115,9 +3404,18 @@ class StudioPipeline:
             shared_seed=seed_qwen,
             generate_end_frame=use_last_frame,
             chain_previous_end_frame=chain_previous_end_frame,
+            auto_qa_retry=auto_qa_retry,
+            art_style=story_data.get("art_style", art_style),
             progress_cb=progress_cb,
         )
+        if telemetry_collector:
+            telemetry_collector.end_stage("3_dual_scene_keyframes_qwen")
 
+        if manage_gpu_phases:
+            backend.activate_studio_phase(4, trigger_warmup=True)
+
+        if telemetry_collector:
+            telemetry_collector.start_stage("4_multimodal_vision_director")
         scenes = self.direct_scene_animations(
             scenes=scenes,
             characters=characters,
@@ -3126,7 +3424,11 @@ class StudioPipeline:
             progress_cb=progress_cb,
         )
         story_data["scenes"] = scenes
+        if telemetry_collector:
+            telemetry_collector.end_stage("4_multimodal_vision_director")
 
+        if telemetry_collector:
+            telemetry_collector.start_stage("5_video_animation_wan22")
         clip_paths = self.generate_scene_videos(
             scenes=scenes,
             aspect_ratio=aspect_ratio,
@@ -3134,22 +3436,60 @@ class StudioPipeline:
             use_last_frame=use_last_frame,
             enable_rife_2x=enable_rife_2x,
             anti_noise_guard=anti_noise_guard,
+            lora_repo_or_path=lora_repo_or_path,
+            lora_scale=lora_scale,
+            parallel_swarm=parallel_swarm,
+            enable_midpoint_refine=enable_midpoint_refine,
             progress_cb=progress_cb,
         )
+        if telemetry_collector:
+            telemetry_collector.end_stage("5_video_animation_wan22")
 
+        if manage_gpu_phases:
+            backend.activate_studio_phase(1, trigger_warmup=False)
+
+        if telemetry_collector:
+            telemetry_collector.start_stage("6_ffmpeg_transition_stitching")
         final_movie = self.stitch_clips(
             clip_paths=clip_paths,
             movie_title=story_data.get("title", "Studio_Movie"),
             progress_cb=progress_cb,
             scenes=scenes,
+            transition_type=transition_type,
+            transition_duration=transition_duration,
         )
+        if telemetry_collector:
+            telemetry_collector.end_stage("6_ffmpeg_transition_stitching")
+
         story_data["final_movie_path"] = final_movie
         srt_candidate = pathlib.Path(final_movie).with_suffix(".srt")
         if srt_candidate.exists():
             story_data["subtitle_srt_path"] = str(srt_candidate)
         story_data["clip_paths"] = clip_paths
-        story_data["manifest_path"] = self.save_manifest(story_data)
 
+        if telemetry_collector:
+            try:
+                telemetry_report = telemetry_collector.compile_and_save_reports(
+                    story_data=story_data,
+                    transition_type=transition_type,
+                    transition_duration=transition_duration,
+                )
+                story_data["production_telemetry"] = telemetry_report
+                story_data["telemetry_report_path"] = telemetry_report.get("json_report_path")
+                story_data["analysis_report_path"] = telemetry_report.get("markdown_report_path")
+            except Exception as e:
+                print(f"[StudioPipeline] Telemetry compilation note: {e}")
+
+        # ── Stage 7: Autonomous Multi-Tier AI Critic & Continuous Self-Learning ──
+        try:
+            from self_learning_critic import SelfLearningCritic
+            critic = SelfLearningCritic(storage_dir=str(self.base_dir))
+            eval_report = critic.evaluate_production_run(story_data)
+            story_data["critic_evaluation"] = eval_report
+        except Exception as e:
+            print(f"[StudioPipeline] AI Critic evaluation note: {e}")
+
+        story_data["manifest_path"] = self.save_manifest(story_data)
         return story_data
 
 

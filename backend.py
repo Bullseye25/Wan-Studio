@@ -83,6 +83,7 @@ def run_remote_inference(
     lora_repo_or_path="",
     lora_scale=0.8,
     deflicker_frames=True,
+    enable_midpoint_refine=False,
     progress=None,
     image=None,
     last_frame_image=None,
@@ -148,7 +149,8 @@ def run_remote_inference(
                 "quality": int(quality),
                 "lora_repo_or_path": str(lora_repo_or_path or ""),
                 "lora_scale": float(lora_scale),
-                "deflicker_frames": bool(deflicker_frames)
+                "deflicker_frames": bool(deflicker_frames),
+                "enable_midpoint_refine": bool(enable_midpoint_refine),
             }
 
             def consume_stream(kwargs_to_use):
@@ -178,16 +180,32 @@ def run_remote_inference(
                         video_path = str(local_path)
 
             try:
-                with _wan_ping_lock:
+                global _wan_active_generations
+                with _wan_active_gen_lock:
+                    _wan_active_generations += 1
+                try:
                     consume_stream(gen_kwargs)
+                finally:
+                    with _wan_active_gen_lock:
+                        _wan_active_generations = max(0, _wan_active_generations - 1)
             except Exception as stream_err:
-                if "unexpected keyword" in str(stream_err) and ("lora_repo_or_path" in str(stream_err) or "deflicker_frames" in str(stream_err)):
-                    print("[local-backend] Remote container uses earlier signature without lora/deflicker. Falling back to base signature...")
+                if "unexpected keyword" in str(stream_err) and (
+                    "lora_repo_or_path" in str(stream_err)
+                    or "deflicker_frames" in str(stream_err)
+                    or "enable_midpoint_refine" in str(stream_err)
+                ):
+                    print("[local-backend] Remote container uses earlier signature. Falling back to base signature...")
                     gen_kwargs.pop("lora_repo_or_path", None)
                     gen_kwargs.pop("lora_scale", None)
                     gen_kwargs.pop("deflicker_frames", None)
-                    with _wan_ping_lock:
+                    gen_kwargs.pop("enable_midpoint_refine", None)
+                    with _wan_active_gen_lock:
+                        _wan_active_generations += 1
+                    try:
                         consume_stream(gen_kwargs)
+                    finally:
+                        with _wan_active_gen_lock:
+                            _wan_active_generations = max(0, _wan_active_generations - 1)
                 else:
                     raise stream_err
             break
@@ -373,7 +391,23 @@ def generate_z_image_turbo_remote(
                 print(f"[local-backend] Transient error on Z-Image Turbo ({e}), retrying...")
                 time.sleep(1.5)
                 continue
-            raise e
+            print(f"[local-backend] Z-Image Turbo encountered error ({e}); engaging Qwen Image Edit fallback...")
+            try:
+                blank_canvas = Image.new("RGB", (width, height), (240, 240, 240))
+                qwen_res_bytes = qwen_image_edit_remote(
+                    base_image=blank_canvas,
+                    ref_images=[],
+                    prompt=f"Character reference portrait: {prompt}",
+                    seed=seed,
+                    steps=15,
+                    custom_width=width,
+                    custom_height=height,
+                )
+                res = qwen_res_bytes[0]
+                break
+            except Exception as fb_err:
+                print(f"[local-backend] Qwen fallback also failed: {fb_err}")
+                raise e
 
     # Extract image bytes
     if isinstance(res, dict) and "image_base64" in res:
@@ -421,6 +455,8 @@ last_z_image_activity_time = time.time()
 # with an active generation or another in-flight cold-start ping (eliminates
 # duplicate container spin-ups on Modal).
 _wan_ping_lock = threading.Lock()
+_wan_active_generations = 0
+_wan_active_gen_lock = threading.Lock()
 _qwen_ping_lock = threading.Lock()
 _z_image_ping_lock = threading.Lock()
 
@@ -511,6 +547,9 @@ def ping_all_active_backends():
     or generation.
     """
     def _ping(getter, label, lock):
+        if label == "Wan 2.2" and _wan_active_generations > 0:
+            # Active generation is already keeping Wan warm; skip redundant ping
+            return
         if not lock.acquire(blocking=False):
             # Another ping or generation is already in flight on this model; skip!
             return

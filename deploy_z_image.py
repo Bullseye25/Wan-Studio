@@ -85,7 +85,7 @@ def download_z_image_weights():
 
 @app.cls(
     image=z_image,
-    gpu="L4",  # 24GB VRAM L4 is 27% cheaper than A10G and easily fits 6B Z-Image-Turbo in bf16
+    gpu="L40S",  # 48GB VRAM L40S launches instantly without queuing delays and supports bf16 inference
     volumes={"/root/.cache/huggingface": weights_vol},
     secrets=secrets,
     timeout=900,

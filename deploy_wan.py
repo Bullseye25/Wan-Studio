@@ -96,7 +96,7 @@ def download_all_weights():
     secrets=secrets,
     timeout=1800,
     min_containers=0,
-    max_containers=1,
+    max_containers=4,
     scaledown_window=15,
 )
 class WanModel:
@@ -161,6 +161,7 @@ class WanModel:
         lora_repo_or_path: str = "",
         lora_scale: float = 0.8,
         deflicker_frames: bool = True,
+        enable_midpoint_refine: bool = False,
     ):
         import io
         import copy
@@ -238,29 +239,54 @@ class WanModel:
 
         q = queue.Queue()
 
+        def apply_midpoint_latent_steering(latents, strength=0.25):
+            """
+            MILIS (Mid-Trajectory Latent Interception & Steering):
+            At the midpoint step of Flow Matching, suppresses high-frequency temporal flicker
+            and outlier saturation on the 16-channel video latent tensor [B, 16, T, H, W].
+            """
+            if latents is None:
+                return latents
+            try:
+                clamped = torch.clamp(latents, min=-4.0, max=4.0)
+                if clamped.ndim == 5 and clamped.shape[2] > 4:
+                    interior = clamped[:, :, 1:-1, :, :]
+                    smoothed = 0.25 * clamped[:, :, :-2, :, :] + 0.50 * interior + 0.25 * clamped[:, :, 2:, :, :]
+                    clamped[:, :, 1:-1, :, :] = (1.0 - strength) * interior + strength * smoothed
+                return clamped
+            except Exception as e:
+                print(f"[Remote] Midpoint latent steering note: {e}")
+                return latents
+
         def step_callback(pipe_obj, step_idx, timestep, callback_kwargs):
             q.put({"type": "progress", "step": step_idx, "total_steps": steps})
+            if enable_midpoint_refine and step_idx == (steps // 2):
+                if callback_kwargs and "latents" in callback_kwargs:
+                    callback_kwargs["latents"] = apply_midpoint_latent_steering(callback_kwargs["latents"])
             return callback_kwargs
 
         def run_inference_thread():
             try:
-                print(f"[Remote] Starting generation for seed {seed}...")
+                print(f"[Remote] Starting generation for seed {seed} (midpoint_refine={enable_midpoint_refine})...")
                 generator = torch.Generator(device="cuda").manual_seed(seed)
-                result = self.pipe(
-                    image=resized_image,
-                    last_image=processed_last_image,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    height=resized_image.height,
-                    width=resized_image.width,
-                    num_frames=num_frames,
-                    guidance_scale=float(guidance_scale),
-                    guidance_scale_2=float(guidance_scale_2),
-                    num_inference_steps=int(steps),
-                    generator=generator,
-                    output_type="np",
-                    callback_on_step_end=step_callback
-                )
+                pipe_kwargs = {
+                    "image": resized_image,
+                    "last_image": processed_last_image,
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "height": resized_image.height,
+                    "width": resized_image.width,
+                    "num_frames": num_frames,
+                    "guidance_scale": float(guidance_scale),
+                    "guidance_scale_2": float(guidance_scale_2),
+                    "num_inference_steps": int(steps),
+                    "generator": generator,
+                    "output_type": "np",
+                    "callback_on_step_end": step_callback,
+                }
+                if enable_midpoint_refine:
+                    pipe_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
+                result = self.pipe(**pipe_kwargs)
                 raw_frames = result.frames[0]
                 q.put({"type": "success", "frames": raw_frames})
             except Exception as e:
