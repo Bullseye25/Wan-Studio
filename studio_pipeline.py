@@ -633,6 +633,7 @@ class StudioPipeline:
         endpoint_url: Optional[str] = None,
         provider: str = "groq",
         output_base_dir: Optional[str] = None,
+        base_dir: Optional[str] = None,
     ):
         self.provider = str(provider or "groq").lower().strip()
         prov_cfg = LLM_PROVIDERS.get(self.provider, LLM_PROVIDERS["groq"])
@@ -659,8 +660,9 @@ class StudioPipeline:
 
         self.model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
 
-        if output_base_dir:
-            self.base_dir = pathlib.Path(output_base_dir)
+        eff_base = base_dir or output_base_dir
+        if eff_base:
+            self.base_dir = pathlib.Path(eff_base)
         else:
             self.base_dir = pathlib.Path(__file__).parent / "outputs" / "studio"
 
