@@ -346,6 +346,9 @@ class DirectorKnowledgeBase:
 
         return unique_results
 
+    # Alias for API compatibility across modules
+    get_top_rules_for_premise = retrieve_relevant_directives
+
     def format_directives_prompt(self, directives: List[Dict[str, Any]]) -> str:
         """Formats retrieved directives into an authoritative system prompt injection."""
         if not directives:

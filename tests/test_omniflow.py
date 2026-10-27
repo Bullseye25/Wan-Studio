@@ -157,6 +157,12 @@ class TestOmniFlowEngine(unittest.TestCase):
         if story_dir.exists():
             shutil.rmtree(story_dir)
 
+    def test_get_past_learned_directives(self):
+        """Verifies that past learned rules can be queried without AttributeError."""
+        engine = OmniFlowEngine()
+        rules = engine.get_past_learned_directives("two rabbits friends sharing", limit=3)
+        self.assertIsInstance(rules, list)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,7 +96,7 @@ class OmniFlowEngine:
 
     def get_past_learned_directives(self, prompt: str, limit: int = 4) -> List[Dict[str, Any]]:
         """Retrieves matching directives from past film post-mortems to steer future generation."""
-        return self.knowledge_base.get_top_rules_for_premise(prompt, limit=limit)
+        return self.knowledge_base.retrieve_relevant_directives(prompt, top_k=limit)
 
     def calculate_eta(self, config: OmniFlowConfig) -> Tuple[float, Dict[str, Any]]:
         """
