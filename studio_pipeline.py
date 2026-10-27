@@ -866,7 +866,25 @@ class StudioPipeline:
         model_override: Optional[str] = None,
     ) -> str:
         """POSTs to OpenAI-compatible LLM endpoint (GroqCloud / Local Ollama / Ollama Cloud)."""
+        # Check if messages contain image payloads (Multimodal Vision task)
+        has_image = any(
+            isinstance(m.get("content"), list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in m.get("content", [])
+            )
+            for m in messages
+        )
+
+        target_endpoint = self.endpoint_url
+        target_key = self.api_key
         actual_model = self._resolve_model_tag(messages=messages, task_role=task_role, model_override=model_override)
+
+        # Route vision tasks to Ollama Cloud Gemma 4: 31B if active provider lacks native vision (e.g. Groq text models)
+        if has_image and self.provider == "groq":
+            target_endpoint = DEFAULT_OLLAMA_ENDPOINT
+            target_key = DEFAULT_OLLAMA_API_KEY
+            actual_model = "gemma4:31b"
+
         req_body = {
             "model": actual_model,
             "messages": messages,
@@ -877,13 +895,13 @@ class StudioPipeline:
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
-        if self.api_key and self.api_key != "local":
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if target_key and target_key != "local":
+            headers["Authorization"] = f"Bearer {target_key}"
 
         last_err = None
         for attempt in range(max_retries + 1):
             req = urllib.request.Request(
-                self.endpoint_url,
+                target_endpoint,
                 headers=headers,
                 data=json.dumps(req_body).encode("utf-8"),
             )
@@ -893,6 +911,31 @@ class StudioPipeline:
                     return resp_data["choices"][0]["message"]["content"]
             except Exception as e:
                 last_err = e
+                # Resilient fallback: If Groq hits 429 (Rate Limit) or 400, automatically fallback to Ollama Cloud
+                if self.provider == "groq" and any(code in str(e) for code in ("429", "400", "404")):
+                    try:
+                        fallback_req_body = {
+                            "model": DEFAULT_OLLAMA_MODEL,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                        }
+                        fallback_headers = {
+                            "Content-Type": "application/json",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Authorization": f"Bearer {DEFAULT_OLLAMA_API_KEY}",
+                        }
+                        fb_req = urllib.request.Request(
+                            DEFAULT_OLLAMA_ENDPOINT,
+                            headers=fallback_headers,
+                            data=json.dumps(fallback_req_body).encode("utf-8"),
+                        )
+                        with urllib.request.urlopen(fb_req, timeout=timeout) as fb_resp:
+                            resp_data = json.loads(fb_resp.read().decode("utf-8"))
+                            return resp_data["choices"][0]["message"]["content"]
+                    except Exception as e_fb:
+                        last_err = f"{e} (Ollama fallback: {e_fb})"
+
                 if attempt < max_retries:
                     time.sleep(2.0)
                     continue
