@@ -140,6 +140,13 @@ def parse_arguments() -> argparse.Namespace:
         default="llama-3.3-70b-versatile",
         help="Model ID for Screenplay and Vision Director",
     )
+    parser.add_argument(
+        "--story-folder",
+        "--story-name",
+        type=str,
+        default=None,
+        help="Dedicated subfolder inside outputs/ for this story (e.g. 'fox_story')",
+    )
     return parser.parse_args()
 
 
@@ -177,6 +184,7 @@ def run_cli() -> None:
         lora_scale=args.lora_scale,
         provider=args.provider,
         model=args.model,
+        story_folder_name=args.story_folder,
     )
 
     engine = OmniFlowEngine()
@@ -229,6 +237,7 @@ def run_cli() -> None:
     print("=" * 88)
     print(f"🎞️ Title            : {story_data.get('title', 'OmniFlow Masterpiece')}")
     print(f"⏱️ Total Wall Clock : {format_time(elapsed_actual)} (Estimated: ~{format_time(total_eta)})")
+    print(f"📁 Story Directory  : {story_data.get('story_dir')}")
     print(f"🎬 Video File (MP4) : {story_data.get('final_movie_path')}")
     print(f"📝 Subtitles (SRT)  : {story_data.get('subtitle_srt_path')}")
     print(f"📊 Telemetry Report : {story_data.get('telemetry_report_path')}")

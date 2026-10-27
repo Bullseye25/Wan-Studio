@@ -257,7 +257,10 @@ class DirectorKnowledgeBase:
     """
 
     def __init__(self, storage_dir: Optional[str] = None):
-        base = pathlib.Path(storage_dir or os.path.join("outputs", "studio"))
+        if storage_dir:
+            base = pathlib.Path(storage_dir)
+        else:
+            base = pathlib.Path(__file__).parent / "outputs" / "director_memory"
         base.mkdir(parents=True, exist_ok=True)
         self.rules_file = base / "director_learned_rules.jsonl"
 
@@ -297,19 +300,23 @@ class DirectorKnowledgeBase:
         Retrieves the most relevant learned directives based on story premise keywords.
         Guarantees that past mistakes in similar genres/topics are actively avoided.
         """
-        if not self.rules_file.exists():
-            return []
-
         all_rules = []
-        try:
-            with open(self.rules_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        all_rules.append(json.loads(line))
-        except Exception as e:
-            print(f"[DirectorKnowledgeBase] Error loading rules: {e}")
-            return []
+        files_to_check = [self.rules_file]
+        legacy_file = pathlib.Path(__file__).parent / "outputs" / "studio" / "director_learned_rules.jsonl"
+        if legacy_file.exists() and legacy_file != self.rules_file:
+            files_to_check.append(legacy_file)
+
+        for rf in files_to_check:
+            if not rf.exists():
+                continue
+            try:
+                with open(rf, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            all_rules.append(json.loads(line))
+            except Exception as e:
+                print(f"[DirectorKnowledgeBase] Error loading rules from {rf}: {e}")
 
         if not all_rules:
             return []

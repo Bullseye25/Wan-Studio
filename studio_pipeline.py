@@ -667,11 +667,43 @@ class StudioPipeline:
         self.char_dir = self.base_dir / "characters"
         self.scenes_dir = self.base_dir / "scenes"
         self.clips_dir = self.base_dir / "clips"
-        self.movies_dir = self.base_dir / "movies"
+        self.movies_dir = self.base_dir / "movie" if (self.base_dir / "movie").exists() or "studio" not in str(self.base_dir) else (self.base_dir / "movies")
         self.audio_dir = self.base_dir / "audio"
+        self.telemetry_dir = self.base_dir / "telemetry"
 
-        for d in [self.char_dir, self.scenes_dir, self.clips_dir, self.movies_dir, self.audio_dir]:
+        for d in [self.char_dir, self.scenes_dir, self.clips_dir, self.movies_dir, self.audio_dir, self.telemetry_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
+    def setup_story_workspace(self, story_identifier: str) -> pathlib.Path:
+        """
+        Creates an isolated, dedicated folder for this story inside outputs/
+        e.g., outputs/the_fox_and_the_silver_bell/ or outputs/fox_story/
+          ├── characters/   (Z-Image Turbo 9:16 reference portraits)
+          ├── scenes/       (Qwen Image Edit Start and End keyframes)
+          ├── clips/        (Wan 2.2 animated video clips)
+          ├── audio/        (SAPI5 voiceover narration .wav tracks)
+          ├── movie/        (Final assembled .mp4 movie and .srt subtitles)
+          └── telemetry/    (Telemetry JSON log and Markdown analysis reports)
+        """
+        clean_slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(story_identifier).lower()).strip("_")
+        while "__" in clean_slug:
+            clean_slug = clean_slug.replace("__", "_")
+        if not clean_slug or clean_slug in ("story", "studio_movie", "masterpiece"):
+            clean_slug = f"story_{int(time.time())}"
+
+        root_outputs = pathlib.Path(__file__).parent / "outputs"
+        self.base_dir = root_outputs / clean_slug
+        self.char_dir = self.base_dir / "characters"
+        self.scenes_dir = self.base_dir / "scenes"
+        self.clips_dir = self.base_dir / "clips"
+        self.movies_dir = self.base_dir / "movie"
+        self.audio_dir = self.base_dir / "audio"
+        self.telemetry_dir = self.base_dir / "telemetry"
+
+        for d in [self.char_dir, self.scenes_dir, self.clips_dir, self.movies_dir, self.audio_dir, self.telemetry_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        print(f"[StudioPipeline] Dedicated story workspace configured: {self.base_dir}")
+        return self.base_dir
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -3311,6 +3343,7 @@ class StudioPipeline:
         parallel_swarm: bool = True,
         enable_midpoint_refine: bool = False,
         collect_telemetry: bool = True,
+        story_folder_name: Optional[str] = None,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -3342,6 +3375,13 @@ class StudioPipeline:
         )
         if telemetry_collector:
             telemetry_collector.end_stage("1_screenplay_generation")
+
+        # Automatically establish dedicated per-story workspace in outputs/
+        target_folder = story_folder_name or story_data.get("title") or user_prompt[:30]
+        story_workspace = self.setup_story_workspace(target_folder)
+        story_data["story_dir"] = str(story_workspace)
+        if telemetry_collector:
+            telemetry_collector.set_base_dir(str(story_workspace))
 
         if run_story_audit:
             if telemetry_collector:

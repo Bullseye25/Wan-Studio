@@ -15,8 +15,10 @@ if not exist "%PYTHON_EXE%" (
 
 if "%~1"=="" (
     "%PYTHON_EXE%" omniflow_cli.py
-) else (
+) else if "%~2"=="" (
     "%PYTHON_EXE%" omniflow_cli.py "%~1"
+) else (
+    "%PYTHON_EXE%" omniflow_cli.py "%~1" --story-folder "%~2"
 )
 
 echo.

@@ -196,6 +196,7 @@ def run_fast_story_production(
     transition_duration: float = 0.5,
     narrator_voice: str = "warm_storyteller",
     fast_mode: bool = True,
+    story_folder: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main entrypoint that coordinates the high-speed production run:
@@ -276,6 +277,7 @@ def run_fast_story_production(
         auto_qa_retry=True,
         manage_gpu_phases=True,
         collect_telemetry=True,
+        story_folder_name=story_folder,
         progress_cb=progress_callback,
     )
 
@@ -294,6 +296,7 @@ def run_fast_story_production(
     print(f" 🎬 PRODUCTION SUMMARY: '{story_data.get('title', 'Animation')}' ".center(86, "="))
     print("=" * 86)
     print(f"⏱️ Actual Duration   : {format_time(elapsed_actual)} (Estimated: ~{format_time(eta_sec)})")
+    print(f"📁 Story Directory  : {story_data.get('story_dir')}")
     print(f"🎬 Final Movie Path : {story_data.get('final_movie_path')}")
     print(f"📝 Subtitle Path    : {story_data.get('subtitle_srt_path')}")
     print(f"📊 Telemetry Path   : {story_data.get('telemetry_report_path')}")
@@ -371,6 +374,7 @@ Examples:
     parser.add_argument("--transition-duration", type=float, default=0.5, help="Transition overlap duration in seconds (default: 0.5s)")
     parser.add_argument("--voice", default="warm_storyteller", help="Voiceover narrator voice preset")
     parser.add_argument("--fast", action="store_true", default=True, help="Enable Fast Lightning mode (8-step DiT + Groq LPU)")
+    parser.add_argument("--story-folder", "--story-name", default=None, help="Dedicated subfolder inside outputs/ for this story (e.g. 'fox_story')")
 
     args = parser.parse_args()
 
@@ -403,6 +407,7 @@ Examples:
             transition_duration=args.transition_duration,
             narrator_voice=args.voice,
             fast_mode=args.fast,
+            story_folder=args.story_folder,
         )
     except KeyboardInterrupt:
         print("\n\n[Aborted] Production canceled by user.")

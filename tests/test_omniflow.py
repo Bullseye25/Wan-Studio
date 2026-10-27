@@ -140,6 +140,23 @@ class TestOmniFlowEngine(unittest.TestCase):
         self.assertEqual(clip_paths[2], "outputs/studio/clips/clip_scene_3.mp4")
         self.assertEqual(clip_paths[3], "outputs/studio/clips/clip_scene_4.mp4")
 
+    def test_setup_story_workspace(self):
+        """Verifies that dedicated story folder is created with all subdirectories."""
+        import shutil
+        pipeline = StudioPipeline(api_key="test-key")
+        story_dir = pipeline.setup_story_workspace("The Fox and the Silver Bell")
+        self.assertTrue(story_dir.exists())
+        self.assertEqual(story_dir.name, "the_fox_and_the_silver_bell")
+        self.assertTrue((story_dir / "characters").exists())
+        self.assertTrue((story_dir / "scenes").exists())
+        self.assertTrue((story_dir / "clips").exists())
+        self.assertTrue((story_dir / "audio").exists())
+        self.assertTrue((story_dir / "movie").exists())
+        self.assertTrue((story_dir / "telemetry").exists())
+        # Cleanup
+        if story_dir.exists():
+            shutil.rmtree(story_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

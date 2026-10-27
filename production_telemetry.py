@@ -32,15 +32,27 @@ class ProductionTelemetryCollector:
 
     def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = pathlib.Path(base_dir) if base_dir else (pathlib.Path(__file__).parent / "outputs" / "studio")
-        self.movies_dir = self.base_dir / "movies"
+        self.movies_dir = self.base_dir / "movie" if (self.base_dir / "movie").exists() or "studio" not in str(self.base_dir) else (self.base_dir / "movies")
+        self.telemetry_dir = self.base_dir / "telemetry"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.movies_dir.mkdir(parents=True, exist_ok=True)
-        self.telemetry_log_file = self.base_dir / "production_telemetry_log.jsonl"
+        self.telemetry_dir.mkdir(parents=True, exist_ok=True)
+        self.telemetry_log_file = self.telemetry_dir / "production_telemetry_log.jsonl"
 
         self.run_started_at = time.time()
         self.stage_timings: Dict[str, Dict[str, Any]] = {}
         self._active_stage: Optional[str] = None
         self._active_stage_t0: float = 0.0
+
+    def set_base_dir(self, new_base_dir: str) -> None:
+        """Dynamically re-roots the telemetry collector to a dedicated story directory."""
+        self.base_dir = pathlib.Path(new_base_dir)
+        self.movies_dir = self.base_dir / "movie"
+        self.telemetry_dir = self.base_dir / "telemetry"
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.movies_dir.mkdir(parents=True, exist_ok=True)
+        self.telemetry_dir.mkdir(parents=True, exist_ok=True)
+        self.telemetry_log_file = self.telemetry_dir / "production_telemetry_log.jsonl"
 
     def start_stage(self, stage_name: str) -> None:
         if self._active_stage:
@@ -503,8 +515,10 @@ class ProductionTelemetryCollector:
             "improvement_recommendations": recommendations,
         }
 
-        json_report_path = self.movies_dir / f"{clean_title}_{ts}_telemetry_report.json"
-        md_report_path = self.movies_dir / f"{clean_title}_{ts}_analysis_report.md"
+        target_dir = getattr(self, "telemetry_dir", None) or self.movies_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        json_report_path = target_dir / f"{clean_title}_{ts}_telemetry_report.json"
+        md_report_path = target_dir / f"{clean_title}_{ts}_analysis_report.md"
 
         with open(json_report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)

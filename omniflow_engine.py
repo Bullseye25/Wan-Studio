@@ -46,6 +46,7 @@ class OmniFlowConfig:
     provider: str = "groq"
     model: Optional[str] = "llama-3.3-70b-versatile"
     api_key: Optional[str] = None
+    story_folder_name: Optional[str] = None
     run_story_audit: bool = True
     auto_qa_retry: bool = True
     manage_gpu_phases: bool = True
@@ -183,6 +184,7 @@ class OmniFlowEngine:
             parallel_swarm=config.parallel_swarm,
             enable_midpoint_refine=config.enable_midpoint_refine,
             collect_telemetry=config.collect_telemetry,
+            story_folder_name=config.story_folder_name,
             progress_cb=progress_callback,
         )
 
