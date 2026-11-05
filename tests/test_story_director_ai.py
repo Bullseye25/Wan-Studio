@@ -251,3 +251,99 @@ class TestQualityGatePipelineProtection:
         assert "Story Doctor Quality Gate Abort" in str(excinfo.value)
         assert "4.5" in str(excinfo.value)
         assert "Aborting before GPU activation to protect compute budget" in str(excinfo.value)
+
+
+class TestCharacterScaleAndPropInvariants:
+    """Verifies character scale locking and prop synchronization engines."""
+
+    def test_infer_character_scale(self):
+        from story_director_ai import infer_character_scale
+
+        bear = infer_character_scale({"name": "Barnaby", "description": "A lovable chocolate-brown grizzly bear"})
+        assert bear["species"] == "bear"
+        assert bear["scale_factor"] == 3.5
+        assert bear["category"] == "giant"
+
+        rabbit = infer_character_scale({"name": "Pip", "description": "A fluffy little white bunny rabbit"})
+        assert rabbit["species"] == "rabbit"
+        assert rabbit["scale_factor"] == 1.0
+        assert rabbit["category"] == "tiny"
+
+        child = infer_character_scale({"name": "Timmy", "description": "A curious little 6-year-old boy"})
+        assert child["species"] == "human_child"
+        assert child["scale_factor"] == 1.4
+
+    def test_build_character_scale_anchor(self):
+        from story_director_ai import build_character_scale_anchor
+
+        chars = [
+            {"name": "Barnaby", "description": "brown bear"},
+            {"name": "Pip", "description": "white rabbit"},
+        ]
+        anchor = build_character_scale_anchor(chars)
+        assert "SCALE INVARIANT:" in anchor
+        assert "Barnaby is a massive bear (3.5x larger and taller than Pip)" in anchor
+        assert "reaching only up to Barnaby's knee" in anchor
+        assert "NEVER shrink Barnaby" in anchor
+        assert "3.5:1" in anchor
+
+    def test_audit_and_harmonize_props(self):
+        from story_director_ai import audit_and_harmonize_props
+
+        story = {
+            "title": "Barnaby's Sweet Treat",
+            "world_bible": {},
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "narration_text": "Barnaby finds sweet blueberries in the meadow.",
+                    "scenario": "Barnaby looks down at a basket of ripe red strawberries.",
+                    "qwen_scene_prompt": "Barnaby holding a bright red strawberry.",
+                    "qwen_end_scene_prompt": "Barnaby eating a red strawberry with Pip.",
+                    "wan_motion_prompt": "Barnaby offers the basket of blueberries.",
+                }
+            ],
+        }
+
+        harmonized = audit_and_harmonize_props(story)
+        s1 = harmonized["scenes"][0]
+
+        # Narration must be harmonized to strawberries
+        assert "strawberries" in s1["narration_text"]
+        assert "blueberries" not in s1["narration_text"]
+
+        # Motion prompt must be harmonized to strawberries
+        assert "strawberries" in s1["wan_motion_prompt"]
+        assert "blueberries" not in s1["wan_motion_prompt"]
+
+        # World bible must have locked_prop declared
+        assert "locked_prop" in harmonized["world_bible"]
+        assert harmonized["world_bible"]["locked_prop"]["canonical_name"] == "strawberries"
+
+    def test_prop_contradiction_penalizes_heuristic_audit(self):
+        from story_director_ai import audit_screenplay_heuristics
+
+        contradictory_story = {
+            "title": "Berry Mixup",
+            "genre": "kids",
+            "characters": [
+                {"id": "char_1", "name": "Barnaby", "description": "bear"},
+                {"id": "char_2", "name": "Pip", "description": "rabbit"},
+            ],
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "causal_connector": "SETUP",
+                    "narration_text": "They sit together and eat sweet blueberries happily.",
+                    "scenario": "Barnaby and Pip are eating ripe red strawberries.",
+                    "qwen_scene_prompt": "Holding bright red strawberries.",
+                    "qwen_end_scene_prompt": "Chewing on red strawberries happily.",
+                    "wan_motion_prompt": "Eating berries.",
+                }
+            ],
+        }
+
+        report = audit_screenplay_heuristics(contradictory_story, genre="kids")
+        assert report["subscores"]["prop_continuity"] <= 6.0
+        assert any("Prop contradiction" in iss for iss in report["issues"])
+

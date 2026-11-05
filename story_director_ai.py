@@ -237,6 +237,318 @@ def get_tone_aware_end_pose(
     return selected_pose
 
 
+# ── 2b. Character Scale & Relative Height Registry ───────────────────────────
+
+SPECIES_SCALE_BENCHMARKS: Dict[str, Dict[str, Any]] = {
+    "bear": {
+        "species": "bear",
+        "category": "giant",
+        "scale_factor": 3.5,
+        "height_m": 2.6,
+        "build": "massive, broad-shouldered, towering presence",
+        "description": "massive brown bear, towering and broad",
+    },
+    "rabbit": {
+        "species": "rabbit",
+        "category": "tiny",
+        "scale_factor": 1.0,
+        "height_m": 0.45,
+        "build": "small, compact, fluffy build with long ears",
+        "description": "tiny fluffy rabbit reaching only to knee height",
+    },
+    "bunny": {
+        "species": "bunny",
+        "category": "tiny",
+        "scale_factor": 1.0,
+        "height_m": 0.45,
+        "build": "small, compact, fluffy build with long ears",
+        "description": "tiny fluffy bunny reaching only to knee height",
+    },
+    "mouse": {
+        "species": "mouse",
+        "category": "micro",
+        "scale_factor": 0.35,
+        "height_m": 0.15,
+        "build": "pocket-sized, diminutive stature",
+        "description": "tiny pocket-sized mouse",
+    },
+    "fox": {
+        "species": "fox",
+        "category": "medium",
+        "scale_factor": 1.8,
+        "height_m": 0.9,
+        "build": "slender medium canine stature",
+        "description": "slender medium-sized fox",
+    },
+    "wolf": {
+        "species": "wolf",
+        "category": "medium_large",
+        "scale_factor": 2.2,
+        "height_m": 1.2,
+        "build": "powerful medium-large canine stature",
+        "description": "large powerful wolf",
+    },
+    "cat": {
+        "species": "cat",
+        "category": "small",
+        "scale_factor": 0.9,
+        "height_m": 0.4,
+        "build": "small agile feline build",
+        "description": "small agile cat",
+    },
+    "dog": {
+        "species": "dog",
+        "category": "medium",
+        "scale_factor": 1.6,
+        "height_m": 0.8,
+        "build": "medium friendly canine build",
+        "description": "medium friendly dog",
+    },
+    "human_adult": {
+        "species": "human_adult",
+        "category": "standard_adult",
+        "scale_factor": 2.5,
+        "height_m": 1.8,
+        "build": "standard adult humanoid stature",
+        "description": "tall adult humanoid",
+    },
+    "human_child": {
+        "species": "human_child",
+        "category": "child",
+        "scale_factor": 1.4,
+        "height_m": 1.1,
+        "build": "small child humanoid build",
+        "description": "small child reaching adult waist",
+    },
+}
+
+
+def infer_character_scale(char_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Infers the canonical species, relative scale factor, and physical stature of a character.
+    Prevents visual continuity defects where large characters (e.g. Bear) shrink or small characters
+    (e.g. Rabbit) balloon across shots.
+    """
+    if not isinstance(char_dict, dict):
+        return {
+            "species": "unknown",
+            "scale_factor": 1.8,
+            "category": "medium",
+            "build": "medium build",
+            "description": "medium character",
+        }
+
+    # If already explicitly declared in character sheet:
+    if "scale_factor" in char_dict and "species" in char_dict:
+        return {
+            "species": char_dict["species"],
+            "scale_factor": float(char_dict["scale_factor"]),
+            "category": char_dict.get("scale_category", "custom"),
+            "build": char_dict.get("build", "custom build"),
+            "description": char_dict.get("scale_description", ""),
+        }
+
+    blob = " ".join([
+        str(char_dict.get("name", "")),
+        str(char_dict.get("description", "")),
+        str(char_dict.get("face", "")),
+        str(char_dict.get("hair", "")),
+        str(char_dict.get("clothing", "")),
+        str(char_dict.get("z_image_prompt", "")),
+    ]).lower()
+
+    # Match against species benchmarks
+    for sp_key, sp_meta in SPECIES_SCALE_BENCHMARKS.items():
+        if re.search(rf"\b{re.escape(sp_key)}\b", blob):
+            return {
+                "species": sp_key,
+                "scale_factor": sp_meta["scale_factor"],
+                "category": sp_meta["category"],
+                "build": sp_meta["build"],
+                "description": sp_meta["description"],
+            }
+
+    # Additional keyword matching
+    if any(k in blob for k in ("bunny", "hare", "rabbit")):
+        return SPECIES_SCALE_BENCHMARKS["rabbit"]
+    if any(k in blob for k in ("bear", "grizzly", "polar")):
+        return SPECIES_SCALE_BENCHMARKS["bear"]
+    if any(k in blob for k in ("kid", "boy", "girl", "toddler", "child")):
+        return SPECIES_SCALE_BENCHMARKS["human_child"]
+    if any(k in blob for k in ("man", "woman", "detective", "knight", "warrior", "hero")):
+        return SPECIES_SCALE_BENCHMARKS["human_adult"]
+
+    return {
+        "species": "medium_creature",
+        "scale_factor": 1.8,
+        "category": "medium",
+        "build": "standard medium build",
+        "description": "medium-stature character",
+    }
+
+
+def build_character_scale_anchor(characters: List[Dict[str, Any]]) -> str:
+    """
+    Builds an explicit, mathematically locked Scale Anchor clause for Qwen and Wan prompts.
+    Anchors relative height ratios and physical stature across all scenes to prevent
+    the 'bear going big and small' scale-shifting defect.
+    """
+    if not characters:
+        return ""
+
+    parsed_chars = []
+    for c in characters:
+        meta = infer_character_scale(c)
+        name = c.get("name", meta["species"].capitalize())
+        parsed_chars.append({"name": name, "meta": meta})
+
+    if len(parsed_chars) == 1:
+        c0 = parsed_chars[0]
+        return (
+            f"SCALE INVARIANT: {c0['name']} is a {c0['meta']['build']}. "
+            f"Maintain this exact body size and framing proportion consistently across all shots."
+        )
+
+    # Sort characters by scale factor descending (largest to smallest)
+    sorted_chars = sorted(parsed_chars, key=lambda x: x["meta"]["scale_factor"], reverse=True)
+    big = sorted_chars[0]
+    small = sorted_chars[-1]
+
+    ratio = round(big["meta"]["scale_factor"] / max(0.1, small["meta"]["scale_factor"]), 1)
+
+    if ratio >= 1.5:
+        return (
+            f"SCALE INVARIANT: {big['name']} is a massive {big['meta']['species']} ({ratio}x larger and taller than {small['name']}); "
+            f"{small['name']} is a tiny {small['meta']['species']} reaching only up to {big['name']}'s knee or lower elbow. "
+            f"{big['name']}'s wide broad body towers over {small['name']} in every shot. "
+            f"NEVER shrink {big['name']} to small size and NEVER enlarge {small['name']} to bear size; "
+            f"keep this strict {ratio}:1 relative height and volumetric scale locked across all scenes."
+        )
+    else:
+        return (
+            f"SCALE INVARIANT: {big['name']} and {small['name']} have consistent body proportions. "
+            f"Maintain identical relative character scale across all shots."
+        )
+
+
+# ── 2c. Canonical Prop Taxonomy & Invariant Harmonizer ───────────────────────
+
+PROP_CANONICAL_TAXONOMY: Dict[str, Dict[str, Any]] = {
+    "strawberries": {
+        "canonical_name": "strawberries",
+        "singular": "strawberry",
+        "adjective": "sweet red",
+        "visual_description": "ripe bright red strawberries with green leafy tops in a small wicker basket",
+        "conflicting_variants": ["blueberries", "blueberry", "blackberries", "blackberry", "grapes", "dark berries", "blue berries"],
+        "negative_guard": "blueberries, blackberries, dark berries, purple fruit, blue berries",
+    },
+    "blueberries": {
+        "canonical_name": "blueberries",
+        "singular": "blueberry",
+        "adjective": "sweet blue",
+        "visual_description": "round deep-blue blueberries with a light frosted dusting in a small wicker basket",
+        "conflicting_variants": ["strawberries", "strawberry", "blackberries", "blackberry", "red berries", "red fruit"],
+        "negative_guard": "strawberries, red berries, blackberries, red fruit",
+    },
+    "apples": {
+        "canonical_name": "red apples",
+        "singular": "apple",
+        "adjective": "crisp red",
+        "visual_description": "shiny red apples with green leaves",
+        "conflicting_variants": ["oranges", "pears", "bananas"],
+        "negative_guard": "oranges, pears, bananas",
+    },
+}
+
+
+def audit_and_harmonize_props(story_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Audits and harmonizes prop naming and visual descriptions across the entire screenplay.
+    Completely eliminates prop contradictions where narration mentions one fruit (e.g. blueberries)
+    while characters are visibly eating another (e.g. strawberries).
+    """
+    data = dict(story_data or {})
+    scenes = list(data.get("scenes", []))
+    if not scenes:
+        return data
+
+    # 1. Detect which canonical prop family is dominant in the story
+    full_corpus = " ".join([
+        str(data.get("title", "")),
+        str(data.get("theme", "")),
+        str(data.get("logline", "")),
+        " ".join(str(s.get("scenario", "")) for s in scenes),
+        " ".join(str(s.get("narration_text", "")) for s in scenes),
+        " ".join(str(s.get("qwen_scene_prompt", "")) for s in scenes),
+        " ".join(str(s.get("qwen_end_scene_prompt", "")) for s in scenes),
+    ]).lower()
+
+    straw_score = len(re.findall(r"\b(strawberr\w+|red ber\w+)\b", full_corpus))
+    blue_score = len(re.findall(r"\b(blueberr\w+|blue ber\w+)\b", full_corpus))
+
+    canonical_key = None
+    if straw_score > 0 or blue_score > 0:
+        canonical_key = "strawberries" if straw_score >= blue_score else "blueberries"
+
+    if not canonical_key:
+        return data
+
+    tax = PROP_CANONICAL_TAXONOMY[canonical_key]
+    conflicts = tax["conflicting_variants"]
+    conflict_pattern = re.compile(rf"\b({'|'.join(conflicts)})\b", re.IGNORECASE)
+
+    # 2. Lock prop into world_bible
+    world_bible = dict(data.get("world_bible", {}))
+    world_bible["locked_prop"] = {
+        "canonical_name": tax["canonical_name"],
+        "visual_description": tax["visual_description"],
+        "banned_variants": conflicts,
+    }
+    data["world_bible"] = world_bible
+
+    # 3. Synchronize all scenes
+    harmonized_scenes = []
+    for s in scenes:
+        sc = dict(s)
+        # Harmonize narration text
+        narr = sc.get("narration_text", "")
+        if narr and conflict_pattern.search(narr):
+            sc["narration_text"] = conflict_pattern.sub(tax["canonical_name"], narr)
+
+        # Harmonize scenario
+        scenario = sc.get("scenario", "")
+        if scenario and conflict_pattern.search(scenario):
+            sc["scenario"] = conflict_pattern.sub(tax["canonical_name"], scenario)
+
+        # Harmonize start prompt
+        q_start = sc.get("qwen_scene_prompt", "")
+        if q_start and conflict_pattern.search(q_start):
+            sc["qwen_scene_prompt"] = conflict_pattern.sub(f"{tax['adjective']} {tax['canonical_name']}", q_start)
+
+        # Harmonize end prompt
+        q_end = sc.get("qwen_end_scene_prompt", "")
+        if q_end and conflict_pattern.search(q_end):
+            sc["qwen_end_scene_prompt"] = conflict_pattern.sub(f"{tax['adjective']} {tax['canonical_name']}", q_end)
+
+        # Harmonize wan motion prompt
+        wan_p = sc.get("wan_motion_prompt", "")
+        if wan_p and conflict_pattern.search(wan_p):
+            sc["wan_motion_prompt"] = conflict_pattern.sub(tax["canonical_name"], wan_p)
+
+        # Append negative guard to prevent alternate berry varieties from appearing in visuals
+        dir_plan = dict(sc.get("director", {}))
+        if dir_plan:
+            neg = dir_plan.get("negative_prompt", "")
+            if tax["negative_guard"] not in neg:
+                dir_plan["negative_prompt"] = f"{neg}, {tax['negative_guard']}".strip(", ")
+            sc["director"] = dir_plan
+
+        harmonized_scenes.append(sc)
+
+    data["scenes"] = harmonized_scenes
+    return data
+
+
 # ── 3. Multi-Pass Writers' Room Prompts ───────────────────────────────────────
 
 def build_beat_sheet_prompt(
@@ -319,8 +631,15 @@ def build_scene_drafting_prompt(
         "and a 'sync_trigger_word' (the exact action verb where visual climax occurs).\n"
         "5. CHARACTER UNIQUENESS & SPATIAL STABILITY: Exactly 1 instance of each character. In two-character shots, "
         "specify screen sides ('left' and 'right') so characters never overlap or spawn duplicates.\n"
-        "6. WORLD BIBLE: Define a cohesive 4-color palette, consistent time of day, weather, and lighting invariants.\n"
-        "7. Output ONLY valid JSON matching this schema:\n"
+        "6. CHARACTER SCALE & RELATIVE HEIGHT INVARIANTS: Define species and relative scale for each character. "
+        "In scenes with multiple characters, explicitly lock their relative heights into qwen_scene_prompt and qwen_end_scene_prompt "
+        "(e.g. 'Barnaby is a massive brown bear, 3.5x larger and taller than Pip; Pip reaches only to Barnaby\'s knee. "
+        "Never shrink the bear or enlarge the rabbit; keep their relative volumetric scale identical across every shot').\n"
+        "7. STRICT PROP INVARIANT LOCK: Any featured food, item, or fruit MUST have ONE locked canonical identity. "
+        "Spoken narration and visual scene prompts MUST match 100% (e.g. if visuals show red strawberries, "
+        "narration MUST talk about strawberries, NEVER blueberries).\n"
+        "8. WORLD BIBLE: Define a cohesive 4-color palette, consistent time of day, weather, lighting invariants, and locked_prop.\n"
+        "9. Output ONLY valid JSON matching this schema:\n"
         "{\n"
         '  "title": "Short Film Title",\n'
         '  "art_style": "Target art style",\n'
@@ -331,13 +650,21 @@ def build_scene_drafting_prompt(
         '    "time_of_day": "e.g. Sunny morning",\n'
         '    "weather": "e.g. Gentle breeze, golden sunbeams",\n'
         '    "lighting_style": "e.g. Warm soft storybook rim lighting",\n'
-        '    "art_style_invariants": "Locked style tokens"\n'
+        '    "art_style_invariants": "Locked style tokens",\n'
+        '    "locked_prop": {\n'
+        '      "canonical_name": "e.g. red strawberries",\n'
+        '      "visual_description": "ripe bright red strawberries in a small wicker basket",\n'
+        '      "banned_variants": ["blueberries", "blackberries"]\n'
+        '    }\n'
         '  },\n'
         '  "characters": [\n'
         "    {\n"
         '      "id": "char_1",\n'
         '      "name": "Character Name",\n'
-        '      "description": "Personality",\n'
+        '      "species": "bear / rabbit / human_adult",\n'
+        '      "scale_category": "giant / tiny / medium",\n'
+        '      "scale_factor": 3.5,\n'
+        '      "description": "Personality and stature",\n'
         '      "face": "Eyes, expression, markings",\n'
         '      "hair": "Fur or hair texture/color",\n'
         '      "clothing": "Wardrobe, colors, scarf/hat",\n'
@@ -573,13 +900,40 @@ def audit_screenplay_heuristics(
         e_score = 6.0
         issues.append("Story lacks explicit show-don't-tell physical emotional cues.")
 
-    overall = round((c_score + f_score + e_score + t_score + b_score + v_score) / 6.0, 1)
+    # 7. Prop Continuity & Narrative-Visual Alignment
+    p_score = 10.0
+    full_narr = " ".join(str(s.get("narration_text", "")).lower() for s in scenes)
+    full_prompts = " ".join(
+        f"{s.get('qwen_scene_prompt', '')} {s.get('qwen_end_scene_prompt', '')}".lower() for s in scenes
+    )
+    for tax_key, tax_info in PROP_CANONICAL_TAXONOMY.items():
+        prompts_has_canon = bool(re.search(rf"\b{tax_info['canonical_name']}\b", full_prompts))
+        for conflict_word in tax_info["conflicting_variants"]:
+            if re.search(rf"\b{conflict_word}\b", full_narr) and prompts_has_canon:
+                p_score = max(2.0, p_score - 4.0)
+                issues.append(f"Prop contradiction: Narration mentions '{conflict_word}' while visual prompts specify '{tax_info['canonical_name']}'.")
+            elif re.search(rf"\b{conflict_word}\b", full_prompts) and re.search(rf"\b{tax_info['canonical_name']}\b", full_narr):
+                p_score = max(2.0, p_score - 4.0)
+                issues.append(f"Prop contradiction: Visual prompts specify '{conflict_word}' while narration mentions '{tax_info['canonical_name']}'.")
+
+    # 8. Multi-Character Relative Scale Continuity
+    s_score = 10.0
+    if len(characters) >= 2:
+        for i, s in enumerate(scenes):
+            c_ids = s.get("character_ids", [])
+            if len(c_ids) >= 2:
+                scene_text = f"{s.get('qwen_scene_prompt', '')} {s.get('qwen_end_scene_prompt', '')}"
+                if "SCALE INVARIANT" not in scene_text and "larger" not in scene_text.lower() and "taller" not in scene_text.lower() and "knee" not in scene_text.lower():
+                    s_score = max(5.0, s_score - 1.5)
+                    issues.append(f"Scene {i+1} features multiple characters but lacks explicit relative character scale anchors.")
+
+    overall = round((c_score + f_score + e_score + t_score + b_score + v_score + p_score + s_score) / 8.0, 1)
     # Severe flaws cap the overall score so unviable stories cannot proceed to GPU
-    if t_score <= 3.0 or v_score <= 2.0 or c_score <= 3.0:
+    if t_score <= 3.0 or v_score <= 2.0 or c_score <= 3.0 or p_score <= 4.0 or s_score <= 4.0:
         overall = min(overall, 5.5)
 
-    passed = overall >= 8.0 and not any(v < 6.0 for v in [c_score, f_score, t_score, b_score, v_score])
-    critical_fail = overall < 6.0 or t_score < 5.0 or v_score < 4.0
+    passed = overall >= 8.0 and not any(v < 6.0 for v in [c_score, f_score, t_score, b_score, v_score, p_score, s_score])
+    critical_fail = overall < 6.0 or t_score < 5.0 or v_score < 4.0 or p_score < 5.0 or s_score < 5.0
 
     return {
         "passed": passed,
@@ -592,6 +946,8 @@ def audit_screenplay_heuristics(
             "tone_coherence": round(t_score, 1),
             "b1_readability": round(b_score, 1),
             "visual_delta": round(v_score, 1),
+            "prop_continuity": round(p_score, 1),
+            "scale_continuity": round(s_score, 1),
         },
         "issues": issues,
         "critique": "; ".join(issues) if issues else "Screenplay strictly conforms to causal director grammar and tone invariants.",

@@ -144,7 +144,7 @@ class KeyframeEvaluator:
         if bg_ssim < 0.68:
             score -= 2.5
             findings.append(f"Peripheral background similarity is low ({bg_ssim:.2f} < 0.68), indicating room geometry or tree placement shifted.")
-            recommendations.append("Apply peripheral border lock (border_ratio=0.16) and instruct End Frame prompt to lock room geometry identically.")
+            recommendations.append("Apply character-safe peripheral border lock (border_ratio<=0.08, character_safe=True) and instruct End Frame prompt to lock room geometry identically.")
         else:
             findings.append(f"Solid background stability ({bg_ssim:.2f} >= 0.68).")
 

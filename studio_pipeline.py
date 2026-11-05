@@ -501,13 +501,17 @@ def evaluate_flf2v_compatibility(
 def stabilize_end_frame_background(
     start_pil: Image.Image,
     end_pil: Image.Image,
-    border_ratio: float = 0.14,
+    border_ratio: float = 0.08,
+    blend_strength: float = 0.50,
+    character_safe: bool = True,
 ) -> Image.Image:
     """
     Soft-feathered background border lock for Wan 2.2 FLF2V:
     Blends the outer peripheral background border of `start_pil` into `end_pil` using a smooth
-    Gaussian-feathered alpha mask while leaving the central 72% character action zone untouched.
-    Eliminates peripheral wall/foliage drift during Qwen Image Edit end-frame synthesis.
+    Gaussian-feathered alpha mask while leaving the central character action zone untouched.
+    When `character_safe=True`, detects localized subject/character movement in peripheral zones
+    and zeroes out the blend weight for dynamic pixels, preventing ghosting, double ears,
+    and duplicate silhouettes at frame boundaries.
     """
     import numpy as np
     import cv2
@@ -520,20 +524,37 @@ def stabilize_end_frame_background(
     end_rgb = np.array(end_pil.convert("RGB"), dtype=np.float32)
     start_rgb = np.array(start_resized, dtype=np.float32)
 
-    # Create central action mask (1.0 in center, 0.0 at outer border edges)
-    mask = np.zeros((h, w), dtype=np.float32)
+    # 1. Base peripheral border mask (1.0 at outer border edges, 0.0 in central action zone)
     bx = max(4, int(round(w * border_ratio)))
     by = max(4, int(round(h * border_ratio)))
-    mask[by : h - by, bx : w - bx] = 1.0
+    border_mask = np.ones((h, w), dtype=np.float32)
+    border_mask[by : h - by, bx : w - bx] = 0.0
 
     # Feather the transition smoothly
     ksize = max(15, (min(bx, by) // 2) * 2 + 1)
-    mask = cv2.GaussianBlur(mask, (ksize, ksize), sigmaX=max(5.0, min(bx, by) * 0.45))
-    mask_3d = mask[:, :, None]
+    feathered_border = cv2.GaussianBlur(border_mask, (ksize, ksize), sigmaX=max(4.0, min(bx, by) * 0.4))
 
-    # Preserve 100% of end_rgb in center, blend 65% of start_rgb along outer peripheral border
-    edge_weight = (1.0 - mask_3d) * 0.65
-    blended = end_rgb * (1.0 - edge_weight) + start_rgb * edge_weight
+    weight = feathered_border * blend_strength
+
+    # 2. Motion / Subject Delta Gatekeeper
+    if character_safe:
+        # Compute localized pixel difference between start and end frame
+        diff = np.max(np.abs(start_rgb - end_rgb), axis=-1)
+        border_pixels = diff[border_mask > 0.5]
+        med_diff = float(np.median(border_pixels)) if len(border_pixels) > 0 else 0.0
+
+        # If background is predominantly consistent (median border diff < 45.0, not random noise)
+        if med_diff < 45.0:
+            # High localized difference indicates a character moved into/out of the border zone
+            dynamic_threshold = max(24.0, med_diff * 1.6)
+            dynamic_mask = (diff > dynamic_threshold).astype(np.uint8)
+            # Dilate dynamic mask to protect character contours, ears, and limbs
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            dilated_dynamic = cv2.dilate(dynamic_mask, kernel).astype(np.float32)
+            weight = weight * (1.0 - dilated_dynamic)
+
+    weight_3d = weight[:, :, None]
+    blended = end_rgb * (1.0 - weight_3d) + start_rgb * weight_3d
     return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
 
 
@@ -1160,6 +1181,9 @@ class StudioPipeline:
             get_tone_aware_end_pose,
             sanitize_genre_prompt,
             build_performance_script,
+            infer_character_scale,
+            build_character_scale_anchor,
+            audit_and_harmonize_props,
             GENRE_CONFIGS,
         )
         from narration_readability import (
@@ -1208,6 +1232,12 @@ class StudioPipeline:
             seen_ids.add(cid)
             c["id"] = cid
             c.setdefault("name", f"Character {i+1}")
+            # Infer and attach character scale metadata
+            scale_info = infer_character_scale(c)
+            c.setdefault("species", scale_info["species"])
+            c.setdefault("scale_factor", scale_info["scale_factor"])
+            c.setdefault("scale_category", scale_info["category"])
+            c.setdefault("build", scale_info["build"])
             norm_chars.append(c)
         # Enforce maximum 3 characters budget (Heart-Touching Intimacy Constraint)
         if len(norm_chars) > MAX_STORY_CHARACTERS:
@@ -1264,6 +1294,21 @@ class StudioPipeline:
         if abs(total - target_duration) > 0.5:
             for s in norm_scenes:
                 s["duration_seconds"] = per_scene
+
+        # ── Character Relative Scale Invariants Lock ──────────────────────────
+        scale_anchor = build_character_scale_anchor(norm_chars)
+        if scale_anchor:
+            for s in norm_scenes:
+                if len(norm_chars) >= 2 or len(s.get("character_ids", [])) >= 2:
+                    p_start = s.get("qwen_scene_prompt", "")
+                    if "SCALE INVARIANT:" not in p_start:
+                        s["qwen_scene_prompt"] = f"{scale_anchor} {p_start}".strip()
+                    p_end = s.get("qwen_end_scene_prompt", "")
+                    if "SCALE INVARIANT:" not in p_end:
+                        s["qwen_end_scene_prompt"] = f"{scale_anchor} {p_end}".strip()
+                    wan_p = s.get("wan_motion_prompt", "")
+                    if "SCALE INVARIANT:" not in wan_p:
+                        s["wan_motion_prompt"] = f"{scale_anchor} {wan_p}".strip()
 
         # ── Causal State Ledger, Narration & Narrative Beat Enforcement ───────
         char_props = [c.get("signature_details") for c in norm_chars if c.get("signature_details")]
@@ -1340,6 +1385,7 @@ class StudioPipeline:
 
         data["scenes"] = norm_scenes
         data = enforce_orchestra_story_constraints(data)
+        data = audit_and_harmonize_props(data)
         return data
 
     def audit_and_repair_story_logic(
@@ -1872,8 +1918,11 @@ class StudioPipeline:
                 mapping = "; ".join(
                     f"{rc.get('name', 'character')} is the character in image {i+1}" for i, rc in enumerate(ref_chars)
                 )
+                from story_director_ai import build_character_scale_anchor
+                scale_anchor = build_character_scale_anchor(ref_chars)
+                scale_clause = f"{scale_anchor}. " if scale_anchor and "SCALE INVARIANT:" not in scene_prompt else ""
                 refined_prompt = (
-                    f"{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors and outfit identical "
+                    f"{scale_clause}{scene_prompt}. {mapping}. Keep each character's face, hairstyle, colors, outfit, and relative height/size identical "
                     f"to their reference image. Full-frame cinematic composition, detailed background, 4k"
                 )
             else:
@@ -1945,16 +1994,22 @@ class StudioPipeline:
                 + ", duplicate character, cloned person, multiple figures, ghost, double exposure, semi-transparent body, two heads, extra limbs, merged bodies"
             )
 
+            from story_director_ai import build_character_scale_anchor
+            scale_anchor = build_character_scale_anchor(ref_chars)
+            scale_guard = f"{scale_anchor}. " if scale_anchor and "SCALE INVARIANT:" not in end_raw else ""
+
             if "image 1" in end_raw.lower():
                 end_refined_prompt = (
-                    f"{end_raw}. {anti_dup_guard} "
+                    f"{scale_guard}{end_raw}. {anti_dup_guard} "
+                    "Maintain exact relative character scale and volumetric stature from image 1. "
                     "Full-frame cinematic composition, identical background and character identity, 4k"
                 )
             else:
                 end_refined_prompt = (
-                    f"image 1 is the starting frame of this 5-second continuous animation. "
+                    f"{scale_guard}image 1 is the starting frame of this 5-second continuous animation. "
                     f"Transform the character poses from image 1 into their dynamic ending pose at t=5.0s: {end_raw}. "
                     f"{anti_dup_guard} "
+                    "Maintain exact relative character scale and volumetric stature from image 1. "
                     "Keep the exact same background environment, trees, walls, lighting, and character outfits from image 1, "
                     f"but visibly advance their physical body stance and action into this distinct final pose. 4k"
                 )
@@ -1976,7 +2031,20 @@ class StudioPipeline:
             last_keyframe_pil = Image.open(io.BytesIO(end_results[0])).convert("RGB")
             if color_match_end and keyframe_pil is not None:
                 last_keyframe_pil = match_color_histogram_lab(last_keyframe_pil, keyframe_pil, strength=0.75)
-                last_keyframe_pil = stabilize_end_frame_background(keyframe_pil, last_keyframe_pil, border_ratio=0.14)
+                pre_compat = evaluate_flf2v_compatibility(keyframe_pil, last_keyframe_pil)
+                if pre_compat.get("bg_similarity", 0.0) < 0.70:
+                    last_keyframe_pil = stabilize_end_frame_background(
+                        keyframe_pil,
+                        last_keyframe_pil,
+                        border_ratio=0.08,
+                        blend_strength=0.45,
+                        character_safe=True,
+                    )
+                else:
+                    print(
+                        f"[StudioPipeline] Scene {scene_num} background is already stable "
+                        f"(bg_similarity={pre_compat['bg_similarity']:.2f} >= 0.70). Bypassing spatial border blend to eliminate edge ghosting."
+                    )
 
             # ── Pose Delta Gatekeeper (FLF2V Divergence Budget: 20.0 - 80.0) ───
             pose_delta = measure_frame_pose_delta(keyframe_pil, last_keyframe_pil)
@@ -2077,10 +2145,12 @@ class StudioPipeline:
             "CRITICAL DIRECTORIAL LAWS:\n"
             "1. ZERO STAGNANT POSES: Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. If the poses are similar, the video has zero motion!\n"
             "2. COMMAND A RADICAL POSE TRANSFORMATION: You must specify an explicit physical posture switch (e.g. from standing/aiming to crouching low behind cover, dropping to one knee, recoiling backward from impact, weapon lowered to reload, turning 90 degrees in shock, or leaping into action).\n"
-            "3. WEAPON & PROP RETENTION LOCK: All active weapons, items, and accessories (" + props_str + ") MUST remain in the characters' hands in the ending frame unless explicitly dropped or destroyed. Never allow weapons to vanish!\n"
+            "3. WEAPON & PROP RETENTION LOCK: All active weapons, items, and accessories (" + props_str + ") MUST remain in the characters' hands in the ending frame unless explicitly dropped or destroyed. Never allow items or props to vanish!\n"
             "4. EXPLICIT BODY MECHANICS: Describe exact torso angle, arm positions, head direction, hands, and props.\n"
             "5. KEEP THE WORLD IDENTICAL: The background environment, room geometry, trees, lighting, art style, and character clothing MUST remain identical to image 1, but the physical body pose MUST be completely transformed.\n"
-            "6. Output ONLY valid JSON in this schema:\n"
+            "6. STRICT CHARACTER SCALE CONTINUITY: Characters MUST maintain their exact relative scale ratio and body volume from image 1. If Character A is a massive bear and Character B is a tiny rabbit, Character A must NEVER shrink to rabbit size, and Character B must NEVER balloon to bear size. Keep relative height and head-to-body proportions 100% consistent with image 1.\n"
+            "7. STRICT PROP VARIETY LOCK: Never switch or confuse prop varieties (e.g. if the story uses strawberries, NEVER mention or depict blueberries, blackberries, or dark fruit; keep prop color and variety identical to image 1).\n"
+            "8. Output ONLY valid JSON in this schema:\n"
             "{\n"
             '  "action_summary": "1-sentence summary of the action that occurred over 5 seconds",\n'
             '  "qwen_end_frame_prompt": "Imperative edit prompt for Qwen Image Edit: \'image 1 is the starting frame. For this ending frame at t=5.0s, completely transform the characters\\\' body poses into their dynamic final stance: [exact physical action, new arm, leg, and head positions]. Keep the exact same background environment, lighting, art style, and outfits from image 1, but visibly advance their body pose into this new action.\'"\n'
@@ -2766,6 +2836,21 @@ class StudioPipeline:
             props_txt = ", ".join(active_props[:3])
             anchors += f", weapon and prop lock: {props_txt} remain securely in hands with no vanishing"
 
+        # Incorporate character scale ratio and locked prop into identity anchors
+        if len(cast) >= 2:
+            from story_director_ai import build_character_scale_anchor
+            scale_anc = build_character_scale_anchor(cast)
+            if scale_anc:
+                anchors += f", {scale_anc}"
+
+        locked_p = (story_meta or {}).get("world_bible", {}).get("locked_prop")
+        extra_neg = _trim(raw.get("negative_additions") or "", 200)
+        if locked_p:
+            anchors += f", locked prop: {locked_p.get('canonical_name')} only"
+            banned_variants = locked_p.get("banned_variants", [])
+            if banned_variants:
+                extra_neg = (extra_neg + ", " + ", ".join(banned_variants)).strip(", ")
+
         env = _trim(raw.get("environment_motion") or "", 140)
         if not env or env == "subtle ambient motion in the background":
             env = blueprint.get("reactive_physics", "subtle ambient motion in the background")
@@ -2779,7 +2864,6 @@ class StudioPipeline:
             f"{style + ', ' if style else ''}smooth fluid animation, consistent character design, high detail."
         )
 
-        extra_neg = _trim(raw.get("negative_additions") or "", 200)
         negative = ", ".join(x for x in [DEFAULT_NEGATIVE_PROMPT, IDENTITY_NEGATIVE, extra_neg] if x)
 
         return {
