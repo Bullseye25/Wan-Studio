@@ -373,12 +373,20 @@ def measure_frame_pose_delta(img_a: Any, img_b: Any) -> float:
         return 0.0
 
 
-def ensure_high_delta_end_prompt(start_prompt: str, end_prompt: str, scenario: str = "", motion: str = "") -> str:
+def ensure_high_delta_end_prompt(
+    start_prompt: str,
+    end_prompt: str,
+    scenario: str = "",
+    motion: str = "",
+    genre: Optional[str] = None,
+) -> str:
     """
-    Enforces an unmistakable physical action and stance delta between the Start Frame (t=0.0s)
-    and the End Frame (t=5.0s). If the end prompt is identical, missing, or too semantically
-    similar to the start prompt, programmatically injects a dynamic contrasting posture.
+    Enforces a tone-authentic, unmistakable physical action and stance delta between the
+    Start Frame (t=0.0s) and the End Frame (t=5.0s).
+    Uses the Tone-Aware Pose Library to prevent combat/shockwave hallucinations in gentle/kids stories.
     """
+    from story_director_ai import get_tone_aware_end_pose, sanitize_genre_prompt, detect_story_genre
+
     s_clean = (start_prompt or "").strip().lower()
     e_clean = (end_prompt or "").strip().lower()
 
@@ -390,31 +398,27 @@ def ensure_high_delta_end_prompt(start_prompt: str, end_prompt: str, scenario: s
         "duck", "crouch", "kneel", "drop", "recoil", "lunge", "turn", "shield", "cover",
         "collapse", "leap", "dive", "halt", "skid", "reload", "raise", "lowered", "reach",
         "aimed", "spin", "fall", "blast", "strike", "tackle", "dodge", "wave", "waving",
-        "bow", "bowing", "point", "pointing", "gesture", "jump", "jumping", "cheer"
+        "bow", "bowing", "point", "pointing", "gesture", "jump", "jumping", "cheer", "share",
+        "offer", "eat", "chew", "hug", "celebrate"
     ]
     has_delta_kw = any(kw in e_clean for kw in pose_delta_keywords)
 
-    if not end_prompt or e_clean == s_clean or overlap > 0.65 or not has_delta_kw:
-        beat = (end_prompt if end_prompt and e_clean != s_clean else "") or motion or scenario or s_clean or "dramatic action completion"
-        # Contextual pose transformation
-        if any(w in beat.lower() for w in ["fire", "firi", "weapon", "aim", "shoot", "attack", "gun", "combat", "fight", "blast", "bullet"]):
-            posture = "recoiling back with weapon lowered, dropped to one knee behind solid rock cover, head ducked low shielding face from smoke and debris"
-        elif any(w in beat.lower() for w in ["run", "sprint", "chase", "walk", "rush", "advance", "approach"]):
-            posture = "skidding to a full halt, crouched low with one hand bracing on the ground, torso angled sharply, looking back over shoulder in alarm"
-        elif any(w in beat.lower() for w in ["magic", "spell", "glow", "cast", "power", "energy", "staff"]):
-            posture = "arms thrust forward channeling a brilliant glowing shockwave, torso arched, hair billowing back from energy release"
-        elif any(w in beat.lower() for w in ["discover", "find", "look", "see", "stare", "reach", "touch"]):
-            posture = "kneeling down touching the ground with one outstretched hand, torso tilted forward, eyes wide in awe"
-        else:
-            posture = "completely shifted into dynamic finishing pose, crouched into a low stance ducking down defensively behind cover, body turned 90 degrees"
+    eff_genre = genre or detect_story_genre(f"{scenario} {start_prompt}")
 
-        return (
+    if not end_prompt or e_clean == s_clean or overlap > 0.65 or not has_delta_kw:
+        beat = (end_prompt if end_prompt and e_clean != s_clean else "") or motion or scenario or s_clean or "warm action completion"
+        # Tone-aware dynamic pose transformation from library
+        posture = get_tone_aware_end_pose(scenario=f"{beat} {scenario}", genre=eff_genre)
+
+        raw_result = (
             f"Ending frame at t=5.0s: The characters have completed the action: {beat}. "
             f"Visibly transformed body posture and physical silhouette: {posture}. "
-            f"Distinct arm, torso, and leg positions from the starting frame. "
+            f"Strict constraint: Exactly ONE instance of each character. Never add duplicate figures or clones. "
             f"Keep the exact same room geometry, trees, rock background, lighting, art style, and clothing identical."
         )
-    return end_prompt
+        return sanitize_genre_prompt(raw_result, genre=eff_genre)
+
+    return sanitize_genre_prompt(end_prompt, genre=eff_genre)
 
 
 def evaluate_flf2v_compatibility(
@@ -1007,18 +1011,26 @@ class StudioPipeline:
         target_duration: float = 30.0,
         art_style: str = "2D vibrant cartoon animation",
         progress_cb: Optional[Callable[[float, str], None]] = None,
+        genre: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Queries Ollama Cloud (gemma4:31b) to produce a structured short story with
-        extracted character visual details and scene-by-scene story beats (including both
-        START frame and END frame prompts for Wan 2.2 First-Last-Frame animation).
-        Scene count is raised automatically so no clip exceeds Wan's 5s window.
+        Multi-Pass Writers' Room:
+        Pass 1: Beat Sheet Generator (causal spine, character wants, Pixar THEREFORE/BUT beats)
+        Pass 2: Production Screenplay & Dynamic Director (5s atomic shots, show-don't-tell cues, CEFR B1 narration)
+        Pass 3: Rigorous Story Doctor Quality Audit (in audit_and_repair_story_logic)
         """
+        from story_director_ai import (
+            detect_story_genre,
+            build_beat_sheet_prompt,
+            build_scene_drafting_prompt,
+            GENRE_CONFIGS,
+        )
+
+        eff_genre = genre or detect_story_genre(prompt, art_style)
+        genre_info = GENRE_CONFIGS.get(eff_genre, GENRE_CONFIGS["kids"])
+
         num_scenes = plan_scene_count(target_duration, num_scenes)
         scene_duration = round(min(MAX_CLIP_SECONDS, target_duration / num_scenes), 2)
-
-        if progress_cb:
-            progress_cb(0.03, "Consulting AI Director for Causal Story Architecture & State Ledgers...")
 
         # ── Retrieve In-Context Few-Shot Exemplars from Memory Bank ────────────
         memory_bank = StoryMemoryBank()
@@ -1033,114 +1045,75 @@ class StudioPipeline:
         if learned_directives:
             print(f"[StudioPipeline] Injected {len(learned_directives)} learned directive(s) from past film post-mortems.")
 
-        # ── Retrieve Narrative Beat Guide for Target Scene Count ───────────────
-        beat_presets = NARRATIVE_BEATS_BY_COUNT.get(num_scenes, NARRATIVE_BEATS_BY_COUNT.get(6, []))
-        beat_guide_text = "\n".join(
-            f"  - Scene {i+1}: {b.get('beat', f'Beat {i+1}')} (Causal Connector: '{b.get('connector', 'THEREFORE')}') -> {b.get('role', '')}"
-            for i, b in enumerate(beat_presets[:num_scenes])
+        # ── PASS 1: CAUSAL BEAT SHEET GENERATOR ──────────────────────────────
+        if progress_cb:
+            progress_cb(0.02, f"🎬 Writers' Room Pass 1/2: Developing Causal Beat Sheet for {genre_info['name']}...")
+
+        beat_sys, beat_usr = build_beat_sheet_prompt(
+            premise=prompt,
+            genre=eff_genre,
+            num_scenes=num_scenes,
+            target_duration=target_duration,
         )
 
-        system_prompt = (
-            "You are a master animation director and AI screenwriter directing a causally coherent animated short film.\n"
-            f"The user wants a short movie: {target_duration} seconds total, EXACTLY {num_scenes} scenes, "
-            f"~{scene_duration}s each. Every scene is ONE continuous shot animated in Wan 2.2 FLF2V between "
-            "a FIRST FRAME (t=0.0s) and a LAST FRAME (t=5.0s).\n\n"
-            "CRITICAL CAUSAL STORYTELLING LAWS (PIXAR / SOUTH PARK RULE):\n"
-            "1. NEVER CONNECT SCENES WITH 'AND THEN': Every scene must connect via 'THEREFORE' (direct causal consequence "
-            "of the preceding scene) or 'BUT' (unexpected obstacle or twist). Random unrelated events are strictly forbidden!\n"
-            "2. ATOMIC 5-SECOND FEASIBILITY: A single 5.0-second Wan 2.2 clip (81 frames) can ONLY execute ONE atomic physical action "
-            "and its immediate reaction (e.g. 'draws blade and leaps forward' or 'lands on one knee and shields face'). "
-            "NEVER cram 3-4 separate story beats into one 5s scene!\n"
-            "3. WEAPON & PROP RETENTION LOCK: All active weapons, items, and accessories in character hands (swords, lanterns, scrolls, goggles) "
-            "must stay in character hands across cuts unless explicitly shown being dropped, stowed, or shattered.\n"
-            "4. 180-DEGREE SCREEN DIRECTION: Maintain consistent spatial eyelines and screen direction (e.g. hero moving screen-left to screen-right) "
-            "across cuts so characters do not disorientingly flip orientation.\n"
-            "5. CONTROLLED POSE DELTA (DIVERGENCE BUDGET 30-70): Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. "
-            "The End Frame (t=5.0s) MUST have a visibly changed physical posture and gesture, but keep the SAME camera angle, "
-            "environmental perspective, and character spatial zones. NEVER do extreme jumps (like standing straight to lying on floor) "
-            "that break temporal coherence or trigger Wan cross-fade warping.\n"
-            "6. SYNCHRONIZED CEFR B1 PLAIN-ENGLISH NARRATION (5 TO 10 WORDS MAX PER SCENE): Every scene must include a spoken "
-            "'narration_text' in simple, clear, engaging B1 English. Use common everyday words (strictly NO purple prose or obscure words "
-            "like 'eerily', 'emerges', 'horrific', 'manic', 'residue', 'loophole'). Use active voice with clear subjects (e.g. 'Batman finds "
-            "a strange purple mark.' instead of 'A purple stain points to an impossible source.'). Lines must connect like a natural story. "
-            "Include 'narration_voice_style' ('warm_wonder', 'tense_whisper', 'urgent_rising', 'epic_climax', 'joyful_resolution') "
-            "and a single 'sync_trigger_word' (the primary action verb where visual climax occurs).\n"
-            "7. STRICT CHARACTER UNIQUENESS (NO DUPLICATES/CLONES/GHOSTS): Each character appears at most ONCE per scene. "
-            "Never create clones, twins, ghosts, or double-exposures. In two-character shots, place one character on screen-left and "
-            "one on screen-right.\n\n"
-            f"NARRATIVE BEAT STRUCTURE TO FOLLOW:\n{beat_guide_text}\n\n"
-            + (f"{learned_prompt}\n\n" if learned_prompt else "")
-            + (f"{few_shot_prompt}\n\n" if few_shot_prompt else "")
-            + "CRITICAL: Output ONLY valid JSON matching this schema without markdown fences or commentary:\n"
-            "{\n"
-            '  "title": "Short Film Title",\n'
-            '  "art_style": "Visual style description",\n'
-            '  "theme": "Moral or thematic premise",\n'
-            '  "world_bible": {\n'
-            '    "palette": ["#Hex1", "#Hex2", "#Hex3", "#Hex4"],\n'
-            '    "time_of_day": "e.g. Rainy midnight (stays consistent across cuts unless explicit time jump)",\n'
-            '    "weather": "e.g. Heavy downpour (stays consistent across cuts)",\n'
-            '    "lighting_style": "e.g. Dark noir with neon rim light and deep volumetric shadows",\n'
-            '    "art_style_invariants": "Strict visual tokens locked across all scenes (e.g. 2D vibrant cartoon, Studio Ghibli watercolor, hand-painted)"\n'
-            '  },\n'
-            '  "color_and_lighting_script": {\n'
-            '    "palette": "Color palette defining the atmosphere",\n'
-            '    "lighting_progression": "Directional lighting and mood progression across the scenes",\n'
-            '    "emotional_tone": "The core emotional mood"\n'
-            '  },\n'
-            '  "characters": [\n'
-            "    {\n"
-            '      "id": "char_1",\n'
-            '      "name": "Character Name",\n'
-            '      "description": "Personality and role summary",\n'
-            '      "face": "Exact face features: shape, eyes, expression, facial markings",\n'
-            '      "hair": "Hair/fur style, color, texture, length",\n'
-            '      "clothing": "Complete outfit, fabric colors, style, shoes",\n'
-            '      "signature_details": "Unique identifiable items, props, or weapons held",\n'
-            '      "z_image_prompt": "Ultra-detailed full-body character sheet prompt for Z-Image Turbo, front view, clean neutral studio background, in the target art style"\n'
-            "    }\n"
-            "  ],\n"
-            '  "scenes": [\n'
-            "    {\n"
-            '      "scene_number": 1,\n'
-            '      "title": "Scene Name",\n'
-            f'      "duration_seconds": {scene_duration},\n'
-            '      "narrative_beat": "e.g. Hook & Status Quo / Inciting Obstacle / Climax & Payoff",\n'
-            '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
-            '      "recommended_transition": "cut / match_cut / crossfade / fade_black / whip_pan",\n'
-            '      "narration_text": "Spoken voiceover line in CEFR B1 English (5 to 10 words)",\n'
-            '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
-            '      "sync_trigger_word": "exact action verb in narration_text that triggers the visual climax",\n'
-            '      "character_placements": [\n'
-            '        {"character_id": "char_1", "screen_side": "left", "facing": "right", "pose": "standing firm"}\n'
-            '      ],\n'
-            '      "state_ledger": {\n'
-            '        "entry_state": "Exact character body posture, location, and hand items at t=0.0s",\n'
-            '        "active_props": ["list of held weapons or items"],\n'
-            '        "spatial_zone": "Position and facing direction (e.g. screen-left facing right)",\n'
-            '        "atomic_action_5s": "The single physical action and reaction taking 5 seconds",\n'
-            '        "exit_state": "Exact character body posture and prop hold at t=5.0s"\n'
-            '      },\n'
-            '      "scenario": "Story beat: what happens in this single shot",\n'
-            '      "qwen_scene_prompt": "FIRST FRAME (t=0s) prompt: environment, composition, initiating character poses at the START of the shot",\n'
-            '      "qwen_end_scene_prompt": "LAST FRAME (t=5s) prompt: same environment and lighting, but VISIBLY TRANSFORMED character poses/limbs/actions at the END of the shot",\n'
-            '      "wan_motion_prompt": "Draft motion description bridging the first frame to the last frame",\n'
-            '      "camera_movement": "e.g. Slow Cinematic Push-In / Static Tripod Shot",\n'
-            '      "character_ids": ["char_1"]\n'
-            "    }\n"
-            "  ]\n"
-            "}"
+        beat_sheet = None
+        try:
+            beat_raw = self._chat_completion(
+                [
+                    {"role": "system", "content": beat_sys},
+                    {"role": "user", "content": beat_usr},
+                ],
+                max_tokens=1500,
+                temperature=0.6,
+                task_role="screenplay",
+                max_retries=1,
+            )
+            beat_sheet = self._parse_json_safely(beat_raw)
+        except Exception as e:
+            print(f"[StudioPipeline] Pass 1 Beat Sheet generation note ({e}); using structured genre fallback.")
+
+        if not beat_sheet or not isinstance(beat_sheet.get("beats"), list) or len(beat_sheet.get("beats")) == 0:
+            # Deterministic fallback beat sheet conforming to Pixar causal structure
+            beat_presets = NARRATIVE_BEATS_BY_COUNT.get(num_scenes, NARRATIVE_BEATS_BY_COUNT.get(6, []))
+            beat_sheet = {
+                "logline": prompt,
+                "theme": "Kindness and empathy" if eff_genre == "kids" else "Courage and discovery",
+                "protagonist_want": "To overcome an immediate challenge",
+                "emotional_climax": "A moment of shared realization or triumph",
+                "payoff": "A heartwarming resolution",
+                "beats": [
+                    {
+                        "scene_number": i + 1,
+                        "dramatic_role": b.get("beat", f"Beat {i+1}"),
+                        "causal_connector": b.get("connector", "THEREFORE"),
+                        "core_action": b.get("role", "Primary physical action"),
+                        "emotional_subtext": "Curiosity and warmth" if eff_genre == "kids" else "Determination",
+                    }
+                    for i, b in enumerate(beat_presets[:num_scenes])
+                ],
+            }
+
+        # ── PASS 2: PRODUCTION SCREENPLAY & DYNAMIC DIRECTOR ──────────────────
+        if progress_cb:
+            progress_cb(0.06, f"🎬 Writers' Room Pass 2/2: Drafting Production Screenplay & Shot Grammar...")
+
+        draft_sys, draft_usr = build_scene_drafting_prompt(
+            beat_sheet=beat_sheet,
+            premise=prompt,
+            genre=eff_genre,
+            num_scenes=num_scenes,
+            target_duration=target_duration,
+            art_style=art_style,
         )
 
-        user_content = (
-            f"Story Premise: {prompt}\nTarget Style: {art_style}\n"
-            f"Number of Scenes: {num_scenes}\nTotal Duration: {target_duration}s."
-        )
+        # Inject learned directives and memory exemplars to guide screenplay draft
+        if learned_prompt or few_shot_prompt:
+            draft_sys += "\n\n" + (learned_prompt or "") + "\n\n" + (few_shot_prompt or "")
 
         raw_text = self._chat_completion(
             [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
+                {"role": "system", "content": draft_sys},
+                {"role": "user", "content": draft_usr},
             ],
             max_tokens=3500,
             temperature=0.7,
@@ -1149,15 +1122,21 @@ class StudioPipeline:
 
         parsed_data = self._parse_json_safely(raw_text)
         parsed_data = self.normalize_story(
-            parsed_data, prompt=prompt, num_scenes=num_scenes,
-            target_duration=target_duration, art_style=art_style,
+            parsed_data,
+            prompt=prompt,
+            num_scenes=num_scenes,
+            target_duration=target_duration,
+            art_style=art_style,
+            genre=eff_genre,
         )
+        parsed_data["beat_sheet"] = beat_sheet
+        parsed_data["genre"] = eff_genre
 
         if progress_cb:
             progress_cb(
                 0.15,
                 f"Story generated: '{parsed_data.get('title', 'Studio Story')}' "
-                f"({len(parsed_data['characters'])} characters, {len(parsed_data['scenes'])} scenes with Causal State Ledgers)",
+                f"({len(parsed_data['characters'])} characters, {len(parsed_data['scenes'])} scenes in {genre_info['name']})",
             )
         return parsed_data
 
@@ -1169,15 +1148,35 @@ class StudioPipeline:
         num_scenes: int,
         target_duration: float,
         art_style: str,
+        genre: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Enforces the schema contract on LLM output: valid character ids, scenes that reference
         existing characters, sequential numbering, both start & end keyframe prompts, and per-scene
-        durations within Wan's window.
+        durations within Wan's window. Enforces genre tone invariants, B1 Plain English, and performance scripts.
         """
+        from story_director_ai import (
+            detect_story_genre,
+            get_tone_aware_end_pose,
+            sanitize_genre_prompt,
+            build_performance_script,
+            GENRE_CONFIGS,
+        )
+        from narration_readability import (
+            check_b1_readability,
+            simplify_to_b1_rule_based,
+            pick_sync_trigger_word,
+        )
+
         data = dict(data or {})
         data.setdefault("title", "Studio Story")
         data.setdefault("art_style", art_style)
+
+        eff_genre = genre or data.get("genre") or detect_story_genre(prompt, art_style)
+        data["genre"] = eff_genre
+        genre_info = GENRE_CONFIGS.get(eff_genre, GENRE_CONFIGS["kids"])
+        data.setdefault("narrator_voice_preset", genre_info.get("default_voice", DEFAULT_NARRATOR_VOICE))
+
         color_script = data.get("color_and_lighting_script")
         if not isinstance(color_script, dict):
             color_script = {
@@ -1237,11 +1236,18 @@ class StudioPipeline:
             s.setdefault("title", f"Scene {i+1}")
             s.setdefault("scenario", s.get("qwen_scene_prompt", ""))
             s.setdefault("qwen_scene_prompt", s.get("scenario", prompt))
+
+            # Tone-aware prompt sanitization: strip/replace genre-banned words
+            s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre)
+            s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", prompt), genre=eff_genre)
+            s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre)
+
             s["qwen_end_scene_prompt"] = ensure_high_delta_end_prompt(
                 start_prompt=s.get("qwen_scene_prompt", ""),
                 end_prompt=s.get("qwen_end_scene_prompt", ""),
                 scenario=s.get("scenario", ""),
                 motion=s.get("wan_motion_prompt", ""),
+                genre=eff_genre,
             )
             ids = s.get("character_ids")
             if isinstance(ids, str):
@@ -1262,6 +1268,7 @@ class StudioPipeline:
         # ── Causal State Ledger, Narration & Narrative Beat Enforcement ───────
         char_props = [c.get("signature_details") for c in norm_chars if c.get("signature_details")]
         beat_presets = NARRATIVE_BEATS_BY_COUNT.get(len(norm_scenes), NARRATIVE_BEATS_BY_COUNT.get(6, []))
+        proper_names = set(valid_ids + [c.get("name") for c in norm_chars])
 
         for i, s in enumerate(norm_scenes):
             default_beat = beat_presets[i]["beat"] if i < len(beat_presets) else f"Beat {i+1}"
@@ -1271,19 +1278,30 @@ class StudioPipeline:
             s.setdefault("causal_connector", default_conn)
             s.setdefault("recommended_transition", default_trans)
 
-            # Enforce 6-11 word spoken narration & sync trigger word
+            # Enforce 6-11 word spoken narration & CEFR B1 Plain English
             raw_narration = s.get("narration_text") or ""
-            s["narration_text"] = enforce_narration_word_budget(
+            narr_text = enforce_narration_word_budget(
                 raw_narration,
                 scenario=s.get("scenario") or s.get("qwen_scene_prompt", ""),
-                max_words=12,
+                max_words=11,
             )
-            s.setdefault("narration_voice_style", "cinematic_warm")
-            s["sync_trigger_word"] = extract_sync_trigger_word(
+            b1_res = check_b1_readability(narr_text, proper_nouns=proper_names)
+            if not b1_res.get("passed", True):
+                narr_text = simplify_to_b1_rule_based(narr_text, max_words=10)
+            s["narration_text"] = narr_text
+
+            voice_style = s.get("narration_voice_style") or (
+                "warm_wonder" if eff_genre == "kids" else "cinematic_warm"
+            )
+            s["narration_voice_style"] = voice_style
+            s["sync_trigger_word"] = pick_sync_trigger_word(s["narration_text"]) or extract_sync_trigger_word(
                 s["narration_text"],
                 scenario=s.get("scenario", ""),
                 explicit_trigger=s.get("sync_trigger_word"),
             )
+
+            # Expressive Performance Scripting for Kokoro & Timeline Sync
+            s["performance_script"] = build_performance_script(s, genre=eff_genre)
 
             raw_ledger = s.get("state_ledger")
             if not isinstance(raw_ledger, dict):
@@ -1331,22 +1349,39 @@ class StudioPipeline:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Multi-Agent 'Story Doctor' & Causal Continuity Critic.
+        Pass 3: Multi-Agent 'Story Doctor' & Causal Continuity Critic.
         Audits the screenplay before image/video rendering against 5 key criteria:
         1. Narrative Causality: Are scenes linked by THEREFORE / BUT instead of AND THEN?
-        2. 5-Second Feasibility: Does each scene feature 1 atomic action + reaction that fits in 5 seconds (and narration <= 12 words)?
+        2. 5-Second Feasibility: Does each scene feature 1 atomic action + reaction that fits in 5 seconds (and narration <= 11 words)?
         3. Prop & Weapon Permanence: Do items stay in hands without vanishing mid-story?
         4. Spatial & Screen Direction: Is 180-degree cinema direction respected across cuts?
-        5. Visual Action Progression: Is there a dramatic physical pose difference between start and end?
+        5. Tone Coherence & Genre Invariants: Zero banned words/poses (e.g. no shockwaves in kids stories).
+        6. Visual Action Progression: Is there a dramatic physical pose difference between start and end?
 
         If any score is < 8/10, automatically repairs and enhances the scene beats,
         and logs the (rejected, chosen) pair to outputs/studio/story_dpo_pairs.jsonl
         for ongoing model fine-tuning.
+        If score is < 6.0 after repair, sets passed=False to trigger the GPU budget guard.
         """
+        from story_director_ai import (
+            detect_story_genre,
+            build_story_editor_audit_prompt,
+            audit_screenplay_heuristics,
+            sanitize_genre_prompt,
+            get_tone_aware_end_pose,
+        )
+        from narration_readability import simplify_to_b1_rule_based, pick_sync_trigger_word
+
         if progress_cb:
             progress_cb(0.08, "Running Story Doctor Causal Audit on screenplay...")
 
         scenes = story_data.get("scenes", [])
+        characters = story_data.get("characters", [])
+        eff_genre = story_data.get("genre") or detect_story_genre(
+            f"{story_data.get('theme', '')} {story_data.get('title', '')} {story_data.get('art_style', '')}"
+        )
+        story_data["genre"] = eff_genre
+
         if not scenes:
             return {
                 "passed": True,
@@ -1358,83 +1393,7 @@ class StudioPipeline:
                 "story": story_data,
             }
 
-        system_prompt = (
-            "You are the Lead Story Doctor and Animation Continuity Critic for a world-class animation studio.\n"
-            "Your mission is to audit an animated short film storyboard and ensure it possesses ironclad narrative causality, "
-            "strict 5-second temporal feasibility, prop permanence, synchronized narration (6-11 words), and visual action progression.\n\n"
-            "AUDIT CRITERIA (Score 1-10 each):\n"
-            "1. causality: Every scene transition must connect via 'THEREFORE' (consequence) or 'BUT' (obstacle). Ban lazy 'AND THEN' jumps.\n"
-            "2. feasibility_5s: Each 5.0-second Wan 2.2 clip can only execute ONE primary physical action and immediate reaction, and narration_text must be <= 12 words.\n"
-            "3. prop_permanence: Weapons and items in characters' hands must stay in their hands across cuts unless explicitly dropped, sheared, or stowed.\n"
-            "4. spatial_continuity: Keep 180-degree screen direction consistent (e.g. facing screen-right vs screen-left).\n"
-            "5. visual_delta: The End Frame (t=5s) MUST be a drastically different physical body stance from the Start Frame (t=0s).\n\n"
-            "Output ONLY valid JSON matching this schema:\n"
-            "{\n"
-            '  "overall_score": 1-10,\n'
-            '  "subscores": {\n'
-            '    "causality": 1-10,\n'
-            '    "feasibility_5s": 1-10,\n'
-            '    "prop_permanence": 1-10,\n'
-            '    "spatial_continuity": 1-10,\n'
-            '    "visual_delta": 1-10\n'
-            '  },\n'
-            '  "critique": "Detailed constructive feedback identifying logical weak points",\n'
-            '  "needs_repair": true/false,\n'
-            '  "repaired_scenes": [\n'
-            "    {\n"
-            '      "scene_number": 1,\n'
-            '      "title": "Scene Name",\n'
-            '      "narrative_beat": "e.g. Hook & Status Quo",\n'
-            '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
-            '      "narration_text": "Spoken line (6 to 11 words)",\n'
-            '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
-            '      "sync_trigger_word": "action verb in narration_text",\n'
-            '      "state_ledger": {\n'
-            '        "entry_state": "Starting body posture at t=0s",\n'
-            '        "active_props": ["held items/weapons"],\n'
-            '        "spatial_zone": "Position and facing direction",\n'
-            '        "atomic_action_5s": "Single physical action and reaction taking 5s",\n'
-            '        "exit_state": "Finishing body posture at t=5s"\n'
-            '      },\n'
-            '      "scenario": "Polished one-sentence beat",\n'
-            '      "qwen_scene_prompt": "First frame prompt",\n'
-            '      "qwen_end_scene_prompt": "Last frame prompt (high-delta)",\n'
-            '      "wan_motion_prompt": "Motion description",\n'
-            '      "camera_movement": "Camera directive",\n'
-            '      "character_ids": ["char_1"]\n'
-            "    }\n"
-            "  ]\n"
-            "}"
-        )
-
-        user_content = json.dumps(
-            {
-                "title": story_data.get("title"),
-                "theme": story_data.get("theme"),
-                "art_style": story_data.get("art_style"),
-                "characters": story_data.get("characters"),
-                "scenes": [
-                    {
-                        "scene_number": s.get("scene_number"),
-                        "title": s.get("title"),
-                        "narrative_beat": s.get("narrative_beat"),
-                        "causal_connector": s.get("causal_connector"),
-                        "narration_text": s.get("narration_text"),
-                        "narration_voice_style": s.get("narration_voice_style"),
-                        "sync_trigger_word": s.get("sync_trigger_word"),
-                        "state_ledger": s.get("state_ledger"),
-                        "scenario": s.get("scenario"),
-                        "qwen_scene_prompt": s.get("qwen_scene_prompt"),
-                        "qwen_end_scene_prompt": s.get("qwen_end_scene_prompt"),
-                        "wan_motion_prompt": s.get("wan_motion_prompt"),
-                        "camera_movement": s.get("camera_movement"),
-                        "character_ids": s.get("character_ids"),
-                    }
-                    for s in scenes
-                ],
-            },
-            indent=2,
-        )
+        system_prompt, user_content = build_story_editor_audit_prompt(story_data, genre=eff_genre)
 
         audit_model = model_choice or "nemotron-3-super"
         audit_raw = None
@@ -1446,7 +1405,7 @@ class StudioPipeline:
                 ],
                 model_override=audit_model,
                 max_tokens=3000,
-                temperature=0.4,
+                temperature=0.3,
                 task_role="screenplay",
                 max_retries=1,
             )
@@ -1455,87 +1414,73 @@ class StudioPipeline:
 
         parsed = self._parse_json_safely(audit_raw) if audit_raw else {}
 
-        # Fallback heuristic evaluation if LLM didn't return valid scores
         subscores = parsed.get("subscores") or {}
         overall_score = float(parsed.get("overall_score") or 0.0)
 
+        # Fallback to deterministic heuristic auditor if LLM didn't return valid scores
         if not subscores or overall_score == 0.0:
-            # Deterministic heuristic analysis
-            c_score = 9.0
-            f_score = 9.0
-            p_score = 9.0
-            s_score = 9.0
-            v_score = 9.0
-            issues = []
-
-            for i, s in enumerate(scenes):
-                conn = str(s.get("causal_connector", "")).upper()
-                if "AND THEN" in conn or (i > 0 and not any(k in conn for k in ("BUT", "THEREFORE", "CONSEQUENCE", "RESULT"))):
-                    c_score = max(5.0, c_score - 1.5)
-                    issues.append(f"Scene {i+1} lacks an explicit 'THEREFORE' or 'BUT' causal connector.")
-
-                # Check 5s feasibility (heuristic: overly long text with multiple distinct conjunctions)
-                scen_text = s.get("scenario", "")
-                if scen_text.count(" and ") >= 3 or scen_text.count(" then ") >= 2:
-                    f_score = max(6.0, f_score - 1.0)
-                    issues.append(f"Scene {i+1} scenario contains multiple actions that may exceed the 5-second window.")
-
-                # Check narration word budget and CEFR B1 Plain English readability
-                from narration_readability import check_b1_readability, simplify_to_b1_rule_based, pick_sync_trigger_word
-                proper_set = {c.get("name", "") for c in characters}
-                b1_audit = check_b1_readability(s.get("narration_text", ""), proper_nouns=proper_set)
-                if not b1_audit["passed"]:
-                    first_issue = b1_audit.get("issues", ["complex vocabulary"])[0]
-                    issues.append(f"Scene {i+1} narration: {first_issue}")
-                    s["narration_text"] = simplify_to_b1_rule_based(s.get("narration_text", ""), max_words=10)
-                    s["sync_trigger_word"] = pick_sync_trigger_word(s["narration_text"])
-                else:
-                    narr_words = re.findall(r"\w+", str(s.get("narration_text", "")))
-                    if len(narr_words) > 11:
-                        f_score = max(6.0, f_score - 1.0)
-                        issues.append(f"Scene {i+1} narration exceeds 10 words for a 5s shot.")
-                        s["narration_text"] = enforce_narration_word_budget(s.get("narration_text", ""), scen_text, max_words=10)
-
-                # Check visual delta
-                p1 = s.get("qwen_scene_prompt", "")
-                p2 = s.get("qwen_end_scene_prompt", "")
-                if p1 and p2 and p1.strip().lower() == p2.strip().lower():
-                    v_score = 4.0
-                    issues.append(f"Scene {i+1} Start Frame and End Frame prompts are identical (causes frozen video).")
-
-            overall_score = round((c_score + f_score + p_score + s_score + v_score) / 5.0, 1)
-            subscores = {
-                "causality": c_score,
-                "feasibility_5s": f_score,
-                "prop_permanence": p_score,
-                "spatial_continuity": s_score,
-                "visual_delta": v_score,
-            }
-            needs_repair = overall_score < 8.0 or any(v < 7.0 for v in subscores.values())
-            critique = "; ".join(issues) if issues else "Storyboard conforms to causal narrative standards."
+            h_res = audit_screenplay_heuristics(story_data, genre=eff_genre)
+            overall_score = h_res["overall_score"]
+            subscores = h_res["subscores"]
+            issues = h_res["issues"]
+            critique = h_res["critique"]
+            needs_repair = not h_res["passed"]
         else:
             overall_score = round(float(overall_score), 1)
             needs_repair = bool(parsed.get("needs_repair", overall_score < 8.0))
             critique = str(parsed.get("critique", ""))
-            issues = [critique] if critique else []
+            issues = parsed.get("issues") or ([critique] if critique else [])
 
         repaired = False
         repaired_scenes = parsed.get("repaired_scenes")
-        if needs_repair and isinstance(repaired_scenes, list) and len(repaired_scenes) == len(scenes):
+
+        # ── REPAIR LOOP (Target score >= 8.0; Hard stop if < 6.0) ─────────────
+        if needs_repair:
             original_story = json.loads(json.dumps(story_data))
-            for i, rep in enumerate(repaired_scenes):
-                if isinstance(rep, dict):
-                    # Retain durations and identifiers while updating narrative content
-                    for key in (
-                        "title", "narrative_beat", "causal_connector", "narration_text",
-                        "narration_voice_style", "sync_trigger_word", "state_ledger",
-                        "scenario", "qwen_scene_prompt", "qwen_end_scene_prompt",
-                        "wan_motion_prompt", "camera_movement",
-                    ):
-                        if rep.get(key):
-                            scenes[i][key] = rep[key]
+            if isinstance(repaired_scenes, list) and len(repaired_scenes) == len(scenes):
+                for i, rep in enumerate(repaired_scenes):
+                    if isinstance(rep, dict):
+                        for key in (
+                            "title", "narrative_beat", "causal_connector", "narration_text",
+                            "narration_voice_style", "sync_trigger_word", "state_ledger",
+                            "scenario", "qwen_scene_prompt", "qwen_end_scene_prompt",
+                            "wan_motion_prompt", "camera_movement",
+                        ):
+                            if rep.get(key):
+                                scenes[i][key] = rep[key]
+                repaired = True
+            else:
+                # Deterministic rule-based repair: sanitize prompts, enforce tone poses, simplify B1
+                for i, s in enumerate(scenes):
+                    # 1. Sanitize banned words
+                    s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre)
+                    s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", ""), genre=eff_genre)
+                    s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre)
+                    # 2. Tone-aware high-delta ending frame
+                    s["qwen_end_scene_prompt"] = ensure_high_delta_end_prompt(
+                        start_prompt=s.get("qwen_scene_prompt", ""),
+                        end_prompt=s.get("qwen_end_scene_prompt", ""),
+                        scenario=s.get("scenario", ""),
+                        motion=s.get("wan_motion_prompt", ""),
+                        genre=eff_genre,
+                    )
+                    # 3. Simplify narration to B1 Plain English
+                    s["narration_text"] = simplify_to_b1_rule_based(s.get("narration_text", ""), max_words=10)
+                    s["sync_trigger_word"] = pick_sync_trigger_word(s["narration_text"])
+                    # 4. Enforce causal connector
+                    conn = str(s.get("causal_connector", "")).upper()
+                    if i > 0 and ("AND THEN" in conn or not any(k in conn for k in ("BUT", "THEREFORE", "RESULT", "SO"))):
+                        s["causal_connector"] = "THEREFORE"
+                repaired = True
+
             story_data["scenes"] = scenes
-            repaired = True
+
+            # Re-evaluate repaired story with deterministic auditor
+            h_after = audit_screenplay_heuristics(story_data, genre=eff_genre)
+            overall_score = max(overall_score, h_after["overall_score"])
+            subscores = h_after["subscores"]
+            issues = h_after["issues"]
+            critique = h_after["critique"]
 
             # Record DPO preference pair into memory bank
             try:
@@ -1549,14 +1494,20 @@ class StudioPipeline:
             except Exception as e:
                 print(f"[StudioPipeline] Failed to record DPO pair: {e}")
 
+        passed = overall_score >= 7.0 and not any(v < 5.0 for v in subscores.values())
+
         audit_result = {
-            "passed": overall_score >= 8.0,
+            "passed": passed,
             "overall_score": overall_score,
             "subscores": subscores,
             "critique": critique,
             "issues": issues,
             "repaired": repaired,
         }
+        story_data["logic_audit"] = dict(audit_result)
+        result_with_story = dict(audit_result)
+        result_with_story["story"] = story_data
+        return result_with_story
         # Decouple back-reference to prevent infinite recursion
         story_data["logic_audit"] = dict(audit_result)
         result_with_story = dict(audit_result)
@@ -1616,11 +1567,15 @@ class StudioPipeline:
             narration_text = enforce_narration_word_budget(
                 scene_entry.get("narration_text", ""),
                 scenario=scene_entry.get("scenario") or scene_entry.get("qwen_scene_prompt", ""),
-                max_words=12,
+                max_words=11,
             )
             scene_entry["narration_text"] = narration_text
 
-            trigger_word = extract_sync_trigger_word(
+            # Extract Narrator Performance Script (prosody emotion, speed, emphasis verb)
+            perf = scene_entry.get("performance_script") or {}
+            voice_style = perf.get("emotion") or scene_entry.get("narration_voice_style", "cinematic_warm")
+            speed_override = perf.get("speed")
+            trigger_word = perf.get("emphasis_word") or extract_sync_trigger_word(
                 narration_text,
                 scenario=scene_entry.get("scenario", ""),
                 explicit_trigger=scene_entry.get("sync_trigger_word"),
@@ -1628,12 +1583,16 @@ class StudioPipeline:
             scene_entry["sync_trigger_word"] = trigger_word
             scene_entry["narrator_voice_preset"] = voice_preset
 
+            target_slot_sec = float(scene_entry.get("duration_seconds") or MAX_CLIP_SECONDS)
             wav_path = str(self.audio_dir / f"scene_{scene_num}_{title}_narration.wav")
             tts_res = tts.synthesize_scene_narration(
                 text=narration_text,
                 output_wav_path=wav_path,
                 voice_preset=voice_preset,
-                voice_style=scene_entry.get("narration_voice_style", "cinematic_warm"),
+                voice_style=voice_style,
+                speed_override=speed_override,
+                sync_trigger_word=trigger_word,
+                target_duration_sec=target_slot_sec,
             )
 
             target_slot_sec = float(scene_entry.get("duration_seconds") or MAX_CLIP_SECONDS)
@@ -3564,6 +3523,16 @@ class StudioPipeline:
             story_data = audit_res.get("story", story_data)
             if telemetry_collector:
                 telemetry_collector.end_stage("1a_story_doctor_audit")
+
+            # Hard Quality Gate: abort before any GPU allocation if screenplay fails minimum viable threshold (< 6.0)
+            if not audit_res.get("passed", True) and audit_res.get("overall_score", 10.0) < 6.0:
+                score = audit_res.get("overall_score", 0.0)
+                issues = "; ".join(audit_res.get("issues", []))
+                raise ValueError(
+                    f"Story Doctor Quality Gate Abort: Screenplay scored {score}/10.0 (< 6.0 threshold). "
+                    f"Issues: {issues}. "
+                    "Aborting before GPU activation to protect compute budget."
+                )
 
         story_data["z_image_seed"] = seed_z
         story_data["qwen_seed"] = seed_qwen
