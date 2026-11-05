@@ -51,6 +51,7 @@ class OmniFlowConfig:
     auto_qa_retry: bool = True
     manage_gpu_phases: bool = True
     collect_telemetry: bool = True
+    language_level: str = "B1"
 
 
 def calculate_omniflow_scenes(duration: float) -> int:

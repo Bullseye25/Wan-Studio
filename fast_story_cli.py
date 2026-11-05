@@ -225,6 +225,13 @@ def run_fast_story_production(
     kb = DirectorKnowledgeBase()
     past_directives = kb.retrieve_relevant_directives(premise, top_k=3)
 
+    from modal_budget import verify_modal_container_budget, ModalBudgetController
+    try:
+        _, total_containers, container_map = verify_modal_container_budget(hard_cap=8)
+    except Exception as b_err:
+        total_containers, container_map = 8, {"wan": 4, "qwen": 2, "z_image": 1, "narrator": 1}
+    cost_info = ModalBudgetController.estimate_production_cost(num_scenes=scenes_count, detected_chars=detected_chars)
+
     print("=" * 86)
     print(" 🎬 WAN 2.2 FAST ANIMATION STUDIO · 30-SECOND PRODUCTION CLI ".center(86, "="))
     print("=" * 86)
@@ -233,6 +240,8 @@ def run_fast_story_production(
     print(f"👥 Estimated Cast   : {detected_chars} character(s)")
     print(f"🌐 AI Director      : {provider.upper()} ({model or ('llama-3.3-70b-versatile' if provider == 'groq' else 'default')})")
     print(f"⚡ Video Backend    : Wan 2.2 FLF2V (8-Step Lightning on Modal Cloud GPU)")
+    print(f"🔒 Modal Cap / Budget: {total_containers}/8 Max Containers (Wan: {container_map.get('wan', 4)}, Qwen: {container_map.get('qwen', 2)}, Z-Img: {container_map.get('z_image', 1)}, Narrator: {container_map.get('narrator', 1)})")
+    print(f"🎙️ Narrator Level   : {narrator_voice} [CEFR B1 Plain English]")
     print(f"🎬 Transitions      : {transition_type.capitalize()} (Duration: {transition_duration:.1f}s)")
     if lora_path:
         print(f"🎯 Wan 2.2 LoRA     : {os.path.basename(lora_path)} (scale: {lora_scale})")
@@ -240,6 +249,7 @@ def run_fast_story_production(
         print(f"🧠 Learned Directives: {len(past_directives)} past rules loaded from memory to avoid repeating mistakes")
         for idx, d in enumerate(past_directives, 1):
             print(f"    {idx}. [{d.get('category')}]: {d.get('directive_to_enforce')[:65]}...")
+    print(f"💰 Estimated Cost   : ~${cost_info['estimated_cost_usd']:.2f} USD ({cost_info['total_gpu_seconds']:.0f}s GPU compute)")
     print(f"⏳ Estimated Time   : ~{format_time(eta_sec)} ({eta_sec:.0f} seconds)")
     print("=" * 86 + "\n")
 
@@ -376,6 +386,7 @@ Examples:
     parser.add_argument("--voice", default="af_heart", help="Voiceover narrator preset ('af_heart' Warm Storyteller, 'am_adam' Charming Male, 'af_bella' Anime, 'am_fenrir' Cinema, 'bf_emma' Fable)")
     parser.add_argument("--fast", action="store_true", default=True, help="Enable Fast Lightning mode (8-step DiT + Groq LPU)")
     parser.add_argument("--story-folder", "--story-name", default=None, help="Dedicated subfolder inside outputs/ for this story (e.g. 'fox_story')")
+    parser.add_argument("--language-level", default="B1", choices=["A2", "B1", "B2", "C1"], help="Voiceover readability: 'B1' (Recommended: plain English, accessible, engaging), 'A2' (simpler), 'C1' (literary)")
 
     args = parser.parse_args()
 

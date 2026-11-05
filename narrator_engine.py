@@ -140,6 +140,11 @@ EMOTION_SPEED_MAP: Dict[str, float] = {
     "urgent_suspense": 1.04,
     "fast_combat": 1.10,
     "whispered_suspense": 0.92,
+    "tense_whisper": 0.90,
+    "urgent_rising": 1.06,
+    "epic_climax": 1.08,
+    "joyful_resolution": 0.98,
+    "warm_wonder": 0.96,
     "dramatic_gravity": 0.94,
     "warm_storyteller": 1.00,
     "triumphant_wonder": 0.97,
@@ -769,6 +774,7 @@ class AudioVisualSyncEngine:
         min_clip_sec: float = 2.25,
         max_clip_sec: float = MAX_CLIP_SECONDS,
         fps: int = WAN_FPS,
+        target_clip_sec: Optional[float] = None,
         audio_path: Optional[str] = None,
         wav_path: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -776,12 +782,16 @@ class AudioVisualSyncEngine:
         Ensures the narration audio fits inside Wan 2.2's 5.0s (81-frame) ceiling,
         quantizes the target clip duration to an exact `4k + 1` frame count at 16 FPS,
         and pads the WAV file (when a path is given) with exact lead-in and tail silence.
-        Also accepts a numeric duration (float/int) for pure frame-grid quantization.
+        If `target_clip_sec` is specified (e.g. 5.0s full scene slot), audio is padded
+        to maintain the full target scene duration without truncating the movie.
         """
         target_arg = wav_path_or_duration if wav_path_or_duration is not None else (audio_path or wav_path)
         if isinstance(target_arg, (int, float)):
             raw_speech_sec = float(target_arg)
-            desired_sec = max(min_clip_sec, min(max_clip_sec, lead_in_sec + raw_speech_sec + tail_pause_sec))
+            if target_clip_sec is not None:
+                desired_sec = max(min_clip_sec, min(max_clip_sec, float(target_clip_sec)))
+            else:
+                desired_sec = max(min_clip_sec, min(max_clip_sec, lead_in_sec + raw_speech_sec + tail_pause_sec))
             raw_frames = int(round(desired_sec * int(fps)))
             k = round(raw_frames / 4)
             k = max((WAN_MIN_FRAMES - 1) // 4, min((WAN_MAX_FRAMES - 1) // 4, k))
@@ -828,7 +838,10 @@ class AudioVisualSyncEngine:
             })
 
         # Compute target duration and quantize to Wan 2.2's 4k+1 frame grid (16 FPS)
-        desired_sec = max(min_clip_sec, min(max_clip_sec, lead_in_sec + raw_speech_sec + tail_pause_sec))
+        if target_clip_sec is not None:
+            desired_sec = max(min_clip_sec, min(max_clip_sec, float(target_clip_sec)))
+        else:
+            desired_sec = max(min_clip_sec, min(max_clip_sec, lead_in_sec + raw_speech_sec + tail_pause_sec))
         num_frames = frames_for_duration(desired_sec)
         exact_clip_sec = round(num_frames / float(WAN_FPS), 4)
 

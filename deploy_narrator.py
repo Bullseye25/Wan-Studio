@@ -54,7 +54,7 @@ narrator_image = (
     image=narrator_image,
     timeout=300,
     min_containers=0,
-    max_containers=3,
+    max_containers=1,
     scaledown_window=45,
 )
 class NeuralNarratorModel:

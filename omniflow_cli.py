@@ -147,6 +147,13 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Dedicated subfolder inside outputs/ for this story (e.g. 'fox_story')",
     )
+    parser.add_argument(
+        "--language-level",
+        type=str,
+        default="B1",
+        choices=["A2", "B1", "B2", "C1"],
+        help="Voiceover storytelling readability: 'B1' (Recommended: plain English, accessible, engaging), 'A2' (simpler for children), 'C1' (literary)",
+    )
     return parser.parse_args()
 
 
@@ -185,7 +192,15 @@ def run_cli() -> None:
         provider=args.provider,
         model=args.model,
         story_folder_name=args.story_folder,
+        language_level=args.language_level,
     )
+
+    from modal_budget import verify_modal_container_budget, ModalBudgetController
+    try:
+        _, total_containers, container_map = verify_modal_container_budget(hard_cap=8)
+    except Exception as b_err:
+        print(f"⚠️ Modal Budget Warning: {b_err}")
+        total_containers, container_map = 8, {"wan": 4, "qwen": 2, "z_image": 1, "narrator": 1}
 
     engine = OmniFlowEngine()
     total_eta, breakdown = engine.calculate_eta(config)
@@ -193,6 +208,7 @@ def run_cli() -> None:
 
     num_scenes = breakdown["num_scenes"]
     per_scene_dur = config.target_duration / max(1, num_scenes)
+    cost_info = ModalBudgetController.estimate_production_cost(num_scenes=num_scenes)
 
     print("\n" + "=" * 88)
     print(" 🎬 OMNIFLOW-30 PRODUCTION MANIFEST ".center(88, "="))
@@ -202,8 +218,9 @@ def run_cli() -> None:
     print(f"📱 Aspect Ratio      : {config.aspect_ratio}")
     print(f"🎨 Visual Style      : {config.art_style[:70]}...")
     print(f"⚡ Cloud Execution   : {'Parallel Modal Swarm (Concurrent A100s)' if config.parallel_swarm else 'Sequential'}")
+    print(f"🔒 Modal Cap / Budget: {total_containers}/8 Max Containers (Wan: {container_map.get('wan', 4)}, Qwen: {container_map.get('qwen', 2)}, Z-Img: {container_map.get('z_image', 1)}, Narrator: {container_map.get('narrator', 1)})")
     print(f"🔬 Latent Refinement : {'In-Flight MILIS Active (t=0.5)' if config.enable_midpoint_refine else 'Standard'}")
-    print(f"🎙️ Narration Engine  : {config.narrator_voice if config.enable_narrator else 'Disabled'}")
+    print(f"🎙️ Narration Engine  : {config.narrator_voice if config.enable_narrator else 'Disabled'} [CEFR {config.language_level}]")
     print(f"🎬 Transitions       : {config.transition_type.capitalize()} (Duration: {config.transition_duration:.1f}s)")
 
     if past_rules:
@@ -211,7 +228,8 @@ def run_cli() -> None:
         for idx, r in enumerate(past_rules, 1):
             print(f"   {idx}. [{r.get('category')}]: {r.get('directive_to_enforce')[:68]}...")
 
-    print(f"\n⏳ Estimated Production Time: ~{format_time(total_eta)} ({total_eta:.0f} seconds)")
+    print(f"\n💰 Estimated Cloud Cost: ~${cost_info['estimated_cost_usd']:.2f} USD ({cost_info['total_gpu_seconds']:.0f}s total GPU compute)")
+    print(f"⏳ Estimated Production Time: ~{format_time(total_eta)} ({total_eta:.0f} seconds)")
     print("=" * 88 + "\n")
 
     tracker = TerminalProgressTracker(total_eta_seconds=total_eta)

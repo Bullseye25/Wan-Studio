@@ -1055,11 +1055,19 @@ class StudioPipeline:
             "must stay in character hands across cuts unless explicitly shown being dropped, stowed, or shattered.\n"
             "4. 180-DEGREE SCREEN DIRECTION: Maintain consistent spatial eyelines and screen direction (e.g. hero moving screen-left to screen-right) "
             "across cuts so characters do not disorientingly flip orientation.\n"
-            "5. HIGH POSE DELTA: Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. If start and end poses are too similar, the video will freeze! "
-            "The End Frame (t=5.0s) MUST have a visibly transformed body posture, changed limbs, and clear follow-through.\n"
-            "6. SYNCHRONIZED VOICEOVER NARRATION (6 TO 11 WORDS MAX PER SCENE): Every scene must include a spoken 'narration_text' (strictly 6 to 11 words "
-            "so it is spoken cleanly in 2.2s–3.8s inside the 5.0s shot), a 'narration_voice_style' (e.g. 'warm_wonder', 'tense_whisper', 'urgent_rising', "
-            "'epic_climax', 'joyful_resolution'), and a single 'sync_trigger_word' (the exact action verb in narration_text where the visual climax occurs).\n\n"
+            "5. CONTROLLED POSE DELTA (DIVERGENCE BUDGET 30-70): Wan 2.2 FLF2V interpolates between Frame 0 and Frame 80. "
+            "The End Frame (t=5.0s) MUST have a visibly changed physical posture and gesture, but keep the SAME camera angle, "
+            "environmental perspective, and character spatial zones. NEVER do extreme jumps (like standing straight to lying on floor) "
+            "that break temporal coherence or trigger Wan cross-fade warping.\n"
+            "6. SYNCHRONIZED CEFR B1 PLAIN-ENGLISH NARRATION (5 TO 10 WORDS MAX PER SCENE): Every scene must include a spoken "
+            "'narration_text' in simple, clear, engaging B1 English. Use common everyday words (strictly NO purple prose or obscure words "
+            "like 'eerily', 'emerges', 'horrific', 'manic', 'residue', 'loophole'). Use active voice with clear subjects (e.g. 'Batman finds "
+            "a strange purple mark.' instead of 'A purple stain points to an impossible source.'). Lines must connect like a natural story. "
+            "Include 'narration_voice_style' ('warm_wonder', 'tense_whisper', 'urgent_rising', 'epic_climax', 'joyful_resolution') "
+            "and a single 'sync_trigger_word' (the primary action verb where visual climax occurs).\n"
+            "7. STRICT CHARACTER UNIQUENESS (NO DUPLICATES/CLONES/GHOSTS): Each character appears at most ONCE per scene. "
+            "Never create clones, twins, ghosts, or double-exposures. In two-character shots, place one character on screen-left and "
+            "one on screen-right.\n\n"
             f"NARRATIVE BEAT STRUCTURE TO FOLLOW:\n{beat_guide_text}\n\n"
             + (f"{learned_prompt}\n\n" if learned_prompt else "")
             + (f"{few_shot_prompt}\n\n" if few_shot_prompt else "")
@@ -1068,10 +1076,17 @@ class StudioPipeline:
             '  "title": "Short Film Title",\n'
             '  "art_style": "Visual style description",\n'
             '  "theme": "Moral or thematic premise",\n'
+            '  "world_bible": {\n'
+            '    "palette": ["#Hex1", "#Hex2", "#Hex3", "#Hex4"],\n'
+            '    "time_of_day": "e.g. Rainy midnight (stays consistent across cuts unless explicit time jump)",\n'
+            '    "weather": "e.g. Heavy downpour (stays consistent across cuts)",\n'
+            '    "lighting_style": "e.g. Dark noir with neon rim light and deep volumetric shadows",\n'
+            '    "art_style_invariants": "Strict visual tokens locked across all scenes (e.g. 2D vibrant cartoon, Studio Ghibli watercolor, hand-painted)"\n'
+            '  },\n'
             '  "color_and_lighting_script": {\n'
-            '    "palette": "Color palette defining the atmosphere (e.g. Warm amber golds contrasting deep twilight teals)",\n'
+            '    "palette": "Color palette defining the atmosphere",\n'
             '    "lighting_progression": "Directional lighting and mood progression across the scenes",\n'
-            '    "emotional_tone": "The core emotional mood (e.g. Heart-touching, hopeful, intimate)"\n'
+            '    "emotional_tone": "The core emotional mood"\n'
             '  },\n'
             '  "characters": [\n'
             "    {\n"
@@ -1082,8 +1097,7 @@ class StudioPipeline:
             '      "hair": "Hair/fur style, color, texture, length",\n'
             '      "clothing": "Complete outfit, fabric colors, style, shoes",\n'
             '      "signature_details": "Unique identifiable items, props, or weapons held",\n'
-            '      "z_image_prompt": "Ultra-detailed full-body character sheet prompt for Z-Image Turbo, front view, '
-            'clean neutral studio background, in the target art style"\n'
+            '      "z_image_prompt": "Ultra-detailed full-body character sheet prompt for Z-Image Turbo, front view, clean neutral studio background, in the target art style"\n'
             "    }\n"
             "  ],\n"
             '  "scenes": [\n'
@@ -1094,9 +1108,12 @@ class StudioPipeline:
             '      "narrative_beat": "e.g. Hook & Status Quo / Inciting Obstacle / Climax & Payoff",\n'
             '      "causal_connector": "SETUP / BUT ... / THEREFORE ...",\n'
             '      "recommended_transition": "cut / match_cut / crossfade / fade_black / whip_pan",\n'
-            '      "narration_text": "Spoken voiceover line for this 5s shot (strictly 6 to 11 words)",\n'
+            '      "narration_text": "Spoken voiceover line in CEFR B1 English (5 to 10 words)",\n'
             '      "narration_voice_style": "warm_wonder / tense_whisper / urgent_rising / epic_climax / joyful_resolution",\n'
             '      "sync_trigger_word": "exact action verb in narration_text that triggers the visual climax",\n'
+            '      "character_placements": [\n'
+            '        {"character_id": "char_1", "screen_side": "left", "facing": "right", "pose": "standing firm"}\n'
+            '      ],\n'
             '      "state_ledger": {\n'
             '        "entry_state": "Exact character body posture, location, and hand items at t=0.0s",\n'
             '        "active_props": ["list of held weapons or items"],\n'
@@ -1463,12 +1480,21 @@ class StudioPipeline:
                     f_score = max(6.0, f_score - 1.0)
                     issues.append(f"Scene {i+1} scenario contains multiple actions that may exceed the 5-second window.")
 
-                # Check narration word budget
-                narr_words = re.findall(r"\w+", str(s.get("narration_text", "")))
-                if len(narr_words) > 13:
-                    f_score = max(6.0, f_score - 1.0)
-                    issues.append(f"Scene {i+1} narration exceeds the 12-word spoken budget for a 5s shot.")
-                    s["narration_text"] = enforce_narration_word_budget(s.get("narration_text", ""), scen_text, max_words=12)
+                # Check narration word budget and CEFR B1 Plain English readability
+                from narration_readability import check_b1_readability, simplify_to_b1_rule_based, pick_sync_trigger_word
+                proper_set = {c.get("name", "") for c in characters}
+                b1_audit = check_b1_readability(s.get("narration_text", ""), proper_nouns=proper_set)
+                if not b1_audit["passed"]:
+                    first_issue = b1_audit.get("issues", ["complex vocabulary"])[0]
+                    issues.append(f"Scene {i+1} narration: {first_issue}")
+                    s["narration_text"] = simplify_to_b1_rule_based(s.get("narration_text", ""), max_words=10)
+                    s["sync_trigger_word"] = pick_sync_trigger_word(s["narration_text"])
+                else:
+                    narr_words = re.findall(r"\w+", str(s.get("narration_text", "")))
+                    if len(narr_words) > 11:
+                        f_score = max(6.0, f_score - 1.0)
+                        issues.append(f"Scene {i+1} narration exceeds 10 words for a 5s shot.")
+                        s["narration_text"] = enforce_narration_word_budget(s.get("narration_text", ""), scen_text, max_words=10)
 
                 # Check visual delta
                 p1 = s.get("qwen_scene_prompt", "")
@@ -1610,11 +1636,13 @@ class StudioPipeline:
                 voice_style=scene_entry.get("narration_voice_style", "cinematic_warm"),
             )
 
+            target_slot_sec = float(scene_entry.get("duration_seconds") or MAX_CLIP_SECONDS)
             quant_info = AudioVisualSyncEngine.quantize_audio_to_wan_frames(
                 audio_path=tts_res["audio_path"],
                 word_timestamps=tts_res["word_timestamps"],
                 lead_in_sec=0.25,
                 tail_pause_sec=0.35,
+                target_clip_sec=target_slot_sec,
             )
 
             if quantize_durations:
@@ -1941,36 +1969,46 @@ class StudioPipeline:
             )
             scene_entry["qwen_end_scene_prompt"] = end_raw
 
-            # Anchor on Start Frame (`keyframe_pil`) as image 1 + up to 2 character portraits as image 2/3
-            char_refs_for_end = [rc["portrait_pil"] for rc in ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)]]
-            char_ref_mapping = "; ".join(
-                f"{rc.get('name', 'character')} matches character sheet in image {i+2}"
-                for i, rc in enumerate(ref_chars[: max(0, QWEN_MAX_INPUT_IMAGES - 1)])
+            # Anchor on Start Frame (`keyframe_pil`) as base_image.
+            # CRITICAL ANTI-DUPLICATION / ANTI-GHOSTING LAW:
+            # We do NOT pass full-body reference portraits as additional image inputs when base_image
+            # is already the Start Frame. The Start Frame ALREADY contains the characters, face details,
+            # clothing, lighting, and palette. Passing external portraits causes Qwen to hallucinate
+            # duplicate copies / cloned figures into the frame!
+            char_names_str = " and ".join(rc.get("name", "character") for rc in ref_chars) or "the character"
+            anti_dup_guard = (
+                f"CRITICAL: Exactly ONE instance of {char_names_str} in this scene. "
+                "Do NOT draw duplicate characters, cloned persons, twins, ghosts, double exposures, or semi-transparent figures. "
+                "Keep existing characters in their exact screen locations (left/right) and transform their body posture and gesture in place."
             )
+            end_neg_prompt = (
+                DEFAULT_NEGATIVE_PROMPT
+                + ", duplicate character, cloned person, multiple figures, ghost, double exposure, semi-transparent body, two heads, extra limbs, merged bodies"
+            )
+
             if "image 1" in end_raw.lower():
                 end_refined_prompt = (
-                    f"{end_raw}. "
-                    + (f"{char_ref_mapping}. " if char_ref_mapping else "")
-                    + "Full-frame cinematic composition, identical background and character identity, 4k"
+                    f"{end_raw}. {anti_dup_guard} "
+                    "Full-frame cinematic composition, identical background and character identity, 4k"
                 )
             else:
                 end_refined_prompt = (
                     f"image 1 is the starting frame of this 5-second continuous animation. "
                     f"Transform the character poses from image 1 into their dynamic ending pose at t=5.0s: {end_raw}. "
-                    + (f"{char_ref_mapping}. " if char_ref_mapping else "")
-                    + "Keep the exact same background environment, trees, walls, lighting, and character outfits from image 1, "
+                    f"{anti_dup_guard} "
+                    "Keep the exact same background environment, trees, walls, lighting, and character outfits from image 1, "
                     f"but visibly advance their physical body stance and action into this distinct final pose. 4k"
                 )
 
-            print(f"[StudioPipeline] Generating Qwen END keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_end_seed})...")
+            print(f"[StudioPipeline] Generating Qwen END keyframe for Scene {scene_num} ({qwen_w}x{qwen_h}, seed={use_end_seed}, in-place pose transform)...")
             end_results = qwen_image_edit_remote(
                 base_image=keyframe_pil,
-                ref_images=char_refs_for_end,
+                ref_images=[],  # In-place pose modification; zero duplicate character injection!
                 prompt=end_refined_prompt,
-                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                negative_prompt=end_neg_prompt,
                 seed=use_end_seed,
                 steps=20,
-                true_cfg_scale=5.5,
+                true_cfg_scale=3.8,  # Calibrated for in-place edit instead of hallucinatory 5.5
                 guidance_scale=1.0,
                 num_images=1,
                 custom_width=qwen_w,
@@ -1981,35 +2019,31 @@ class StudioPipeline:
                 last_keyframe_pil = match_color_histogram_lab(last_keyframe_pil, keyframe_pil, strength=0.75)
                 last_keyframe_pil = stabilize_end_frame_background(keyframe_pil, last_keyframe_pil, border_ratio=0.14)
 
-            # ── Pose Delta Gatekeeper (Self-Correction for Stagnant Frames) ───
+            # ── Pose Delta Gatekeeper (FLF2V Divergence Budget: 20.0 - 80.0) ───
             pose_delta = measure_frame_pose_delta(keyframe_pil, last_keyframe_pil)
-            print(f"[StudioPipeline] Scene {scene_num} Keyframe Pose Delta: {pose_delta:.2f} (Threshold: 18.0)")
+            print(f"[StudioPipeline] Scene {scene_num} Keyframe Pose Delta: {pose_delta:.2f} (Budget: 20.0 - 80.0)")
 
             if pose_delta < 18.0 and keyframe_pil is not None:
                 print(
                     f"[StudioPipeline] [PoseDeltaGate] Warning: Scene {scene_num} End frame too similar to Start frame "
-                    f"(delta={pose_delta:.2f} < 18.0). Triggering High-Delta Pose Replacement..."
+                    f"(delta={pose_delta:.2f} < 18.0). Triggering controlled action progression..."
                 )
                 retry_end_seed = (use_end_seed + 54321) % (2**31 - 1)
                 boosted_delta_prompt = (
-                    f"image 1 is the starting frame. For this ending frame at t=5.0s, completely replace the characters' body stances: "
-                    f"they must NOT be in the same posture as image 1. "
-                    f"They have completed {scene_prompt} and are now in a drastic, contrasting final pose: "
-                    f"dropped low into a defensive crouch on one knee, or recoiling with arms shielding head, or turned 90 degrees pointing in alarm. "
-                    f"Limb and head positions must visibly differ from image 1. "
-                    f"Keep background room, rock geometry, lighting, and clothing from image 1 identical. 4k"
+                    f"image 1 is the starting frame. Advance the action smoothly: characters have completed {scene_prompt} "
+                    f"and have shifted into a distinct finishing posture with changed limb positions, head angle, and gesture. "
+                    f"{anti_dup_guard} "
+                    f"Keep the exact same room geometry, lighting, and clothing from image 1 identical. 4k"
                 )
-                if char_ref_mapping:
-                    boosted_delta_prompt += f" {char_ref_mapping}."
 
                 retry_results = qwen_image_edit_remote(
                     base_image=keyframe_pil,
-                    ref_images=char_refs_for_end,
+                    ref_images=[],
                     prompt=boosted_delta_prompt,
-                    negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                    negative_prompt=end_neg_prompt,
                     seed=retry_end_seed,
                     steps=20,
-                    true_cfg_scale=6.0,
+                    true_cfg_scale=4.2,
                     guidance_scale=1.0,
                     num_images=1,
                     custom_width=qwen_w,
@@ -2018,13 +2052,16 @@ class StudioPipeline:
                 retry_pil = Image.open(io.BytesIO(retry_results[0])).convert("RGB")
                 if color_match_end:
                     retry_pil = match_color_histogram_lab(retry_pil, keyframe_pil, strength=0.75)
-                    retry_pil = stabilize_end_frame_background(keyframe_pil, retry_pil, border_ratio=0.14)
-
-                retry_delta = measure_frame_pose_delta(keyframe_pil, retry_pil)
-                print(f"[StudioPipeline] Scene {scene_num} Retry Pose Delta: {retry_delta:.2f}")
                 last_keyframe_pil = retry_pil
-                use_end_seed = retry_end_seed
-                pose_delta = retry_delta
+                pose_delta = measure_frame_pose_delta(keyframe_pil, last_keyframe_pil)
+                print(f"[StudioPipeline] Scene {scene_num} Keyframe Pose Delta after controlled retry: {pose_delta:.2f}")
+
+            elif pose_delta > 80.0:
+                print(
+                    f"[StudioPipeline] [PoseDeltaGate] Scene {scene_num} End frame pose delta {pose_delta:.2f} > 80.0 "
+                    f"(exceeds FLF2V divergence budget). Routing to Guided I2V Mode to prevent cross-fade morphing."
+                )
+                scene_entry["force_guided_i2v"] = True
 
             flf2v_compat = evaluate_flf2v_compatibility(keyframe_pil, last_keyframe_pil)
 
@@ -2704,7 +2741,8 @@ class StudioPipeline:
         duration = float(_clamp(scene.get("duration_seconds", MAX_CLIP_SECONDS), MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, 3.5))
 
         lim = DIRECTOR_PARAM_LIMITS
-        intensity = int(round(_clamp(raw.get("motion_intensity"), *lim["motion_intensity"], 2)))
+        default_intensity = 4 if (scene.get("wan_motion_prompt") or scene.get("scenario")) else 3
+        intensity = int(round(_clamp(raw.get("motion_intensity"), *lim["motion_intensity"], default_intensity)))
         adaptive = compute_motion_adaptive_wan_params(intensity, duration)
 
         cfg = round(_clamp(raw.get("guidance_scale"), *lim["guidance_scale"], adaptive["guidance_scale"]), 2)
@@ -2712,7 +2750,7 @@ class StudioPipeline:
         steps = int(round(_clamp(raw.get("steps"), *lim["steps"], adaptive["steps"])))
         flow_shift = round(_clamp(raw.get("flow_shift"), *lim["flow_shift"], adaptive["flow_shift"]), 2)
 
-        camera = _trim(raw.get("camera_movement") or scene.get("camera_movement") or "static tripod shot", 80)
+        camera = _trim(raw.get("camera_movement") or scene.get("camera_movement") or "dynamic cinematic tracking shot", 80)
         shot_type = _trim(raw.get("shot_type") or "medium shot", 60)
         action = _trim(raw.get("subject_action") or scene.get("scenario") or "", 220)
 

@@ -116,7 +116,7 @@ DEFAULT_NEGATIVE_PROMPT = (
     secrets=secrets,
     timeout=1800,
     min_containers=0,
-    max_containers=1,
+    max_containers=2,
     scaledown_window=15,
 )
 class QwenImageEditModel:
