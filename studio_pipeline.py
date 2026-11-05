@@ -729,9 +729,23 @@ class StudioPipeline:
         output_base_dir: Optional[str] = None,
         base_dir: Optional[str] = None,
     ):
-        self.provider = str(provider or "groq").lower().strip()
-        prov_cfg = LLM_PROVIDERS.get(self.provider, LLM_PROVIDERS["groq"])
-        self.endpoint_url = endpoint_url or prov_cfg.get("endpoint") or DEFAULT_GROQ_ENDPOINT
+        # Smart provider auto-detection from API key prefix or explicit argument
+        eff_api_key = str(api_key or "").strip()
+        if eff_api_key.startswith("sk-or-"):
+            self.provider = "openrouter"
+        elif eff_api_key.startswith("gsk_"):
+            self.provider = "groq"
+        elif provider:
+            self.provider = str(provider).lower().strip()
+        elif os.environ.get("OPENROUTER_API_KEY"):
+            self.provider = "openrouter"
+        else:
+            self.provider = "groq"
+
+        prov_cfg = LLM_PROVIDERS.get(self.provider, LLM_PROVIDERS["openrouter" if self.provider == "openrouter" else "groq"])
+        self.endpoint_url = endpoint_url or prov_cfg.get("endpoint") or (
+            DEFAULT_OPENROUTER_ENDPOINT if self.provider == "openrouter" else DEFAULT_GROQ_ENDPOINT
+        )
 
         # Resolve api_key
         if api_key:
@@ -750,16 +764,19 @@ class StudioPipeline:
             elif self.provider == "local_ollama":
                 self.api_key = "local"
             else:
-                # Groq without explicit key -> fallback to Ollama Cloud preconfigured key
-                print(f"[StudioPipeline] Note: No {env_var} found in environment. Automatically switching to Ollama Cloud ({DEFAULT_OLLAMA_MODEL}).")
-                self.api_key = DEFAULT_OLLAMA_API_KEY
-                self.endpoint_url = DEFAULT_OLLAMA_ENDPOINT
-                self.provider = "ollama_cloud"
-                prov_cfg = LLM_PROVIDERS["ollama_cloud"]
-                if not model or "llama" in str(model).lower() or "deepseek" in str(model).lower():
-                    model = DEFAULT_OLLAMA_MODEL
+                if self.provider == "openrouter":
+                    self.api_key = DEFAULT_OPENROUTER_API_KEY
+                else:
+                    # Groq without explicit key -> fallback to Ollama Cloud preconfigured key
+                    print(f"[StudioPipeline] Note: No {env_var} found in environment. Automatically switching to Ollama Cloud ({DEFAULT_OLLAMA_MODEL}).")
+                    self.api_key = DEFAULT_OLLAMA_API_KEY
+                    self.endpoint_url = DEFAULT_OLLAMA_ENDPOINT
+                    self.provider = "ollama_cloud"
+                    prov_cfg = LLM_PROVIDERS["ollama_cloud"]
+                    if not model or "llama" in str(model).lower() or "deepseek" in str(model).lower():
+                        model = DEFAULT_OLLAMA_MODEL
 
-        self.model = model or prov_cfg.get("default_model") or DEFAULT_OLLAMA_MODEL
+        self.model = model or prov_cfg.get("default_model") or (DEFAULT_OPENROUTER_MODEL if self.provider == "openrouter" else DEFAULT_OLLAMA_MODEL)
 
         eff_base = base_dir or output_base_dir
         if eff_base:
@@ -1030,6 +1047,25 @@ class StudioPipeline:
                                 return resp_data["choices"][0]["message"]["content"]
                         except Exception as e_retry:
                             last_err = e_retry
+
+                # OpenRouter Resilient Fallback to alternative uncensored models (DeepSeek / Qwen 2.5)
+                if self.provider == "openrouter" and any(code in str(last_err) for code in ("429", "400", "404", "500", "503")):
+                    for fb_model in ("deepseek/deepseek-chat", "qwen/qwen-2.5-72b-instruct"):
+                        if fb_model != actual_model:
+                            try:
+                                fb_body = dict(req_body)
+                                fb_body["model"] = fb_model
+                                fb_req = urllib.request.Request(
+                                    target_endpoint,
+                                    headers=headers,
+                                    data=json.dumps(fb_body).encode("utf-8"),
+                                )
+                                with urllib.request.urlopen(fb_req, timeout=timeout) as fb_resp:
+                                    resp_data = json.loads(fb_resp.read().decode("utf-8"))
+                                    msg = resp_data["choices"][0]["message"]
+                                    return msg.get("content") or msg.get("reasoning") or ""
+                            except Exception:
+                                pass
 
                 # Resilient fallback: If all Groq keys are exhausted or error persists, fallback to Ollama Cloud
                 if self.provider == "groq" and any(code in str(last_err) for code in ("429", "400", "404")):
@@ -3834,6 +3870,19 @@ class StudioPipeline:
     @staticmethod
     def _parse_json_safely(raw_text: str) -> Dict[str, Any]:
         clean = (raw_text or "").strip()
+        # Check if the raw text is an LLM refusal
+        refusal_indicators = [
+            "i cannot fulfill", "i am unable to", "i can't fulfill",
+            "i cannot generate", "as an ai", "content policy", "violates our"
+        ]
+        if any(ind in clean.lower()[:300] for ind in refusal_indicators):
+            first_sentence = clean.split("\n")[0][:200]
+            raise ValueError(
+                f"AI Model Content Refusal: \"{first_sentence}\"\n\n"
+                f"Tip: The active LLM rejected this prompt due to content restrictions. "
+                f"Ensure OpenRouter is selected with 'nousresearch/hermes-4-405b' to generate unfiltered content without refusals."
+            )
+
         if "```json" in clean:
             clean = clean.split("```json", 1)[1].split("```", 1)[0]
         elif "```" in clean:
@@ -3852,7 +3901,7 @@ class StudioPipeline:
             try:
                 return json.loads(clean_fixed)
             except Exception:
-                raise ValueError(f"Could not parse valid JSON from Gemma response: {e}\nRaw: {(raw_text or '')[:300]}")
+                raise ValueError(f"Could not parse valid JSON from AI Director response: {e}\nRaw: {(raw_text or '')[:300]}")
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:

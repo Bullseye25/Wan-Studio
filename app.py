@@ -1321,8 +1321,9 @@ def studio_redo_single_clip(
 def studio_run_full(
     prompt, art_style, aspect_ratio, seed, num_scenes, duration, api_key, model,
     use_vision=True, qwen_seed=None, wan_seed=None, progress=gr.Progress(track_tqdm=True),
+    provider="openrouter", endpoint_url=None,
 ):
-    pipeline = StudioPipeline(api_key=api_key, model=model)
+    pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     z_seed = int(seed)
     q_seed = int(qwen_seed if qwen_seed is not None else seed)
     w_seed = int(wan_seed if wan_seed is not None else seed)
@@ -1374,8 +1375,10 @@ def studio_run_step1(
     progress=gr.Progress(track_tqdm=True),
     enable_narrator=True,
     narrator_voice=DEFAULT_NARRATOR_VOICE,
+    provider="openrouter",
+    endpoint_url=None,
 ):
-    pipeline = StudioPipeline(api_key=api_key, model=model)
+    pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     try:
         cb = _studio_progress(progress)
         story_data = pipeline.generate_story_and_characters(
@@ -1435,10 +1438,10 @@ def studio_synthesize_narration_ui(current_state, narrator_voice=DEFAULT_NARRATO
         return StudioPipeline.serializable(current_state), None, f"### ❌ Narrator Error\n`{e}`", current_state
 
 
-def studio_run_logic_audit(current_state, api_key, model):
+def studio_run_logic_audit(current_state, api_key, model, provider="openrouter", endpoint_url=None):
     if not current_state or "scenes" not in current_state:
         return StudioPipeline.serializable(current_state or {}), "### ⚠️ Please generate a story in Step 1 first.", current_state
-    pipeline = StudioPipeline(api_key=api_key, model=model)
+    pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     try:
         report = pipeline.audit_and_repair_story_logic(current_state, model_choice=model)
         sub = report.get("subscores", {})
@@ -1546,12 +1549,12 @@ def studio_run_step3(
         return [], f"### ❌ Step 3 Error\n`{e}`", current_state
 
 
-def studio_run_director(api_key, model, use_vision, current_state, progress=gr.Progress(track_tqdm=True)):
+def studio_run_director(api_key, model, use_vision, current_state, progress=gr.Progress(track_tqdm=True), provider="openrouter", endpoint_url=None):
     scenes = (current_state or {}).get("scenes", [])
     if not scenes or not all(s.get("keyframe_path") or s.get("keyframe_pil") for s in scenes):
         return StudioPipeline.serializable(current_state or {}), \
             "### ⚠️ Please run Step 3 (Scene Keyframes) first — the Director needs to see each keyframe.", current_state
-    pipeline = StudioPipeline(api_key=api_key, model=model)
+    pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     try:
         current_state["scenes"] = pipeline.direct_scene_animations(
             scenes=scenes,
@@ -3551,6 +3554,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     def _ui_step1(
         prompt, art_style, num_scenes, duration, api_key, model,
         z_seed, q_seed, w_seed, enable_narrator=True, narrator_voice=DEFAULT_NARRATOR_VOICE,
+        provider="openrouter", endpoint_url=None,
         progress=gr.Progress(track_tqdm=True),
     ):
         json_data, status_msg, state = studio_run_step1(
@@ -3558,6 +3562,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             progress=progress,
             enable_narrator=bool(enable_narrator),
             narrator_voice=narrator_voice,
+            provider=provider,
+            endpoint_url=endpoint_url,
         )
         char_opts = _character_choices(state)
         scene_opts = _scene_choices(state)
@@ -3598,6 +3604,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_total_duration, studio_ollama_key, studio_ollama_model,
             studio_seed, studio_qwen_seed, studio_wan_seed,
             studio_enable_narrator_chk, studio_narrator_voice_dropdown,
+            studio_llm_provider, studio_llm_endpoint,
         ],
         outputs=[
             studio_json_display, studio_status, studio_pipeline_state,
@@ -3620,7 +3627,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
 
     studio_audit_btn.click(
         fn=studio_run_logic_audit,
-        inputs=[studio_pipeline_state, studio_ollama_key, studio_ollama_model],
+        inputs=[studio_pipeline_state, studio_ollama_key, studio_ollama_model, studio_llm_provider, studio_llm_endpoint],
         outputs=[studio_json_display, studio_status, studio_pipeline_state],
     )
 
@@ -3929,8 +3936,8 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     )
 
     # Phase 4: Director, Generate All Video Clips, and Individual Clip Redo
-    def _ui_director(api_key, model, use_vision, current_state, selected_clip, w_seed, progress=gr.Progress(track_tqdm=True)):
-        json_out, status, state = studio_run_director(api_key, model, use_vision, current_state, progress=progress)
+    def _ui_director(api_key, model, use_vision, current_state, selected_clip, w_seed, provider="openrouter", endpoint_url=None, progress=gr.Progress(track_tqdm=True)):
+        json_out, status, state = studio_run_director(api_key, model, use_vision, current_state, progress=progress, provider=provider, endpoint_url=endpoint_url)
         v_mot, v_cam, v_wprompt, v_seed, v_vid = studio_load_clip_fields(selected_clip, state, default_seed=w_seed)
         return json_out, status, state, v_mot, v_cam, v_wprompt
 
@@ -3939,6 +3946,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         inputs=[
             studio_ollama_key, studio_ollama_model, studio_use_vision,
             studio_pipeline_state, studio_clip_selector, studio_wan_seed,
+            studio_llm_provider, studio_llm_endpoint,
         ],
         outputs=[
             studio_json_display, studio_status, studio_pipeline_state,
@@ -4060,6 +4068,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_seed, studio_num_scenes, studio_total_duration,
             studio_ollama_key, studio_ollama_model, studio_use_vision,
             studio_qwen_seed, studio_wan_seed,
+            studio_llm_provider, studio_llm_endpoint,
         ],
         outputs=[
             studio_final_video, studio_char_gallery, studio_scenes_gallery,
