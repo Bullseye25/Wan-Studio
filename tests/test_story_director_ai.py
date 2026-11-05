@@ -39,6 +39,11 @@ class TestStoryGenreDetection:
         art_style = "Dynamic cinematic 3D animation, Makoto Shinkai lighting"
         assert detect_story_genre(premise, art_style) == "adventure"
 
+    def test_detect_unfiltered_action_genre(self):
+        premise = "A cybernetic ninja ambushes a rogue agent with a fierce sword duel and shockwave clash"
+        art_style = "High-octane anime action, sparks and motion blur"
+        assert detect_story_genre(premise, art_style) == "unfiltered_action"
+
 
 class TestToneAwarePoseLibrary:
     """Verifies that kids stories never receive violent, combat, or defensive poses."""

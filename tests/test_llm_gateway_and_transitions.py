@@ -58,6 +58,29 @@ class TestLLMGateway(unittest.TestCase):
         self.assertEqual(p_cloud.provider, "ollama_cloud")
         self.assertTrue(len(p_cloud.api_key) > 10)
 
+        # 4. OpenRouter (Uncensored Action & Hermes 4 405B)
+        p_or = StudioPipeline(api_key="sk-or-test12345", provider="openrouter")
+        self.assertEqual(p_or.provider, "openrouter")
+        self.assertEqual(p_or.api_key, "sk-or-test12345")
+        self.assertIn("openrouter.ai", p_or.endpoint_url)
+
+    @patch("urllib.request.urlopen")
+    def test_openrouter_connection_success(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "pong", "role": "assistant"}}]
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        res = StudioPipeline.test_llm_connection(
+            provider="openrouter",
+            api_key="sk-or-mock",
+            model="nousresearch/hermes-4-405b",
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["provider"], "openrouter")
+        self.assertIn("nousresearch/hermes-4-405b", res["model"])
+
     @patch("urllib.request.urlopen")
     def test_llm_test_connection_success(self, mock_urlopen):
         mock_resp = MagicMock()

@@ -23,6 +23,9 @@ from studio_pipeline import (
     LLM_PROVIDERS,
     DEFAULT_GROQ_MODEL,
     DEFAULT_GROQ_ENDPOINT,
+    DEFAULT_OPENROUTER_API_KEY,
+    DEFAULT_OPENROUTER_MODEL,
+    DEFAULT_OPENROUTER_ENDPOINT,
     generate_three_studio_seeds,
     restore_extracted_video_frame,
 )
@@ -2491,26 +2494,27 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                         studio_llm_provider = gr.Dropdown(
                                             label="🌐 AI Director Provider",
                                             choices=[
+                                                ("🌐 OpenRouter (Uncensored Action & Hermes 4 405B)", "openrouter"),
                                                 ("⚡ GroqCloud (Ultra-Fast Free Tier — Recommended)", "groq"),
                                                 ("💻 Local Ollama (100% Free & Offline — localhost:11434)", "local_ollama"),
                                                 ("☁️ Ollama Cloud (Hosted Gemma / GPT-OSS)", "ollama_cloud"),
                                             ],
-                                            value="groq",
+                                            value="openrouter",
                                             scale=2,
                                         )
                                         studio_ollama_model = gr.Dropdown(
                                             label="🧠 Director LLM Model",
-                                            choices=[(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in LLM_PROVIDERS["groq"]["models"]],
-                                            value=DEFAULT_GROQ_MODEL,
+                                            choices=[(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in LLM_PROVIDERS["openrouter"]["models"]],
+                                            value=DEFAULT_OPENROUTER_MODEL,
                                             allow_custom_value=True,
                                             scale=3,
                                         )
                                     with gr.Row():
                                         studio_ollama_key = gr.Textbox(
-                                            label="API Key (Groq / Ollama Cloud)",
-                                            value="",
+                                            label="API Key (OpenRouter / Groq / Ollama Cloud)",
+                                            value=DEFAULT_OPENROUTER_API_KEY,
                                             type="password",
-                                            placeholder="gsk_... or Ollama Cloud key (Local Ollama does not require key)",
+                                            placeholder="sk-or-... for OpenRouter, gsk_... for Groq, or Ollama Cloud key",
                                             scale=3,
                                         )
                                         studio_llm_endpoint = gr.Textbox(
@@ -3949,8 +3953,16 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         models = cfg["models"]
         model_choices = [(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in models]
         def_model = cfg["default_model"]
-        default_key = DEFAULT_OLLAMA_API_KEY if prov_key == "ollama_cloud" else ""
-        placeholder_key = "No API key required (100% offline)" if prov_key == "local_ollama" else ("gsk_... for Groq" if prov_key == "groq" else "Enter Ollama Cloud API Key")
+        default_key = DEFAULT_OPENROUTER_API_KEY if prov_key == "openrouter" else (
+            DEFAULT_OLLAMA_API_KEY if prov_key == "ollama_cloud" else ""
+        )
+        placeholder_key = (
+            "sk-or-... for OpenRouter" if prov_key == "openrouter" else (
+                "No API key required (100% offline)" if prov_key == "local_ollama" else (
+                    "gsk_... for Groq" if prov_key == "groq" else "Enter Ollama Cloud API Key"
+                )
+            )
+        )
         return (
             gr.update(choices=model_choices, value=def_model),
             gr.update(value=default_key, placeholder=placeholder_key),

@@ -80,6 +80,11 @@ DEFAULT_OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")
 DEFAULT_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
 DEFAULT_OLLAMA_ENDPOINT = os.environ.get("OLLAMA_ENDPOINT", "https://ollama.com/v1/chat/completions")
 
+# OpenRouter Uncensored & Permissive Action Gateway
+DEFAULT_OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+DEFAULT_OPENROUTER_ENDPOINT = os.environ.get("OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions")
+DEFAULT_OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nousresearch/hermes-4-405b")
+
 # Multi-Key Pool for GroqCloud (3x throughput, automatic failover on 429)
 DEFAULT_GROQ_API_KEYS = []
 if os.environ.get("GROQ_API_KEYS"):
@@ -129,8 +134,23 @@ VERIFIED_OLLAMA_MODELS = [
     ("🤖 Auto-Routing (Smart Multi-Agent Workflow — Best Model per Task)", "auto"),
 ]
 
-# Multi-Provider LLM Gateway Configurations (GroqCloud Free Tier, Local Ollama, Ollama Cloud)
+# Multi-Provider LLM Gateway Configurations (OpenRouter, GroqCloud, Local Ollama, Ollama Cloud)
 LLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "openrouter": {
+        "name": "🌐 OpenRouter (Uncensored Action & Hermes 4 405B)",
+        "endpoint": DEFAULT_OPENROUTER_ENDPOINT,
+        "default_model": DEFAULT_OPENROUTER_MODEL,
+        "models": [
+            ("⚡ nousresearch/hermes-4-405b — Flagship Uncensored Screenwriter & Action Director (405B - Recommended)", "nousresearch/hermes-4-405b"),
+            ("🧠 deepseek/deepseek-chat — Ultra-Fast Reasoning & Cinematic Worldbuilder", "deepseek/deepseek-chat"),
+            ("⚔️ qwen/qwen-2.5-72b-instruct — High-Precision Fight Choreographer & Physics", "qwen/qwen-2.5-72b-instruct"),
+            ("👁️ qwen/qwen-2.5-vl-72b-instruct — Multimodal Vision Keyframe Director (72B)", "qwen/qwen-2.5-vl-72b-instruct"),
+            ("🚀 mistralai/mistral-nemo — Agile Gritty Dialogue & Rapid Action Beats (12B)", "mistralai/mistral-nemo"),
+            ("🆓 recursive/flint-v1.0:free — 100% Free Tier Fallback", "recursive/flint-v1.0:free"),
+            ("🤖 Auto-Routing (Smart Multi-Agent Workflow — Best Model per Task)", "auto"),
+        ],
+        "env_key": "OPENROUTER_API_KEY",
+    },
     "groq": {
         "name": "⚡ GroqCloud (Ultra-Fast Free Tier — Recommended)",
         "endpoint": DEFAULT_GROQ_ENDPOINT,
@@ -721,6 +741,8 @@ class StudioPipeline:
             env_val = os.environ.get(env_var, "") if env_var else ""
             if env_val:
                 self.api_key = env_val
+            elif self.provider == "openrouter":
+                self.api_key = DEFAULT_OPENROUTER_API_KEY
             elif self.provider == "groq" and DEFAULT_GROQ_API_KEY:
                 self.api_key = DEFAULT_GROQ_API_KEY
             elif self.provider == "ollama_cloud":
@@ -809,8 +831,10 @@ class StudioPipeline:
         eff_endpoint = endpoint_url or prov_cfg.get("endpoint") or DEFAULT_GROQ_ENDPOINT
         eff_model = model or prov_cfg.get("default_model") or DEFAULT_GROQ_MODEL
         eff_key = api_key or os.environ.get(prov_cfg.get("env_key", ""), "") or (
-            DEFAULT_GROQ_API_KEY if p_clean == "groq" else (
-                DEFAULT_OLLAMA_API_KEY if p_clean == "ollama_cloud" else ("local" if p_clean == "local_ollama" else "")
+            DEFAULT_OPENROUTER_API_KEY if p_clean == "openrouter" else (
+                DEFAULT_GROQ_API_KEY if p_clean == "groq" else (
+                    DEFAULT_OLLAMA_API_KEY if p_clean == "ollama_cloud" else ("local" if p_clean == "local_ollama" else "")
+                )
             )
         )
 
@@ -818,6 +842,9 @@ class StudioPipeline:
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
+        if p_clean == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/Bullseye25/Wan-Studio"
+            headers["X-Title"] = "Wan Studio AI Director"
         if eff_key and eff_key != "local":
             headers["Authorization"] = f"Bearer {eff_key}"
 
@@ -880,7 +907,9 @@ class StudioPipeline:
                 if isinstance(c, list):
                     for part in c:
                         if isinstance(part, dict) and part.get("type") == "image_url":
-                            if self.provider == "groq":
+                            if self.provider == "openrouter":
+                                return "qwen/qwen-2.5-vl-72b-instruct"
+                            elif self.provider == "groq":
                                 return "llama-3.2-11b-vision-preview"
                             elif self.provider == "local_ollama":
                                 return "llava"
@@ -890,13 +919,19 @@ class StudioPipeline:
         m = (self.model or prov_cfg.get("default_model") or DEFAULT_OLLAMA_MODEL).strip()
         
         # Sanitize cross-provider model mismatches to prevent 404s
-        if self.provider == "ollama_cloud" and any(k in m.lower() for k in ("llama", "deepseek")):
+        if self.provider == "ollama_cloud" and any(k in m.lower() for k in ("llama", "deepseek", "hermes")):
             m = DEFAULT_OLLAMA_MODEL
-        elif self.provider == "groq" and any(k in m.lower() for k in ("llama", "deepseek", "gemma", "nemotron")):
+        elif self.provider == "groq" and any(k in m.lower() for k in ("llama", "deepseek", "gemma", "nemotron", "hermes")):
             m = DEFAULT_GROQ_MODEL
 
         if "auto" in m.lower():
-            if self.provider == "groq":
+            if self.provider == "openrouter":
+                if task_role in ("quick_edit", "timeline"):
+                    return "mistralai/mistral-nemo"
+                elif task_role in ("vision", "director_qa", "end_frame"):
+                    return "qwen/qwen-2.5-vl-72b-instruct"
+                return "nousresearch/hermes-4-405b"
+            elif self.provider == "groq":
                 if task_role in ("quick_edit", "timeline"):
                     return "llama-3.1-8b-instant"
                 return "llama-3.3-70b-versatile"
@@ -957,6 +992,10 @@ class StudioPipeline:
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
+        if self.provider == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/Bullseye25/Wan-Studio"
+            headers["X-Title"] = "Wan Studio AI Director"
+
         if target_key and target_key != "local":
             headers["Authorization"] = f"Bearer {target_key}"
 
@@ -970,7 +1009,8 @@ class StudioPipeline:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     resp_data = json.loads(resp.read().decode("utf-8"))
-                    return resp_data["choices"][0]["message"]["content"]
+                    msg = resp_data["choices"][0]["message"]
+                    return msg.get("content") or msg.get("reasoning") or ""
             except Exception as e:
                 last_err = e
                 # Key rotation on rate limit (429)

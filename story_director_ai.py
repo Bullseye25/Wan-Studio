@@ -73,6 +73,33 @@ GENRE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "reading_level": "B1",
         "default_art_style": "Vibrant stylized cartoon animation, exaggerated expressions, bright colorful palette, studio lighting, 4K",
     },
+    "unfiltered_action": {
+        "name": "High-Octane Action & Combat",
+        "description": "Visceral, high-stakes choreography, intense martial arts melee, and kinetic stunt work without cartoon censorship",
+        "banned_words": [],
+        "tone_prompt": (
+            "Tone: Visceral, gritty, high-stakes, adrenaline-fueled, and kinetic. "
+            "Focus on intense martial arts choreography, fast-paced melee exchanges, tactical positioning, "
+            "clashing weapons with shower of sparks, shockwaves, dynamic evasive maneuvers, and relentless momentum. "
+            "Cinematic bullet-time, impactful physical hits, and high-energy camera motion."
+        ),
+        "default_voice": "Energetic Action Narrator (Male - am_michael)",
+        "reading_level": "B1",
+        "default_art_style": "High-octane cinematic 3D anime action, gritty cyberpunk or dark fantasy, volumetric smoke, lens flare, intense sparks, 4K",
+    },
+    "mature_thriller": {
+        "name": "Gritty Noir & Mature Thriller",
+        "description": "Dark suspense, criminal underworld conflicts, visceral stakes, and psychological tension",
+        "banned_words": ["slapstick", "silly", "rainbows", "cuddly", "tummy rumbles"],
+        "tone_prompt": (
+            "Tone: Dark, gritty, tense, uncompromising, and suspenseful. "
+            "Focus on high-stakes underworld confrontations, intense interrogations, visceral danger, "
+            "shadowy alleyways, neon reflections on wet asphalt, and razor-sharp tactical tension."
+        ),
+        "default_voice": "Cinematic Trailer (Male - am_fenrir)",
+        "reading_level": "B1",
+        "default_art_style": "Dark gritty cinematic animation, dramatic chiaroscuro lighting, deep noir shadows, neon reflections on wet pavement, 4K",
+    },
 }
 
 
@@ -87,23 +114,32 @@ def detect_story_genre(premise: str, art_style: str = "") -> str:
         "rabbit", "bunny", "sharing", "caring", "friendship", "friend", "meadow",
         "storybook", "pixar", "robin", "clockmaker", "puppy", "kitten", "sweet"
     ]
+    action_keywords = [
+        "ninja", "assassin", "combat", "fight", "brawl", "melee", "duel", "sword",
+        "gun", "bullet", "heist", "strike", "clash", "explos", "cybernetic", "operative",
+        "unfiltered", "action", "showdown", "chase", "sniper", "ambush"
+    ]
     mystery_keywords = [
         "batman", "joker", "gotham", "arkham", "detective", "mystery", "murder",
-        "investigat", "clue", "noir", "shadow", "crime", "asylum", "inspector"
+        "investigat", "clue", "noir", "shadow", "crime", "asylum", "inspector", "thriller"
     ]
     adventure_keywords = [
-        "warrior", "sword", "dragon", "quest", "kingdom", "galaxy", "cyberpunk",
+        "warrior", "dragon", "quest", "kingdom", "galaxy", "cyberpunk",
         "samurai", "journey", "explore", "relic", "ancient", "temple", "battle"
     ]
 
     kids_score = sum(1 for k in kids_keywords if k in text)
+    action_score = sum(1 for k in action_keywords if k in text)
     mystery_score = sum(1 for k in mystery_keywords if k in text)
     adventure_score = sum(1 for k in adventure_keywords if k in text)
 
-    if kids_score >= max(mystery_score, adventure_score, 1):
+    # Kids genre check takes priority if explicitly targeted at children
+    if kids_score >= max(action_score, mystery_score, adventure_score, 1):
         return "kids"
+    if action_score >= max(kids_score, mystery_score, adventure_score, 1):
+        return "unfiltered_action"
     if mystery_score >= max(kids_score, adventure_score, 1):
-        return "mystery"
+        return "mature_thriller" if any(k in text for k in ("thriller", "underworld", "mature", "gritty")) else "mystery"
     if adventure_score > 0:
         return "adventure"
     return "kids" if ("cute" in text or "rabbit" in text or "bear" in text) else "adventure"
@@ -181,6 +217,20 @@ TONE_AWARE_POSE_LIBRARY: Dict[str, Dict[str, str]] = {
         "slip": "sliding comically across the floor, spinning around once and ending up with a sheepish grin",
         "laugh": "leaning back holding their stomach in uncontrollable laughter, mouth wide open in joyful giggles",
         "default": "standing with a cheeky sideways grin, one eyebrow raised in playful comedic amusement",
+    },
+    "unfiltered_action": {
+        "strike": "recovering dynamically from a high-speed strike, weapon locked in a forward guard, sparks dissipating across armor",
+        "clash": "locked blade-to-blade in an intense close-quarters standoff, muscles strained, sparks showering between their faces",
+        "evade": "sliding low across the wet ground beneath an enemy slash, recovering instantly into a tactical counter-stance",
+        "land": "landing heavily from an aerial leap with one fist cratering the pavement, kinetic shockwave rippling outwards",
+        "aim": "raising weapon in a rock-steady two-handed grip, intense focused gaze locked on target through swirling smoke",
+        "default": "standing in a primed, low-center-of-gravity combat stance, blades ready, eyes locked on the opponent",
+    },
+    "mature_thriller": {
+        "confront": "stepping into the dim neon streetlight, face partially cast in shadow, eyes cold and unwavering",
+        "draw": "hand resting deliberately on concealed weapon, posture relaxed but primed for lethal reaction",
+        "escape": "ducking through the rain-slicked alley corridor, glancing sharply over one shoulder before vanishing into darkness",
+        "default": "standing poised in the shadows, trench coat fluttering in the chill wind, watching the target silently",
     },
 }
 
