@@ -76,26 +76,22 @@ if _env_file.exists():
     except Exception:
         pass
 
-DEFAULT_OLLAMA_API_KEY = "ca8516405cc74a238c9525b490331d3a.HmyaGAbsmLFyYN25P1K8_tG6"
-DEFAULT_OLLAMA_MODEL = "gemma4:31b"
-DEFAULT_OLLAMA_ENDPOINT = "https://ollama.com/v1/chat/completions"
+DEFAULT_OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")
+DEFAULT_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
+DEFAULT_OLLAMA_ENDPOINT = os.environ.get("OLLAMA_ENDPOINT", "https://ollama.com/v1/chat/completions")
 
 # Multi-Key Pool for GroqCloud (3x throughput, automatic failover on 429)
-DEFAULT_GROQ_API_KEYS = [
-    "",
-    "",
-    "",
-]
+DEFAULT_GROQ_API_KEYS = []
 if os.environ.get("GROQ_API_KEYS"):
     _parsed = [k.strip() for k in os.environ["GROQ_API_KEYS"].split(",") if k.strip()]
     if _parsed:
         DEFAULT_GROQ_API_KEYS = _parsed
 elif os.environ.get("GROQ_API_KEY"):
     _single = os.environ["GROQ_API_KEY"].strip()
-    if _single not in DEFAULT_GROQ_API_KEYS:
-        DEFAULT_GROQ_API_KEYS.insert(0, _single)
+    if _single:
+        DEFAULT_GROQ_API_KEYS = [_single]
 
-DEFAULT_GROQ_API_KEY = DEFAULT_GROQ_API_KEYS[0]
+DEFAULT_GROQ_API_KEY = DEFAULT_GROQ_API_KEYS[0] if DEFAULT_GROQ_API_KEYS else ""
 
 _groq_key_idx = 0
 _groq_key_lock = threading.Lock()
@@ -104,6 +100,8 @@ def rotate_groq_api_key() -> str:
     """Rotates round-robin to the next available Groq API key in the multi-key pool."""
     global _groq_key_idx
     with _groq_key_lock:
+        if not DEFAULT_GROQ_API_KEYS:
+            return ""
         key = DEFAULT_GROQ_API_KEYS[_groq_key_idx]
         _groq_key_idx = (_groq_key_idx + 1) % len(DEFAULT_GROQ_API_KEYS)
         return key
@@ -111,6 +109,8 @@ def rotate_groq_api_key() -> str:
 def get_current_groq_api_key() -> str:
     global _groq_key_idx
     with _groq_key_lock:
+        if not DEFAULT_GROQ_API_KEYS:
+            return ""
         return DEFAULT_GROQ_API_KEYS[_groq_key_idx]
 
 DEFAULT_GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
