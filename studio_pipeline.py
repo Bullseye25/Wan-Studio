@@ -1109,6 +1109,7 @@ class StudioPipeline:
         art_style: str = "2D vibrant cartoon animation",
         progress_cb: Optional[Callable[[float, str], None]] = None,
         genre: Optional[str] = None,
+        is_nsfw: bool = False,
     ) -> Dict[str, Any]:
         """
         Multi-Pass Writers' Room:
@@ -1123,7 +1124,15 @@ class StudioPipeline:
             GENRE_CONFIGS,
         )
 
-        eff_genre = genre or detect_story_genre(prompt, art_style)
+        # When NSFW / mature action is active, ensure we route to OpenRouter with Hermes 4
+        if is_nsfw:
+            if self.provider != "openrouter" and os.environ.get("OPENROUTER_API_KEY"):
+                self.provider = "openrouter"
+                self.endpoint_url = DEFAULT_OPENROUTER_ENDPOINT
+                self.api_key = DEFAULT_OPENROUTER_API_KEY
+                self.model = DEFAULT_OPENROUTER_MODEL
+
+        eff_genre = genre or detect_story_genre(prompt, art_style, is_nsfw=is_nsfw)
         genre_info = GENRE_CONFIGS.get(eff_genre, GENRE_CONFIGS["kids"])
 
         num_scenes = plan_scene_count(target_duration, num_scenes)
@@ -1151,6 +1160,7 @@ class StudioPipeline:
             genre=eff_genre,
             num_scenes=num_scenes,
             target_duration=target_duration,
+            is_nsfw=is_nsfw,
         )
 
         beat_sheet = None
@@ -1201,6 +1211,7 @@ class StudioPipeline:
             num_scenes=num_scenes,
             target_duration=target_duration,
             art_style=art_style,
+            is_nsfw=is_nsfw,
         )
 
         # Inject learned directives and memory exemplars to guide screenplay draft
@@ -1225,9 +1236,11 @@ class StudioPipeline:
             target_duration=target_duration,
             art_style=art_style,
             genre=eff_genre,
+            is_nsfw=is_nsfw,
         )
         parsed_data["beat_sheet"] = beat_sheet
         parsed_data["genre"] = eff_genre
+        parsed_data["is_nsfw"] = is_nsfw
 
         if progress_cb:
             progress_cb(
@@ -1246,6 +1259,7 @@ class StudioPipeline:
         target_duration: float,
         art_style: str,
         genre: Optional[str] = None,
+        is_nsfw: bool = False,
     ) -> Dict[str, Any]:
         """
         Enforces the schema contract on LLM output: valid character ids, scenes that reference
@@ -1272,8 +1286,9 @@ class StudioPipeline:
         data.setdefault("title", "Studio Story")
         data.setdefault("art_style", art_style)
 
-        eff_genre = genre or data.get("genre") or detect_story_genre(prompt, art_style)
+        eff_genre = genre or data.get("genre") or detect_story_genre(prompt, art_style, is_nsfw=is_nsfw)
         data["genre"] = eff_genre
+        data["is_nsfw"] = is_nsfw
         genre_info = GENRE_CONFIGS.get(eff_genre, GENRE_CONFIGS["kids"])
         data.setdefault("narrator_voice_preset", genre_info.get("default_voice", DEFAULT_NARRATOR_VOICE))
 
@@ -1344,9 +1359,9 @@ class StudioPipeline:
             s.setdefault("qwen_scene_prompt", s.get("scenario", prompt))
 
             # Tone-aware prompt sanitization: strip/replace genre-banned words
-            s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre)
-            s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", prompt), genre=eff_genre)
-            s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre)
+            s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre, is_nsfw=is_nsfw)
+            s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", prompt), genre=eff_genre, is_nsfw=is_nsfw)
+            s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre, is_nsfw=is_nsfw)
 
             s["qwen_end_scene_prompt"] = ensure_high_delta_end_prompt(
                 start_prompt=s.get("qwen_scene_prompt", ""),
@@ -1502,7 +1517,9 @@ class StudioPipeline:
         eff_genre = story_data.get("genre") or detect_story_genre(
             f"{story_data.get('theme', '')} {story_data.get('title', '')} {story_data.get('art_style', '')}"
         )
+        is_nsfw = bool(story_data.get("is_nsfw") or eff_genre in ("unfiltered_action", "mature_thriller"))
         story_data["genre"] = eff_genre
+        story_data["is_nsfw"] = is_nsfw
 
         if not scenes:
             return {
@@ -1515,7 +1532,7 @@ class StudioPipeline:
                 "story": story_data,
             }
 
-        system_prompt, user_content = build_story_editor_audit_prompt(story_data, genre=eff_genre)
+        system_prompt, user_content = build_story_editor_audit_prompt(story_data, genre=eff_genre, is_nsfw=is_nsfw)
 
         audit_model = model_choice or "nemotron-3-super"
         audit_raw = None
@@ -1575,9 +1592,9 @@ class StudioPipeline:
                 # Deterministic rule-based repair: sanitize prompts, enforce tone poses, simplify B1
                 for i, s in enumerate(scenes):
                     # 1. Sanitize banned words
-                    s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre)
-                    s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", ""), genre=eff_genre)
-                    s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre)
+                    s["scenario"] = sanitize_genre_prompt(s.get("scenario", ""), genre=eff_genre, is_nsfw=is_nsfw)
+                    s["qwen_scene_prompt"] = sanitize_genre_prompt(s.get("qwen_scene_prompt", ""), genre=eff_genre, is_nsfw=is_nsfw)
+                    s["wan_motion_prompt"] = sanitize_genre_prompt(s.get("wan_motion_prompt", ""), genre=eff_genre, is_nsfw=is_nsfw)
                     # 2. Tone-aware high-delta ending frame
                     s["qwen_end_scene_prompt"] = ensure_high_delta_end_prompt(
                         start_prompt=s.get("qwen_scene_prompt", ""),
@@ -3637,6 +3654,7 @@ class StudioPipeline:
         enable_midpoint_refine: bool = False,
         collect_telemetry: bool = True,
         story_folder_name: Optional[str] = None,
+        is_nsfw: bool = False,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -3664,6 +3682,7 @@ class StudioPipeline:
             num_scenes=num_scenes,
             target_duration=target_duration,
             art_style=art_style,
+            is_nsfw=is_nsfw,
             progress_cb=progress_cb,
         )
         if telemetry_collector:
@@ -3702,6 +3721,7 @@ class StudioPipeline:
         story_data["transition_duration"] = transition_duration
         story_data["lora_repo_or_path"] = lora_repo_or_path
         story_data["lora_scale"] = lora_scale
+        story_data["is_nsfw"] = is_nsfw
         story_data["seeds"] = {
             "z_image_seed": seed_z,
             "qwen_seed": seed_qwen,

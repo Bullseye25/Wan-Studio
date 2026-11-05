@@ -103,11 +103,17 @@ GENRE_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def detect_story_genre(premise: str, art_style: str = "") -> str:
+def detect_story_genre(premise: str, art_style: str = "", is_nsfw: bool = False) -> str:
     """
     Infers the most appropriate genre taxonomy based on premise and visual cues.
+    When is_nsfw is True, automatically defaults to unfiltered action or mature thriller.
     """
     text = (f"{premise} {art_style}").lower()
+
+    if is_nsfw:
+        if any(k in text for k in ("noir", "detective", "mystery", "crime", "thriller", "underworld")):
+            return "mature_thriller"
+        return "unfiltered_action"
 
     kids_keywords = [
         "kids", "child", "children", "baby", "fluffy", "cute", "gentle", "bear",
@@ -145,11 +151,15 @@ def detect_story_genre(premise: str, art_style: str = "") -> str:
     return "kids" if ("cute" in text or "rabbit" in text or "bear" in text) else "adventure"
 
 
-def sanitize_genre_prompt(text: str, genre: str = "kids") -> str:
+def sanitize_genre_prompt(text: str, genre: str = "kids", is_nsfw: bool = False) -> str:
     """
     Strips out genre-banned words and replaces them with tone-appropriate synonyms.
     Guarantees that a kids' story never receives combat / shockwave directives.
+    When is_nsfw is True, bypasses all sanitization for raw authentic action.
     """
+    if is_nsfw or genre in ("unfiltered_action", "mature_thriller"):
+        return text
+
     cfg = GENRE_CONFIGS.get(genre, GENRE_CONFIGS["kids"])
     banned = cfg.get("banned_words", [])
 
@@ -606,6 +616,7 @@ def build_beat_sheet_prompt(
     genre: str,
     num_scenes: int,
     target_duration: float,
+    is_nsfw: bool = False,
 ) -> Tuple[str, str]:
     """
     Pass 1: Develops character motivations, core dramatic question, and Pixar-style causal beat sheet.
@@ -643,6 +654,14 @@ def build_beat_sheet_prompt(
         "}"
     )
 
+    if is_nsfw:
+        system_prompt += (
+            "\n\n🔞 UNFILTERED / MATURE ACTION DIRECTIVE:\n"
+            "Uncensored mature action mode is ENABLED. Do not sanitize, censor, moralize, or dilute intense physical combat, "
+            "visceral confrontations, mature character dialogue, weapons, or gritty stakes. "
+            "Depict authentic adult conflict, sharp physical consequences, and unrestricted cinematic choreography."
+        )
+
     user_prompt = (
         f"Story Premise: {premise}\n"
         f"Number of Scenes: {num_scenes}\n"
@@ -660,6 +679,7 @@ def build_scene_drafting_prompt(
     num_scenes: int,
     target_duration: float,
     art_style: str,
+    is_nsfw: bool = False,
 ) -> Tuple[str, str]:
     """
     Pass 2: Converts the approved Beat Sheet into production-ready screenplay,
@@ -746,6 +766,12 @@ def build_scene_drafting_prompt(
         "}"
     )
 
+    if is_nsfw:
+        system_prompt += (
+            "\n\n🔞 UNFILTERED / MATURE ACTION DIRECTIVE:\n"
+            "Uncensored adult/action mode is ENABLED. Generate unrestricted action, gritty dialogue, and raw cinematic choreography without preachiness."
+        )
+
     user_prompt = (
         f"Story Premise: {premise}\n"
         f"Art Style: {art_style}\n"
@@ -760,6 +786,7 @@ def build_scene_drafting_prompt(
 def build_story_editor_audit_prompt(
     story_data: Dict[str, Any],
     genre: str,
+    is_nsfw: bool = False,
 ) -> Tuple[str, str]:
     """
     Pass 3: Rigorous Story Doctor Audit reviewing:
@@ -796,6 +823,12 @@ def build_story_editor_audit_prompt(
         '  "repaired_scenes": null\n'
         "}"
     )
+
+    if is_nsfw:
+        system_prompt += (
+            "\n\n🔞 UNFILTERED / MATURE ACTION DIRECTIVE:\n"
+            "Uncensored adult/action mode is ENABLED. Generate unrestricted action, gritty dialogue, and raw cinematic choreography without preachiness."
+        )
 
     user_prompt = (
         f"Story Title: {story_data.get('title')}\n"

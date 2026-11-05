@@ -23,6 +23,7 @@ from studio_pipeline import (
     LLM_PROVIDERS,
     DEFAULT_GROQ_MODEL,
     DEFAULT_GROQ_ENDPOINT,
+    DEFAULT_GROQ_API_KEY,
     DEFAULT_OPENROUTER_API_KEY,
     DEFAULT_OPENROUTER_MODEL,
     DEFAULT_OPENROUTER_ENDPOINT,
@@ -1321,7 +1322,7 @@ def studio_redo_single_clip(
 def studio_run_full(
     prompt, art_style, aspect_ratio, seed, num_scenes, duration, api_key, model,
     use_vision=True, qwen_seed=None, wan_seed=None, progress=gr.Progress(track_tqdm=True),
-    provider="openrouter", endpoint_url=None,
+    provider="openrouter", endpoint_url=None, is_nsfw=False,
 ):
     pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     z_seed = int(seed)
@@ -1339,6 +1340,7 @@ def studio_run_full(
             aspect_ratio=aspect_ratio,
             art_style=art_style,
             use_vision_director=bool(use_vision),
+            is_nsfw=bool(is_nsfw),
             progress_cb=_studio_progress(progress),
         )
         char_items, scene_items = _studio_gallery_items(story_data)
@@ -1377,6 +1379,7 @@ def studio_run_step1(
     narrator_voice=DEFAULT_NARRATOR_VOICE,
     provider="openrouter",
     endpoint_url=None,
+    is_nsfw=False,
 ):
     pipeline = StudioPipeline(api_key=api_key, model=model, provider=provider, endpoint_url=endpoint_url)
     try:
@@ -1386,6 +1389,7 @@ def studio_run_step1(
             num_scenes=int(num_scenes),
             target_duration=float(duration),
             art_style=art_style,
+            is_nsfw=bool(is_nsfw),
             progress_cb=cb,
         )
         narrator_note = ""
@@ -2458,7 +2462,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                         )
 
                 studio_status = gr.Markdown(
-                    "### 🟢 Phase 1 Ready — Enter your story idea below and click **1️⃣ Generate Story (Gemma 4: 31B)**."
+                    "### 🔞 Mature / Unfiltered Action Mode Active — Enter your premise and click **1️⃣ Generate Story (Nous Hermes 4 405B)**."
                 )
 
                 # ── 4-Phase Wizard Tabs ───────────────────────────────────────────────
@@ -2476,10 +2480,18 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     placeholder="Describe your story premise or thematic concept...",
                                     lines=4,
                                 )
-                                studio_use_vision = gr.Checkbox(
-                                    label="🎬 Enable Gemma 4: 31B Multimodal Vision Director (inspects each keyframe before animating)",
-                                    value=True,
-                                )
+                                with gr.Row():
+                                    studio_nsfw_toggle = gr.Checkbox(
+                                        label="🔞 Mature / Unfiltered Action Mode (NSFW)",
+                                        value=True,
+                                        info="Auto-routes to Nous Hermes 4 405B on OpenRouter with zero censorship filters for authentic physical combat, gritty dialogue, and unrestricted stakes.",
+                                        scale=1,
+                                    )
+                                    studio_use_vision = gr.Checkbox(
+                                        label="🎬 Multimodal Vision Director (inspects each keyframe before animating)",
+                                        value=True,
+                                        scale=1,
+                                    )
                                 with gr.Row():
                                     studio_enable_narrator_chk = gr.Checkbox(
                                         label="🎙️ Enable AI Narrator & Audio-Visual Sync (Windows SAPI5 / Kokoro-82M)",
@@ -2534,7 +2546,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
                                     )
 
                                 studio_step1_btn = gr.Button(
-                                    "1️⃣ Generate Story & Extract Characters (Gemma 4: 31B)",
+                                    "1️⃣ Generate Story & Extract Characters (🔞 Unfiltered Nous Hermes 4 405B)",
                                     variant="primary",
                                     size="lg",
                                 )
@@ -3554,7 +3566,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
     def _ui_step1(
         prompt, art_style, num_scenes, duration, api_key, model,
         z_seed, q_seed, w_seed, enable_narrator=True, narrator_voice=DEFAULT_NARRATOR_VOICE,
-        provider="openrouter", endpoint_url=None,
+        provider="openrouter", endpoint_url=None, is_nsfw=False,
         progress=gr.Progress(track_tqdm=True),
     ):
         json_data, status_msg, state = studio_run_step1(
@@ -3564,6 +3576,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             narrator_voice=narrator_voice,
             provider=provider,
             endpoint_url=endpoint_url,
+            is_nsfw=bool(is_nsfw),
         )
         char_opts = _character_choices(state)
         scene_opts = _scene_choices(state)
@@ -3605,6 +3618,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_seed, studio_qwen_seed, studio_wan_seed,
             studio_enable_narrator_chk, studio_narrator_voice_dropdown,
             studio_llm_provider, studio_llm_endpoint,
+            studio_nsfw_toggle,
         ],
         outputs=[
             studio_json_display, studio_status, studio_pipeline_state,
@@ -3962,7 +3976,9 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         model_choices = [(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in models]
         def_model = cfg["default_model"]
         default_key = DEFAULT_OPENROUTER_API_KEY if prov_key == "openrouter" else (
-            DEFAULT_OLLAMA_API_KEY if prov_key == "ollama_cloud" else ""
+            DEFAULT_OLLAMA_API_KEY if prov_key == "ollama_cloud" else (
+                "" if prov_key == "local_ollama" else DEFAULT_GROQ_API_KEY
+            )
         )
         placeholder_key = (
             "sk-or-... for OpenRouter" if prov_key == "openrouter" else (
@@ -3981,6 +3997,46 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
         fn=_on_llm_provider_change,
         inputs=[studio_llm_provider],
         outputs=[studio_ollama_model, studio_ollama_key, studio_llm_endpoint],
+    )
+
+    # NSFW / Mature Unfiltered Action Toggle Event
+    def _on_nsfw_toggle(is_nsfw):
+        if is_nsfw:
+            cfg = LLM_PROVIDERS.get("openrouter", {})
+            models = cfg.get("models", [])
+            model_choices = [(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in models]
+            return (
+                gr.update(value="openrouter"),
+                gr.update(choices=model_choices, value=DEFAULT_OPENROUTER_MODEL),
+                gr.update(value=DEFAULT_OPENROUTER_API_KEY, placeholder="sk-or-... for OpenRouter"),
+                gr.update(value=""),
+                gr.update(value="1️⃣ Generate Story & Extract Characters (🔞 Unfiltered Nous Hermes 4 405B)"),
+                "### 🔞 Mature / Unfiltered Action Mode Active: Nous Hermes 4 405B (OpenRouter) selected with zero censorship filters for authentic combat and intense drama.",
+            )
+        else:
+            cfg = LLM_PROVIDERS.get("groq", {})
+            models = cfg.get("models", [])
+            model_choices = [(m[0], m[1]) if isinstance(m, tuple) else (m, m) for m in models]
+            return (
+                gr.update(value="groq"),
+                gr.update(choices=model_choices, value=DEFAULT_GROQ_MODEL),
+                gr.update(value=DEFAULT_GROQ_API_KEY, placeholder="gsk_... for Groq"),
+                gr.update(value=""),
+                gr.update(value="1️⃣ Generate Story & Extract Characters (⚡ GroqCloud / Gemma)"),
+                "### 🟢 Standard Mode Active: Family-friendly storytelling with standard safety filters.",
+            )
+
+    studio_nsfw_toggle.change(
+        fn=_on_nsfw_toggle,
+        inputs=[studio_nsfw_toggle],
+        outputs=[
+            studio_llm_provider,
+            studio_ollama_model,
+            studio_ollama_key,
+            studio_llm_endpoint,
+            studio_step1_btn,
+            studio_status,
+        ],
     )
 
     studio_llm_test_btn.click(
@@ -4069,6 +4125,7 @@ with gr.Blocks(title="Wan 2.2 & Qwen AI Filmmaking Studio") as demo:
             studio_ollama_key, studio_ollama_model, studio_use_vision,
             studio_qwen_seed, studio_wan_seed,
             studio_llm_provider, studio_llm_endpoint,
+            studio_nsfw_toggle,
         ],
         outputs=[
             studio_final_video, studio_char_gallery, studio_scenes_gallery,

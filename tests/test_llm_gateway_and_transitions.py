@@ -235,5 +235,83 @@ class TestStudioPipelineEnhancements(unittest.TestCase):
         self.assertEqual(kwargs.get("lora_scale"), 0.75)
 
 
+class TestUnfilteredNSFWActionPipeline(unittest.TestCase):
+    """Verifies uncensored / mature action mode, OpenRouter routing, and prompt pass-through."""
+
+    def test_nsfw_genre_detection(self):
+        from story_director_ai import detect_story_genre
+
+        # Default standard mode detects kids from cute/bunny
+        genre_safe = detect_story_genre("cute bunny and bear sharing berries", is_nsfw=False)
+        self.assertEqual(genre_safe, "kids")
+
+        # NSFW mode defaults to unfiltered action
+        genre_nsfw_action = detect_story_genre("epic martial arts sword duel in ancient temple", is_nsfw=True)
+        self.assertEqual(genre_nsfw_action, "unfiltered_action")
+
+        # NSFW mode with noir/detective/thriller cues defaults to mature_thriller
+        genre_nsfw_noir = detect_story_genre("detective investigates criminal underworld syndicate in rainy noir city", is_nsfw=True)
+        self.assertEqual(genre_nsfw_noir, "mature_thriller")
+
+    def test_nsfw_prompt_sanitization_bypass(self):
+        from story_director_ai import sanitize_genre_prompt
+
+        combat_prompt = "Warrior unleashes a brutal sword strike and martial arts brawl against the enemy."
+        # In kids genre, combat terms are sanitized / replaced
+        sanitized_kids = sanitize_genre_prompt(combat_prompt, genre="kids", is_nsfw=False)
+        self.assertNotIn("brutal", sanitized_kids)
+
+        # In NSFW mode, combat terms are completely preserved
+        preserved_nsfw = sanitize_genre_prompt(combat_prompt, genre="kids", is_nsfw=True)
+        self.assertEqual(preserved_nsfw, combat_prompt)
+
+    def test_nsfw_director_prompts(self):
+        from story_director_ai import (
+            build_beat_sheet_prompt,
+            build_scene_drafting_prompt,
+            build_story_editor_audit_prompt,
+        )
+
+        sys_b, usr_b = build_beat_sheet_prompt("Warrior duel", "unfiltered_action", 3, 15.0, is_nsfw=True)
+        self.assertIn("UNFILTERED / MATURE ACTION DIRECTIVE", sys_b)
+
+        sys_d, usr_d = build_scene_drafting_prompt(
+            beat_sheet={"beats": []}, premise="Warrior duel", genre="unfiltered_action",
+            num_scenes=3, target_duration=15.0, art_style="cinematic anime", is_nsfw=True
+        )
+        self.assertIn("UNFILTERED / MATURE ACTION DIRECTIVE", sys_d)
+
+        sys_a, usr_a = build_story_editor_audit_prompt(
+            {"title": "Duel", "scenes": []}, genre="unfiltered_action", is_nsfw=True
+        )
+        self.assertIn("UNFILTERED / MATURE ACTION DIRECTIVE", sys_a)
+
+    def test_normalize_story_nsfw_flags(self):
+        data = {
+            "title": "Fortress of Fury",
+            "scenes": [
+                {
+                    "title": "Scene 1",
+                    "scenario": "A visceral martial arts sword brawl inside the throne room.",
+                    "qwen_scene_prompt": "A visceral sword strike clashing with sparks.",
+                    "wan_motion_prompt": "relentless kinetic combat action",
+                }
+            ],
+            "characters": [{"id": "char_1", "name": "Queen Kira"}],
+        }
+
+        norm = StudioPipeline.normalize_story(
+            data,
+            prompt="Fortress duel",
+            num_scenes=1,
+            target_duration=5.0,
+            art_style="cinematic",
+            is_nsfw=True,
+        )
+        self.assertTrue(norm.get("is_nsfw"))
+        self.assertIn("sword", norm["scenes"][0]["scenario"])
+        self.assertIn("sparks", norm["scenes"][0]["qwen_scene_prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()
