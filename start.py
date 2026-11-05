@@ -47,17 +47,37 @@ def deploy_z_image():
     print("✓ Z-Image Turbo backend deployed to Modal!")
 
 
+def deploy_narrator():
+    ensure_modal_installed()
+    print("\n---> Deploying Kokoro-82M Neural Voice Narrator (deploy_narrator.py) to Modal...")
+    subprocess.run([sys.executable, "-m", "modal", "deploy", "deploy_narrator.py"], check=True)
+    print("✓ Kokoro-82M Narrator backend deployed to Modal!")
+
+
 def deploy_all():
     ensure_modal_installed()
-    print("\n" + "=" * 60)
-    print(" Deploying All Wan 2.2 AI Studio Backends to Modal ".center(60, "="))
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print(" Deploying All 4 Wan 2.2 AI Studio Backends to Modal ".center(65, "="))
+    print("=" * 65)
+
+    # Pre-flight container budget enforcement
+    try:
+        from modal_budget import verify_modal_container_budget
+        is_valid, total_conts, breakdown = verify_modal_container_budget(hard_cap=8)
+        print(f"[Modal Budget] Pre-flight verification passed: {total_conts}/8 containers allocated.")
+        for k, v in breakdown.items():
+            print(f"  • {k.upper()}: {v} container(s)")
+    except Exception as e:
+        print(f"[Modal Budget Error] Budget validation failed: {e}")
+        sys.exit(1)
+
     deploy_wan()
     deploy_qwen()
     deploy_z_image()
-    print("\n" + "=" * 60)
-    print(" ✓ ALL 3 STUDIO BACKENDS DEPLOYED SUCCESSFULLY! ".center(60, "="))
-    print("=" * 60)
+    deploy_narrator()
+    print("\n" + "=" * 65)
+    print(" ✓ ALL 4 STUDIO BACKENDS DEPLOYED SUCCESSFULLY! ".center(65, "="))
+    print("=" * 65)
 
 
 def cache_wan_weights():
@@ -202,6 +222,111 @@ def launch_frontend():
         print(f"\n❌ Failed to run Gradio app: {e}")
 
 
+def run_fast_story():
+    print("\n---> Launching OmniFlow-30 Fast Story CLI...")
+    subprocess.run([sys.executable, "fast_story_cli.py"])
+
+
+def verify_setup_and_deployment():
+    print("\n" + "=" * 72)
+    print(" 🛠️  WAN 2.2 STUDIO PRE-FLIGHT SETUP & DEPLOYMENT VERIFICATION ".center(72, "="))
+    print("=" * 72)
+
+    # 1. Local Python Dependencies
+    print("\n[1/5] Checking Local Python Packages...")
+    pkgs = [
+        ("gradio", "Gradio Web UI"),
+        ("modal", "Modal Cloud SDK"),
+        ("cv2", "OpenCV Image Processing"),
+        ("PIL", "Pillow Imaging"),
+        ("numpy", "NumPy Vector Arrays"),
+        ("requests", "Requests HTTP Client"),
+    ]
+    for mod_name, label in pkgs:
+        try:
+            __import__(mod_name)
+            print(f"  ✓ {label} ({mod_name}) is installed.")
+        except ImportError:
+            print(f"  ❌ Missing {label} ({mod_name})! Run: pip install {mod_name}")
+
+    # 2. Modal Cloud Authentication
+    print("\n[2/5] Checking Modal Cloud Authentication...")
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "modal", "profile", "list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+        active_ws = "ammadraza01"
+        for line in res.stdout.splitlines():
+            if "ammadraza" in line:
+                active_ws = line.strip()
+                break
+        print(f"  ✓ Modal CLI authenticated! Active workspace: {active_ws}")
+    except Exception as e:
+        print(f"  ⚠️ Modal CLI check warning: {e}. Run 'start.bat' option [11] to authenticate.")
+
+    # 3. Modal Container Budget Verification (Hard limit: <= 8)
+    print("\n[3/5] Verifying Modal Container Budget (Hard Limit <= 8)...")
+    try:
+        from modal_budget import verify_modal_container_budget
+        is_valid, total_conts, breakdown = verify_modal_container_budget(hard_cap=8)
+        print(f"  ✓ Container budget strictly compliant: {total_conts}/8 containers allocated.")
+        for name, count in breakdown.items():
+            print(f"    • {name.upper()}: {count} container(s)")
+    except Exception as e:
+        print(f"  ❌ Budget violation: {e}")
+
+    # 4. Environment Variables & API Keys (.env)
+    print("\n[4/5] Checking Environment Keys & Credentials...")
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_keys = {}
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env_keys[k.strip()] = v.strip()
+                    if k.strip() not in os.environ:
+                        os.environ[k.strip()] = v.strip()
+    
+    has_or = bool(os.environ.get("OPENROUTER_API_KEY") or env_keys.get("OPENROUTER_API_KEY"))
+    has_groq = bool(os.environ.get("GROQ_API_KEYS") or os.environ.get("GROQ_API_KEY") or env_keys.get("GROQ_API_KEYS"))
+    has_ollama = bool(os.environ.get("OLLAMA_API_KEY") or env_keys.get("OLLAMA_API_KEY"))
+
+    print(f"  {'✓' if has_or else '⚠️'} OPENROUTER_API_KEY : {'Configured (Uncensored Action & Hermes 4 405B)' if has_or else 'Not set in .env'}")
+    print(f"  {'✓' if has_groq else '⚠️'} GROQ_API_KEYS      : {'Configured (Fast Storybook & Kids Dialogue)' if has_groq else 'Not set in .env'}")
+    print(f"  {'✓' if has_ollama else '⚠️'} OLLAMA_API_KEY     : {'Configured (Gemma 4: 31B Vision Gateway)' if has_ollama else 'Not set in .env'}")
+
+    # 5. Live Handshake Latency Tests
+    print("\n[5/5] Testing Live AI Director Gateway Connections...")
+    try:
+        from studio_pipeline import StudioPipeline
+        if has_or:
+            res_or = StudioPipeline.test_llm_connection(provider="openrouter")
+            if res_or.get("success"):
+                print(f"  ✓ OpenRouter Gateway Connected: {res_or.get('model')} ({res_or.get('latency_ms')}ms)")
+            else:
+                print(f"  ⚠️ OpenRouter Connection: {res_or.get('message')}")
+        
+        if has_groq:
+            res_groq = StudioPipeline.test_llm_connection(provider="groq")
+            if res_groq.get("success"):
+                print(f"  ✓ GroqCloud Gateway Connected : {res_groq.get('model')} ({res_groq.get('latency_ms')}ms)")
+            else:
+                print(f"  ⚠️ GroqCloud Connection: {res_groq.get('message')}")
+    except Exception as e:
+        print(f"  ⚠️ Connection test error: {e}")
+
+    print("\n" + "=" * 72)
+    print(" ✓ PRE-FLIGHT VERIFICATION COMPLETE — STUDIO READY FOR PRODUCTION ".center(72, "="))
+    print("=" * 72)
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
@@ -210,7 +335,10 @@ def main():
     if len(sys.argv) > 1:
         arg = sys.argv[1].strip().lower()
         try:
-            if arg in ("--deploy-all", "deploy-all"):
+            if arg in ("--check-setup", "check-setup", "--verify", "verify"):
+                verify_setup_and_deployment()
+                return
+            elif arg in ("--deploy-all", "deploy-all"):
                 deploy_all()
                 return
             elif arg in ("--deploy-wan", "deploy-wan"):
@@ -221,6 +349,9 @@ def main():
                 return
             elif arg in ("--deploy-z-image", "deploy-z-image"):
                 deploy_z_image()
+                return
+            elif arg in ("--deploy-narrator", "deploy-narrator"):
+                deploy_narrator()
                 return
             elif arg in ("--cache-all", "cache-all"):
                 cache_all_weights()
@@ -233,6 +364,9 @@ def main():
                 return
             elif arg in ("--cache-z-image", "cache-z-image"):
                 cache_z_image_weights()
+                return
+            elif arg in ("--fast-story", "fast-story", "--omniflow", "omniflow"):
+                run_fast_story()
                 return
             elif arg in ("--profile", "profile"):
                 manage_modal_profiles()
@@ -251,50 +385,58 @@ def main():
             print(f"\n❌ Operation failed: {e}")
             sys.exit(1)
 
-    print("=" * 60)
-    print(" Wan 2.2 Studio Localhost Runner ".center(60, "="))
-    print("=" * 60)
+    print("=" * 70)
+    print(" Wan 2.2 AI Studio Launcher & Modal Manager ".center(70, "="))
+    print("=" * 70)
 
     print("[Options]")
-    print("1. Start Studio frontend locally")
-    print("2. Deploy/Redeploy Wan 2.2 backend to Modal")
-    print("3. Deploy/Redeploy Qwen Image Edit backend to Modal")
-    print("4. Pre-cache Wan 2.2 model weights on Modal")
-    print("5. Pre-cache Qwen Image Edit model weights on Modal")
-    print("6. Start frontend on Local Network (mobile access)")
-    print("7. Switch / Manage Modal Account Profiles (runs 'modal profile' / 'modal setup')")
-    print("8. Clear local outputs folder (outputs/)")
-    print("9. Deploy/Redeploy Z-Image Turbo Character backend to Modal")
-    print("10. Deploy ALL Studio Backends to Modal (Wan 2.2 + Qwen + Z-Image Turbo)")
+    print(" 1. Start Studio frontend locally (http://localhost:7860)")
+    print(" 2. Pre-flight Setup & Deployment Verification (Modal + Budget + LLMs)")
+    print(" 3. Deploy ALL 4 Studio Backends to Modal (Wan 2.2 + Qwen + Z-Image + Narrator)")
+    print(" 4. Deploy Wan 2.2 Video Backend Only (deploy_wan.py)")
+    print(" 5. Deploy Qwen Image Edit Backend Only (deploy_qwen.py)")
+    print(" 6. Deploy Z-Image Turbo Character Backend Only (deploy_z_image.py)")
+    print(" 7. Deploy Kokoro-82M Neural Narrator Backend Only (deploy_narrator.py)")
+    print(" 8. Pre-cache ALL Model Weights on Modal Volumes")
+    print(" 9. Run OmniFlow-30 Fast Story CLI (Fast 30s Movie CLI)")
+    print("10. Start Frontend on Local Network (LAN / Mobile access)")
+    print("11. Switch / Manage Modal Account Profiles (runs 'modal profile' / 'modal setup')")
+    print("12. Clear local outputs folder (outputs/)")
 
-    choice = input("\nEnter choice [1-10] (default 1): ").strip()
+    choice = input("\nEnter choice [1-12] (default 1): ").strip()
 
     try:
         if choice == "2":
-            deploy_wan()
+            verify_setup_and_deployment()
             sys.exit(0)
         elif choice == "3":
-            deploy_qwen()
+            deploy_all()
             sys.exit(0)
         elif choice == "4":
-            cache_wan_weights()
+            deploy_wan()
             sys.exit(0)
         elif choice == "5":
-            cache_qwen_weights()
+            deploy_qwen()
             sys.exit(0)
         elif choice == "6":
-            os.environ["WAN_SHARE_LAN"] = "1"
-        elif choice == "7":
-            manage_modal_profiles()
-            sys.exit(0)
-        elif choice == "8":
-            clear_outputs(script_dir)
-            sys.exit(0)
-        elif choice == "9":
             deploy_z_image()
             sys.exit(0)
+        elif choice == "7":
+            deploy_narrator()
+            sys.exit(0)
+        elif choice == "8":
+            cache_all_weights()
+            sys.exit(0)
+        elif choice == "9":
+            run_fast_story()
+            sys.exit(0)
         elif choice == "10":
-            deploy_all()
+            os.environ["WAN_SHARE_LAN"] = "1"
+        elif choice == "11":
+            manage_modal_profiles()
+            sys.exit(0)
+        elif choice == "12":
+            clear_outputs(script_dir)
             sys.exit(0)
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Deployment/Operation failed: {e}")

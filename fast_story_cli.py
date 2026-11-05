@@ -73,8 +73,10 @@ def calculate_dynamic_eta(
 
     # Stage duration benchmarks (derived from empirical cloud telemetry)
     # 1. Screenplay generation
-    p_clean = str(provider or "groq").lower().strip()
-    if p_clean == "groq":
+    p_clean = str(provider or "openrouter").lower().strip()
+    if p_clean == "openrouter":
+        t_screenplay = 4.0
+    elif p_clean == "groq":
         t_screenplay = 5.0
     elif p_clean == "local_ollama":
         t_screenplay = 15.0
@@ -376,7 +378,7 @@ Examples:
     parser.add_argument("premise", nargs="?", default="", help="Story premise / narrative premise")
     parser.add_argument("--duration", type=float, default=30.0, help="Target total movie duration in seconds (default: 30.0s)")
     parser.add_argument("--style", default="2D vibrant cartoon animation, Studio Ghibli watercolor aesthetic, warm lighting, 4K", help="Visual art style aesthetic")
-    parser.add_argument("--provider", default="groq", choices=["groq", "local_ollama", "ollama_cloud"], help="AI Director LLM provider (default: groq)")
+    parser.add_argument("--provider", default="openrouter", choices=["openrouter", "groq", "local_ollama", "ollama_cloud"], help="AI Director LLM provider (default: openrouter)")
     parser.add_argument("--model", default=None, help="LLM model name override")
     parser.add_argument("--api-key", default=None, help="API key for Groq or Ollama Cloud")
     parser.add_argument("--lora", default="", help="Path or HuggingFace repo of Wan 2.2 LoRA weights")
